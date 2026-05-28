@@ -28,6 +28,7 @@
 //! re-serialize.
 
 pub mod error;
+pub mod dict_builder;
 mod read;
 mod write;
 
@@ -341,5 +342,203 @@ impl BntxFile {
             ((tex.channel_swizzle >> 16) & 0xFF) as u8,
             ((tex.channel_swizzle >> 24) & 0xFF) as u8,
         ]
+    }
+
+    /// Append a new texture to the BNTX. The caller supplies a fully-
+    /// configured `AppendTextureSpec` (typically built by the texpipe
+    /// module from a PNG). After the call, `self.textures.last()` is
+    /// the new texture. The dict trie, relocation table struct counts,
+    /// and BRTD data block are all updated automatically.
+    pub fn append_texture(&mut self, name: String, spec: AppendTextureSpec) -> Result<(), BntxError> {
+        if name.is_empty() {
+            return Err(BntxError::Format("texture name cannot be empty".into()));
+        }
+        if self.strings.iter().any(|s| s == &name) {
+            return Err(BntxError::Format(format!(
+                "string '{name}' already exists in _STR"
+            )));
+        }
+
+        // Pad BRTD data to the new texture's alignment boundary.
+        let align = spec.align.max(1) as usize;
+        let pad_to = (self.brtd.data.len() + align - 1) & !(align - 1);
+        let pad_bytes = pad_to - self.brtd.data.len();
+        self.brtd.data.extend(std::iter::repeat(0u8).take(pad_bytes));
+        let data_offset_in_brtd = self.brtd.data.len();
+        self.brtd.data.extend_from_slice(&spec.swizzled_data);
+
+        // Append the name to the string pool.
+        let name_string_index = self.strings.len() as u32;
+        self.strings.push(name);
+
+        // Construct the Texture metadata.
+        let texture = Texture {
+            name_string_index,
+            flags: spec.flags,
+            dim: spec.dim,
+            tile_mode: spec.tile_mode,
+            swizzle: spec.swizzle,
+            mips_count: spec.mips_count,
+            num_multi_sample: spec.num_multi_sample,
+            format: spec.format,
+            unk2: spec.unk2,
+            width: spec.width,
+            height: spec.height,
+            depth: spec.depth,
+            array_len: spec.array_len,
+            size_range: spec.size_range,
+            unk4: spec.unk4,
+            image_size: spec.swizzled_data.len() as u32,
+            align: spec.align,
+            channel_swizzle: spec.channel_swizzle,
+            ty: spec.ty,
+            parent_addr: spec.parent_addr,
+            data_offset_in_brtd,
+        };
+        self.textures.push(texture);
+
+        // Rebuild the dict trie over all texture names (skipping idx 0 =
+        // empty sentinel and idx 1 = container name).
+        self.rebuild_dict();
+
+        // Update the relocation table to reflect the new BRTI block and
+        // texture-data slot.
+        self.update_reloc_table_for_new_texture();
+
+        Ok(())
+    }
+
+    /// Rebuild `self.dict` from the current `self.strings` list. Texture
+    /// names live at `strings[2..]` (idx 0 = empty, idx 1 = container).
+    pub fn rebuild_dict(&mut self) {
+        let mut trie = crate::bntx::dict_builder::Trie::new();
+        for (idx, s) in self.strings.iter().enumerate().skip(2) {
+            trie.insert(s.as_bytes(), idx as u32);
+        }
+        let entries = trie.to_entries();
+        self.dict = DictSection {
+            count: (entries.len() - 1) as u32, // root excluded from count
+            entries,
+        };
+    }
+
+    /// After appending a texture, bump the relocation table's per-pattern
+    /// struct counts and section sizes. This keeps the table in sync with
+    /// the new file layout.
+    fn update_reloc_table_for_new_texture(&mut self) {
+        // Section 0 covers the BNTX/NX headers, info ptrs array, _STR,
+        // _DIC, and all BRTIs. Adding a texture adds:
+        //   * 1 BRTI block (= 0x2A8 bytes)
+        //   * 1 dict entry (= 0x10 bytes)
+        //   * 1 string entry (variable bytes — handled by writer)
+        //   * 1 texture-info pointer (= 8 bytes)
+        // The writer recomputes the absolute layout, so the section
+        // sizes here just need to GROW. We bump section 0 by the BRTI
+        // block stride only; the dict/string growth is small and the
+        // writer's placement logic handles those edges.
+        const BRTI_BLOCK_STRIDE: u32 = 0x2A8;
+        if let Some(s0) = self.relocation_table.sections.first_mut() {
+            s0.size += BRTI_BLOCK_STRIDE;
+        }
+        // Section 1 covers BRTD. Bump by the new texture's image size +
+        // the alignment padding we inserted.
+        if let Some(last) = self.textures.last() {
+            let new_data_bytes = (self.brtd.data.len() - last.data_offset_in_brtd
+                + (last.data_offset_in_brtd
+                    - self.textures.get(self.textures.len() - 2)
+                        .map(|t| t.data_offset_in_brtd + t.image_size as usize)
+                        .unwrap_or(0))) as u32;
+            if let Some(s1) = self.relocation_table.sections.get_mut(1) {
+                s1.size += new_data_bytes;
+            }
+        }
+
+        // Update entry struct_counts. The pattern-specific entries were
+        // identified by reverse-engineering an existing BNTX:
+        //   entry 2 = texture-info pointer array (1 ptr per texture)
+        //   entry 3 = dict name_ptrs (1 per (count+1) entries)
+        //   entry 4 = BRTI fields at +0x60 (3 ptrs)
+        //   entry 5 = BRTI fields at +0x80 (2 ptrs)
+        //   entry 7 = BRTI texture-data indirect slot (1 ptr)
+        // We bump every entry whose `struct_count` already equals the
+        // pre-add texture count or texture+1 (for the dict).
+        let textures_now = self.textures.len() as u16;
+        for entry in self.relocation_table.entries.iter_mut() {
+            if entry.struct_count == textures_now - 1 {
+                entry.struct_count = textures_now;
+            } else if entry.struct_count == textures_now {
+                // dict entry (already incremented by 1 due to root)
+                entry.struct_count = textures_now + 1;
+            }
+        }
+    }
+}
+
+/// Caller-supplied parameters for `BntxFile::append_texture`.
+#[derive(Debug, Clone)]
+pub struct AppendTextureSpec {
+    pub format: TextureFormat,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub mips_count: u16,
+    pub array_len: u32,
+    /// Tegra block-height-log2 (the swizzler picked this).
+    pub size_range: i32,
+    /// 4-byte channel-swizzle pack.
+    pub channel_swizzle: u32,
+    pub align: u32,
+    pub flags: u8,
+    pub dim: u8,
+    pub tile_mode: u16,
+    pub swizzle: u16,
+    pub num_multi_sample: u32,
+    pub unk2: u32,
+    pub unk4: [u32; 6],
+    pub ty: u32,
+    pub parent_addr: u64,
+    pub swizzled_data: Vec<u8>,
+}
+
+impl AppendTextureSpec {
+    /// Build a sensible default spec for a 2D BC7 texture. Caller should
+    /// fill in `width`, `height`, `swizzled_data`, `size_range`, and
+    /// override anything else.
+    pub fn bc7_2d_default(
+        width: u32,
+        height: u32,
+        size_range: i32,
+        swizzled_data: Vec<u8>,
+        srgb: bool,
+    ) -> Self {
+        Self {
+            format: if srgb {
+                TextureFormat::Bc7UnormSrgb
+            } else {
+                TextureFormat::Bc7Unorm
+            },
+            width,
+            height,
+            depth: 1,
+            mips_count: 1,
+            array_len: 1,
+            size_range,
+            // Channel swizzle: R=2, G=3, B=4, A=5 (standard mapping).
+            channel_swizzle: 0x05_04_03_02,
+            // 0x200 = 512 bytes (sufficient for BC7 textures up to ~256x256).
+            // Larger textures may need a larger alignment; callers can
+            // override.
+            align: 0x200,
+            flags: 1,
+            dim: 2, // 2D
+            tile_mode: 0,
+            swizzle: 0,
+            num_multi_sample: 1,
+            unk2: 32,
+            unk4: [65543, 0, 0, 0, 0, 0],
+            ty: 1,
+            parent_addr: 32,
+            swizzled_data,
+        }
     }
 }

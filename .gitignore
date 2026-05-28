@@ -20,3 +20,9 @@ local-assets/
 
 # Allow the README assets if any are added later
 !docs/assets/*.png
+
+# Local-only debug scripts (used during BNTX format reverse-engineering)
+docs/bntx-explore*.ps1
+docs/bntx-str-walk.ps1
+docs/msg-*.txt
+docs/commit-message.txt

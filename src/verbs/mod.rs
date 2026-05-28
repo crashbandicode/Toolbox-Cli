@@ -16,7 +16,11 @@ mod bflyt_inspect;
 mod bflyt_mat1_diff;
 mod bflyt_roundtrip_test;
 mod bflyt_section_diff;
+mod bntx_dict_test;
+mod bntx_import_png;
 mod bntx_inspect;
+mod bntx_layout_dump;
+mod bntx_rlt_dump;
 mod bntx_roundtrip_test;
 mod layout_validate_manifest;
 mod mat_rename;
@@ -67,9 +71,24 @@ pub enum Verb {
     /// Print a structured snapshot of a BNTX. Use --json for tool consumption.
     BntxInspect(bntx_inspect::Args),
 
+    /// Encode a PNG to BC7 + Tegra swizzle, then append it as a new
+    /// named texture in the BNTX. Writes the modified file back.
+    BntxImportPng(bntx_import_png::Args),
+
     /// Internal: read a BNTX, write it back, and report whether the
     /// round-trip is byte-identical.
     BntxRoundtripTest(bntx_roundtrip_test::Args),
+
+    /// Internal: rebuild the BNTX `_DIC` Patricia trie for the file's
+    /// existing strings and verify lookups still resolve correctly.
+    BntxDictTest(bntx_dict_test::Args),
+
+    /// Internal: dump the BNTX `_RLT` relocation table contents.
+    BntxRltDump(bntx_rlt_dump::Args),
+
+    /// Internal: dump per-texture data layout (offsets, alignment) within
+    /// the BRTD block.
+    BntxLayoutDump(bntx_layout_dump::Args),
 
     /// Validate that an unpacked layout directory matches an SGPO skin
     /// manifest. Exits 0 on full match, 1 on any element mismatch.
@@ -94,7 +113,11 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::PaneSet(args) => Ok(pane_set::run(args)?),
         Verb::PaneClone(args) => Ok(pane_clone::run(args)?),
         Verb::BntxInspect(args) => Ok(bntx_inspect::run(args)?),
+        Verb::BntxImportPng(args) => Ok(bntx_import_png::run(args)?),
         Verb::BntxRoundtripTest(args) => Ok(bntx_roundtrip_test::run(args)?),
+        Verb::BntxDictTest(args) => Ok(bntx_dict_test::run(args)?),
+        Verb::BntxRltDump(args) => Ok(bntx_rlt_dump::run(args)?),
+        Verb::BntxLayoutDump(args) => Ok(bntx_layout_dump::run(args)?),
         Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),
         Verb::SarcUnpack(args) => Ok(sarc_unpack::run(args)?),
         Verb::SarcPack(args) => Ok(sarc_pack::run(args)?),

@@ -51,6 +51,16 @@ pub fn write_bntx(b: &BntxFile) -> Result<Vec<u8>, Error> {
     let str_layout = compute_str_layout(b, str_section_off);
     let dict_section_off = str_layout.end;
 
+    // BNTX header `filename_offset` points to the BODY of the container
+    // name string (i.e., past the u16 length field — different from dict
+    // and BRTI name pointers, which point to the BntxStr start). The
+    // container name lives at strings[1] in our model.
+    let filename_offset = if b.strings.len() > 1 {
+        (str_layout.string_offsets[1] + 2) as u32
+    } else {
+        0
+    };
+
     // Dict size: 4 magic + 4 count + (count+1)*16 entries
     let dict_size = 8 + (b.dict.entries.len() * 16);
     let dict_end = dict_section_off + dict_size;
@@ -95,7 +105,14 @@ pub fn write_bntx(b: &BntxFile) -> Result<Vec<u8>, Error> {
     let mut out = vec![0u8; file_size];
 
     // BNTX header.
-    write_bntx_header(&mut out, b, file_size, reloc_table_off)?;
+    write_bntx_header(
+        &mut out,
+        b,
+        file_size,
+        reloc_table_off,
+        str_section_off,
+        filename_offset,
+    )?;
 
     // NX header.
     write_nx_header(&mut out, b, info_ptrs_off, brtd_section_off, dict_section_off)?;
@@ -160,6 +177,8 @@ fn write_bntx_header(
     b: &BntxFile,
     file_size: usize,
     reloc_table_off: usize,
+    str_section_off: usize,
+    filename_offset: u32,
 ) -> Result<(), Error> {
     let mut c = std::io::Cursor::new(&mut out[..0x20]);
     c.write_all(b"BNTX")?;
@@ -168,9 +187,12 @@ fn write_bntx_header(
     c.write_u16::<LittleEndian>(0xFEFF)?;
     c.write_u8(b.header.alignment_shift)?;
     c.write_u8(b.header.target_address_size)?;
-    c.write_u32::<LittleEndian>(b.header.filename_offset)?;
+    // filename_offset and first_block_offset are recomputed because the
+    // texture-info pointer array (which lives between the memory pool
+    // and `_STR`) changes size when textures are added/removed.
+    c.write_u32::<LittleEndian>(filename_offset)?;
     c.write_u16::<LittleEndian>(b.header.flag)?;
-    c.write_u16::<LittleEndian>(b.header.first_block_offset)?;
+    c.write_u16::<LittleEndian>(str_section_off as u16)?;
     c.write_u32::<LittleEndian>(reloc_table_off as u32)?;
     c.write_u32::<LittleEndian>(file_size as u32)?;
     Ok(())
