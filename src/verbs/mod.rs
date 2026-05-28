@@ -12,6 +12,7 @@
 mod bflyt_inspect;
 mod bflyt_roundtrip_test;
 mod bntx_inspect;
+mod layout_validate_manifest;
 mod sarc_pack;
 mod sarc_unpack;
 
@@ -33,6 +34,10 @@ pub enum Verb {
     /// Print a structured snapshot of a BNTX. Use --json for tool consumption.
     BntxInspect(bntx_inspect::Args),
 
+    /// Validate that an unpacked layout directory matches an SGPO skin
+    /// manifest. Exits 0 on full match, 1 on any element mismatch.
+    LayoutValidateManifest(layout_validate_manifest::Args),
+
     /// Extract a SARC archive to a directory tree.
     SarcUnpack(sarc_unpack::Args),
 
@@ -45,6 +50,7 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::BflytInspect(args) => Ok(bflyt_inspect::run(args)?),
         Verb::BflytRoundtripTest(args) => Ok(bflyt_roundtrip_test::run(args)?),
         Verb::BntxInspect(args) => Ok(bntx_inspect::run(args)?),
+        Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),
         Verb::SarcUnpack(args) => Ok(sarc_unpack::run(args)?),
         Verb::SarcPack(args) => Ok(sarc_pack::run(args)?),
     }
