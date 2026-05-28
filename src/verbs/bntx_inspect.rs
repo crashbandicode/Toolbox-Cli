@@ -26,23 +26,34 @@ pub fn run(args: Args) -> Result<ExitCode> {
         .with_context(|| format!("reading {}", args.input.display()))?;
     let bntx = read_bntx(&bytes).map_err(|e| anyhow::anyhow!("{}", e))?;
 
+    let channel_name = |b: u8| match b {
+        0 => "Zero",
+        1 => "One",
+        2 => "Red",
+        3 => "Green",
+        4 => "Blue",
+        5 => "Alpha",
+        _ => "?",
+    };
+
     let textures: Vec<Value> = bntx
         .textures
         .iter()
         .map(|t| {
+            let cs = bntx.channel_swizzle(t);
             json!({
-                "name": t.name,
+                "name": t.name(&bntx),
                 "width": t.width,
                 "height": t.height,
                 "depth": t.depth,
-                "mip_count": t.mip_count,
-                "array_count": t.array_count,
+                "mip_count": t.mips_count,
+                "array_count": t.array_len,
                 "format": t.format.name(),
                 "channels": [
-                    t.channels[0].name(),
-                    t.channels[1].name(),
-                    t.channels[2].name(),
-                    t.channels[3].name(),
+                    channel_name(cs[0]),
+                    channel_name(cs[1]),
+                    channel_name(cs[2]),
+                    channel_name(cs[3]),
                 ],
                 "has_alpha": t.format.has_alpha(),
             })
@@ -73,11 +84,11 @@ pub fn run(args: Args) -> Result<ExitCode> {
         for t in &bntx.textures {
             println!(
                 "  {:<32}  {}x{}  {}  mips={}  alpha={}",
-                t.name,
+                t.name(&bntx),
                 t.width,
                 t.height,
                 t.format.name(),
-                t.mip_count,
+                t.mips_count,
                 t.format.has_alpha()
             );
         }

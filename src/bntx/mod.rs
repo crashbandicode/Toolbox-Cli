@@ -1,74 +1,205 @@
 //! Pure-Rust BNTX (Nintendo Switch texture container) parser/writer.
 //!
-//! BNTX is a relatively simple "header + sections" container; we model
-//! enough of it to read existing files, edit the texture list (add /
-//! replace / remove / rename), and write back. Texture pixel data is
-//! stored swizzled for Tegra X1; encoding/decoding is handled by the
-//! `texpipe` module on top of this.
+//! Targets BNTX version 0x00040000 as shipped in modern Switch titles
+//! (Smash Ultimate, Mario Kart 8 DX, etc.). The on-disk format is:
+//!
+//! ```text
+//! 0x0000  BNTX header (32 bytes)
+//! 0x0020  NX   header (40 bytes) -- count, info_ptrs_off, data_blk_ptr,
+//!                                   dict_off, dict_size_field
+//! 0x0048  Memory pool (0x150 bytes of zeros)
+//! 0x0198  Texture info pointer array (count * u64 -- each points to a BRTI)
+//!         _STR section: u32 magic, u32 unk1, u64 block_size,
+//!                       u32 str_count, [BntxStr: u16 len + bytes + null + pad-to-4]
+//!         _DIC section: u32 magic, u32 count,
+//!                       (count+1) * { u32 ref_bit, u16 left, u16 right, u64 name_ptr }
+//!         BRTI sections: each 0xA0 header + 0x208 trailing block
+//!                        (0x100 + 0x100 zeros + 8-byte indirect texture_data ptr)
+//!         BRTD section: u32 magic, u32 0x00, u64 block_size, then concatenated
+//!                       texture data
+//!         _RLT relocation table: u32 magic, u32 self_offset, u32 section_count,
+//!                                u32 padding, sections (24 bytes each),
+//!                                entries (8 bytes each)
+//! ```
+//!
+//! Reading captures the full structure so the writer can reproduce a
+//! byte-identical file. Modifications (add texture, replace data) are
+//! supported by edit operations on the parsed state followed by a full
+//! re-serialize.
 
 pub mod error;
 mod read;
 mod write;
 
-pub use read::read_bntx;
-// `error::Error as BntxError` and `write::write_bntx` are re-exported but
-// not currently used by any consumer; suppress the unused-import warnings.
-#[allow(unused_imports)]
 pub use error::Error as BntxError;
+pub use read::read_bntx;
 #[allow(unused_imports)]
 pub use write::write_bntx;
 
-/// Top-level in-memory model.
+// ============================================================
+// Top-level parsed BNTX
+// ============================================================
+
+/// A fully-parsed BNTX file. Every byte is captured (either as a
+/// structured field or as opaque preserved bytes) so the writer can
+/// reproduce byte-identical output.
 #[derive(Debug, Clone)]
-pub struct BNTX {
-    /// Container name (the file's "BNTX" name string, usually equal to the
-    /// filename without extension).
+pub struct BntxFile {
+    /// File-level header (32 bytes on disk).
+    pub header: BntxHeader,
+
+    /// NX header (40 bytes on disk).
+    pub nx_header: NxHeader,
+
+    /// Container name (the "BNTX file name" — usually the basename).
     pub name: String,
+
+    /// All strings used in the file: the container name and one entry
+    /// per texture, in the order they appear in `_STR`. Index 0 is
+    /// always the empty string (BNTX's "null" sentinel).
+    pub strings: Vec<String>,
+
+    /// Patricia-trie dictionary keying strings 1..=N (each indexes into
+    /// `strings`). Preserved verbatim because rebuilding the trie
+    /// requires understanding Nintendo's hash function. For round-trip
+    /// we just emit it back; for adding textures we'll need to extend it.
+    pub dict: DictSection,
+
+    /// Per-texture metadata. Pixel data lives separately in `brtd` so
+    /// the data block can be reconstructed atomically.
     pub textures: Vec<Texture>,
+
+    /// BRTD block: header + concatenated texture data bytes.
+    pub brtd: BrtdSection,
+
+    /// `_RLT` relocation table — every pointer in the file is tracked.
+    pub relocation_table: RelocationTable,
 }
 
-impl BNTX {
-    pub fn empty(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            textures: Vec::new(),
-        }
-    }
-    pub fn texture_index(&self, name: &str) -> Option<usize> {
-        self.textures.iter().position(|t| t.name == name)
-    }
-    pub fn remove_texture(&mut self, name: &str) -> bool {
-        if let Some(i) = self.texture_index(name) {
-            self.textures.remove(i);
-            true
-        } else {
-            false
-        }
-    }
+/// BNTX file header (offsets are within the file).
+#[derive(Debug, Clone)]
+pub struct BntxHeader {
+    /// Always `0x00040000` for the files we target.
+    pub version: u32,
+    /// `1u8 << alignment_shift` is the texture-data alignment.
+    pub alignment_shift: u8,
+    /// `64` for 64-bit BNTX (only mode we support).
+    pub target_address_size: u8,
+    pub flag: u16,
+    /// Offset of the first block (typically `_STR`).
+    pub first_block_offset: u16,
+    pub filename_offset: u32,
 }
+
+/// NX header (40 bytes after the BNTX header).
+#[derive(Debug, Clone)]
+pub struct NxHeader {
+    /// Field at +0x40 in the original; semantics aren't fully nailed
+    /// down. We capture and emit it verbatim.
+    pub dict_size_field: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DictSection {
+    /// `count` field at +0x04. `entries.len()` is `count + 1` (root sentinel).
+    pub count: u32,
+    pub entries: Vec<DictEntry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DictEntry {
+    pub ref_bit: u32,
+    pub left: u16,
+    pub right: u16,
+    /// Index into `BntxFile.strings`. Stored as an index for portability;
+    /// the on-disk pointer is computed at write time from the layout.
+    pub string_index: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct BrtdSection {
+    /// Block size as recorded in the BRTD header (u64). Recomputed on
+    /// write but cached for sanity checks.
+    pub declared_block_size: u64,
+    /// Concatenated raw texture data, laid out the same way the file
+    /// has it. Each `Texture.data_offset_in_brtd` indexes into this.
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelocationTable {
+    pub sections: Vec<RltSection>,
+    pub entries: Vec<RltEntry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RltSection {
+    pub pointer: u64,
+    pub position: u32,
+    pub size: u32,
+    pub index: u32,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RltEntry {
+    pub position: u32,
+    pub struct_count: u16,
+    pub offset_count: u8,
+    pub padding_count: u8,
+}
+
+// ============================================================
+// Texture model
+// ============================================================
 
 #[derive(Debug, Clone)]
 pub struct Texture {
-    pub name: String,
+    /// Index into `BntxFile.strings` for the texture name.
+    pub name_string_index: u32,
+
+    pub flags: u8,
+    pub dim: u8,
+    pub tile_mode: u16,
+    pub swizzle: u16,
+    pub mips_count: u16,
+    pub num_multi_sample: u32,
+    pub format: TextureFormat,
+    pub unk2: u32,
     pub width: u32,
     pub height: u32,
     pub depth: u32,
-    pub mip_count: u32,
-    pub array_count: u32,
-    pub format: TextureFormat,
-    pub channels: [Channel; 4],
-    pub surface_dim: SurfaceDim,
-    pub tile_mode: u8,
-    pub texture_layout: u32,
-    pub texture_layout2: u32,
-    pub block_height_log2: u32,
-    /// Swizzled (Tegra X1) image data, ready to write out. The texpipe
-    /// module produces this from a PNG via BC7 + tegra_swizzle.
-    pub data: Vec<u8>,
-    /// Per-mip metadata (offsets within `data`, mip dimensions). Computed
-    /// on read; recomputed on write so callers don't have to maintain it.
-    pub mip_offsets: Vec<u64>,
+    pub array_len: u32,
+    /// `block_height_log2` / "size_range" — the Tegra block-linear height
+    /// shift used by `tegra_swizzle`.
+    pub size_range: i32,
+    pub unk4: [u32; 6],
+    pub image_size: u32,
+    pub align: u32,
+    pub channel_swizzle: u32,
+    pub ty: u32,
+    pub parent_addr: u64,
+
+    /// Offset of this texture's data within `BrtdSection.data`. Stored so
+    /// we can locate the pixel bytes after parsing.
+    pub data_offset_in_brtd: usize,
 }
+
+impl Texture {
+    /// Convenience: pixel data slice from a parent `BntxFile.brtd`.
+    pub fn pixel_data<'a>(&self, brtd: &'a BrtdSection) -> &'a [u8] {
+        let end = self.data_offset_in_brtd + self.image_size as usize;
+        &brtd.data[self.data_offset_in_brtd..end]
+    }
+
+    pub fn name<'a>(&self, file: &'a BntxFile) -> &'a str {
+        &file.strings[self.name_string_index as usize]
+    }
+}
+
+// ============================================================
+// Surface format enum
+// ============================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextureFormat {
@@ -91,10 +222,6 @@ pub enum TextureFormat {
 }
 
 impl TextureFormat {
-    /// BNTX `SurfaceFormat` 32-bit field. Values from
-    /// `Syroot.NintenTools.NSW.Bntx.GFX.SurfaceFormat`. Each format gets a
-    /// 16-bit "type" code in the high half, and a "channel format" code in
-    /// the low half (0x01 = UNORM, 0x06 = SRGB, 0x02 = SNORM, etc.).
     pub fn to_surface_format(self) -> u32 {
         match self {
             TextureFormat::Bc1Unorm => 0x1A01,
@@ -157,7 +284,6 @@ impl TextureFormat {
         }
     }
 
-    /// Whether the format encodes alpha. Used by `bntx-inspect --json`.
     pub fn has_alpha(self) -> bool {
         !matches!(
             self,
@@ -194,32 +320,26 @@ impl TextureFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Channel {
-    Zero,
-    One,
-    Red,
-    Green,
-    Blue,
-    Alpha,
-}
+// ============================================================
+// Helpers used by the consumer (CLI verbs).
+// ============================================================
 
-impl Channel {
-    pub fn name(self) -> &'static str {
-        match self {
-            Channel::Zero => "Zero",
-            Channel::One => "One",
-            Channel::Red => "Red",
-            Channel::Green => "Green",
-            Channel::Blue => "Blue",
-            Channel::Alpha => "Alpha",
-        }
+impl BntxFile {
+    /// Find a texture by exact name match.
+    pub fn texture_index_by_name(&self, name: &str) -> Option<usize> {
+        self.textures
+            .iter()
+            .position(|t| self.strings.get(t.name_string_index as usize).map(String::as_str) == Some(name))
+    }
+
+    /// Look up the channel-swizzle bytes for a texture (4 entries: R,G,B,A
+    /// channels).
+    pub fn channel_swizzle(&self, tex: &Texture) -> [u8; 4] {
+        [
+            (tex.channel_swizzle & 0xFF) as u8,
+            ((tex.channel_swizzle >> 8) & 0xFF) as u8,
+            ((tex.channel_swizzle >> 16) & 0xFF) as u8,
+            ((tex.channel_swizzle >> 24) & 0xFF) as u8,
+        ]
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SurfaceDim {
-    Dim2D,
-    DimCube,
-}
-

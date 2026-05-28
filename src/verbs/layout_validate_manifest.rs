@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::bflyt::{read_bflyt, BasePane, PaneKind, BFLYT};
-use crate::bntx::read_bntx;
+use crate::bntx::{read_bntx, BntxFile};
 use crate::manifest::{SkinElement, SkinManifest};
 
 #[derive(Parser, Debug)]
@@ -132,7 +132,7 @@ fn validate_element(
     el: &SkinElement,
     manifest: &SkinManifest,
     bflyt: &BFLYT,
-    bntx: &crate::bntx::BNTX,
+    bntx: &BntxFile,
     strict_dimensions: bool,
 ) -> ElementValidation {
     let mut failures = Vec::new();
@@ -229,7 +229,11 @@ fn validate_element(
     }
 
     // --- BNTX has the texture; optional dimension check ---
-    match bntx.textures.iter().find(|t| t.name == expected_tex) {
+    match bntx
+        .textures
+        .iter()
+        .find(|t| t.name(bntx) == expected_tex)
+    {
         None => failures.push(format!("texture '{}' not in BNTX", expected_tex)),
         Some(t) if strict_dimensions
             && (t.width != el.width as u32 || t.height != el.height as u32) =>

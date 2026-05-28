@@ -17,6 +17,7 @@ mod bflyt_mat1_diff;
 mod bflyt_roundtrip_test;
 mod bflyt_section_diff;
 mod bntx_inspect;
+mod bntx_roundtrip_test;
 mod layout_validate_manifest;
 mod mat_rename;
 mod pane_clone;
@@ -66,6 +67,10 @@ pub enum Verb {
     /// Print a structured snapshot of a BNTX. Use --json for tool consumption.
     BntxInspect(bntx_inspect::Args),
 
+    /// Internal: read a BNTX, write it back, and report whether the
+    /// round-trip is byte-identical.
+    BntxRoundtripTest(bntx_roundtrip_test::Args),
+
     /// Validate that an unpacked layout directory matches an SGPO skin
     /// manifest. Exits 0 on full match, 1 on any element mismatch.
     LayoutValidateManifest(layout_validate_manifest::Args),
@@ -89,6 +94,7 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::PaneSet(args) => Ok(pane_set::run(args)?),
         Verb::PaneClone(args) => Ok(pane_clone::run(args)?),
         Verb::BntxInspect(args) => Ok(bntx_inspect::run(args)?),
+        Verb::BntxRoundtripTest(args) => Ok(bntx_roundtrip_test::run(args)?),
         Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),
         Verb::SarcUnpack(args) => Ok(sarc_unpack::run(args)?),
         Verb::SarcPack(args) => Ok(sarc_pack::run(args)?),

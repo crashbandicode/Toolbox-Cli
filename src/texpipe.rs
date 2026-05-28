@@ -10,7 +10,7 @@
 
 use anyhow::{anyhow, Result};
 
-pub fn import_png_to_bntx(_bntx: &mut crate::bntx::BNTX, _image_path: &str, _texture_name: &str)
+pub fn import_png_to_bntx(_bntx: &mut crate::bntx::BntxFile, _image_path: &str, _texture_name: &str)
     -> Result<()>
 {
     Err(anyhow!(
