@@ -63,6 +63,7 @@ pub fn read_bflyt(data: &[u8]) -> Result<BFLYT, BflytError> {
         root_pane: None,
         root_group: None,
         user_data: None,
+        control_data: None,
     };
 
     // Pane parsing uses a flat arena keyed by index, mirroring the C#
@@ -174,11 +175,14 @@ pub fn read_bflyt(data: &[u8]) -> Result<BFLYT, BflytError> {
                 }
             }
 
-            // Smash Ultimate / Switch Toolbox layouts also use scr1
-            // (scissor pane) and ali1 (alignment pane). We treat them as
-            // unknown for now and capture the bytes — round-tripping them
-            // requires more spec work. Logged so SGPO can decide to
-            // ignore them if the layouts don't actually use them.
+            b"cnt1" => {
+                // Control data section (Smash Ultimate player layouts).
+                // We don't decode it yet; preserve the bytes verbatim.
+                bflyt.control_data = Some(UserData {
+                    raw: payload.to_vec(),
+                });
+            }
+
             other => return Err(BflytError::UnknownSection(*other)),
         }
 
@@ -339,37 +343,34 @@ fn read_mat1(payload: &[u8]) -> Result<Vec<Material>, BflytError> {
         offsets.push(c.read_u32::<LittleEndian>()? as usize);
     }
 
+    // Convert file-absolute offsets to payload-relative positions and
+    // compute each material's exact size from the next entry (or from the
+    // section end for the last material). We pass the size into
+    // `read_material` so it can capture trailing bytes for v9-specific
+    // sub-sections we don't decode yet.
+    let mut starts: Vec<usize> = offsets
+        .iter()
+        .map(|o| o.checked_sub(8).unwrap_or(0))
+        .collect();
     let mut materials = Vec::with_capacity(count);
-    // Material offsets in mat1 are relative to (start of file - 8). The
-    // section payload starts at the section header + 8, so within `payload`
-    // each material lives at `offset - section_header_offset_relative_to_file`.
-    // Switch Toolbox uses `pos = reader.Position; ... reader.SeekBegin(pos + offsets[i] - 8)`
-    // where `pos` is the section payload start (absolute). Within `payload`
-    // the relative position is `offset - (section_start_in_file + 8)`. We
-    // don't know the absolute file offset here, but offsets in mat1 are
-    // canonically `absolute_in_file`, so we have to walk them from the
-    // beginning of the section header — i.e., subtract 8 from the offset
-    // to get the position inside `payload`.
-    //
-    // Simpler trick: re-derive from the offsets table. The first material's
-    // payload offset within `payload` is `offsets[0] - 8`. We use that
-    // directly.
-    for off in offsets {
-        let mat_start = off
-            .checked_sub(8)
-            .ok_or_else(|| BflytError::Format("mat1 offset < 8".into()))?;
-        if mat_start + MAT_NAME_LEN > payload.len() {
-            return Err(BflytError::TruncatedSection("mat1 material".into()));
+    for i in 0..count {
+        let start = starts[i];
+        let end = starts.get(i + 1).copied().unwrap_or(payload.len());
+        if start > payload.len() || end > payload.len() || end < start {
+            return Err(BflytError::Format(format!(
+                "mat1 material[{i}] offset range [{start:x}..{end:x}] is invalid"
+            )));
         }
-        let mut mc = Cursor::new(&payload[mat_start..]);
-        let mat = read_material(&mut mc)?;
+        let _ = &mut starts; // silence unused-mut on fallthrough
+        let mut mc = Cursor::new(&payload[start..end]);
+        let mat = read_material(&mut mc, end - start)?;
         materials.push(mat);
     }
 
     Ok(materials)
 }
 
-fn read_material<R: Read + Seek>(r: &mut R) -> Result<Material, BflytError> {
+fn read_material<R: Read + Seek>(r: &mut R, expected_size: usize) -> Result<Material, BflytError> {
     let mut name_bytes = [0u8; MAT_NAME_LEN];
     r.read_exact(&mut name_bytes)?;
     let name = parse_fixed_name(&name_bytes);
@@ -466,7 +467,7 @@ fn read_material<R: Read + Seek>(r: &mut R) -> Result<Material, BflytError> {
     };
 
     let indirect_param = if has_indirect {
-        let mut raw = [0u8; 24];
+        let mut raw = [0u8; 12];
         r.read_exact(&mut raw)?;
         Some(IndirectParameter { raw })
     } else {
@@ -475,17 +476,31 @@ fn read_material<R: Read + Seek>(r: &mut R) -> Result<Material, BflytError> {
 
     let mut proj_tex_gen_params = Vec::with_capacity(proj_tex_gen_count);
     for _ in 0..proj_tex_gen_count {
-        let mut raw = [0u8; 24];
+        let mut raw = [0u8; 20];
         r.read_exact(&mut raw)?;
         proj_tex_gen_params.push(ProjectionTexGenParam { raw });
     }
 
     let font_shadow_param = if has_font_shadow {
-        let mut raw = [0u8; 28];
+        let mut raw = [0u8; 8];
         r.read_exact(&mut raw)?;
         Some(FontShadowParameter { raw })
     } else {
         None
+    };
+
+    // Capture any bytes between the end of the decoded sub-sections and
+    // the material's declared end. v9 BFLYT files include an undocumented
+    // extension after FontShadowParameter on some materials; preserving
+    // those bytes verbatim keeps round-trip byte-identical without
+    // requiring us to commit to a possibly-wrong decoding.
+    let consumed = r.stream_position()? as usize;
+    let trailing = if consumed < expected_size {
+        let mut buf = vec![0u8; expected_size - consumed];
+        r.read_exact(&mut buf)?;
+        buf
+    } else {
+        Vec::new()
     };
 
     Ok(Material {
@@ -504,6 +519,7 @@ fn read_material<R: Read + Seek>(r: &mut R) -> Result<Material, BflytError> {
         indirect_param,
         proj_tex_gen_params,
         font_shadow_param,
+        trailing,
     })
 }
 
@@ -827,16 +843,21 @@ fn read_prt1_payload<R: Read + Seek>(
 
 // ---------- groups ----------
 
+/// Group section name slot size for Switch-era BFLYT (v5+).
+const GRP1_NAME_LEN: usize = 34;
+
 fn read_group(payload: &[u8]) -> Result<Group, BflytError> {
-    if payload.len() < PANE_NAME_LEN + 4 {
+    // v5+ (Switch) layout: 34-byte name, then u16 numNodes (no padding).
+    // v<5 layout was 24-byte name + u16 numNodes + u16 padding. We're
+    // Switch-only, so v5+ is the only case.
+    if payload.len() < GRP1_NAME_LEN + 2 {
         return Err(BflytError::TruncatedSection("grp1".into()));
     }
     let mut c = Cursor::new(payload);
-    let mut name_bytes = [0u8; PANE_NAME_LEN];
+    let mut name_bytes = [0u8; GRP1_NAME_LEN];
     c.read_exact(&mut name_bytes)?;
     let name = parse_fixed_name(&name_bytes);
     let pane_count = c.read_u16::<LittleEndian>()? as usize;
-    let _pad = c.read_u16::<LittleEndian>()?;
     let mut panes = Vec::with_capacity(pane_count);
     for _ in 0..pane_count {
         let mut nb = [0u8; PANE_NAME_LEN];

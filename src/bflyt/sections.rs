@@ -105,6 +105,10 @@ pub struct BFLYT {
     pub root_pane: Option<BasePane>,
     pub root_group: Option<Group>,
     pub user_data: Option<UserData>,
+    /// `cnt1` (control data) section. Used by Smash Ultimate's player
+    /// layouts. We don't decode the structure yet; the bytes are
+    /// preserved verbatim for round-trip.
+    pub control_data: Option<UserData>,
 }
 
 #[derive(Debug, Clone)]
@@ -294,6 +298,12 @@ pub struct Material {
     pub indirect_param: Option<IndirectParameter>,
     pub proj_tex_gen_params: Vec<ProjectionTexGenParam>,
     pub font_shadow_param: Option<FontShadowParameter>,
+    /// Trailing bytes within a material that we don't yet decode. v9 BFLYT
+    /// adds an undocumented extension after the known sub-sections in some
+    /// materials (gated by an unknown flag bit). We preserve them verbatim
+    /// to keep round-trip byte-identical without committing to a decode
+    /// that may be wrong.
+    pub trailing: Vec<u8>,
 }
 
 impl Material {
@@ -306,38 +316,55 @@ impl Material {
 
     /// Recompute `flags_raw` from the in-memory sub-section counts and
     /// option presence. Called automatically on write.
+    ///
+    /// Bits we own (recomputed):
+    ///   0-1   texture-map count
+    ///   2-3   texture-transform count
+    ///   4-5   tex-coord-gen count
+    ///   6-8   tev-stage count
+    ///   9     alpha compare present
+    ///   10    blend mode present
+    ///   12    blend mode logic present
+    ///   14    indirect param present
+    ///   15-16 projection tex-gen count
+    ///   17    font shadow present
+    ///
+    /// All other bits (notably 11 = use-texture-only, 13 = alpha
+    /// interpolation, 18, and any v9-specific bits like 19 that gate
+    /// undocumented trailing data) are preserved verbatim from the
+    /// original `flags_raw`.
     pub fn rebuild_flags(&mut self) {
+        let owned_mask: u32 = 0b111
+            | (0b11 << 2)        // mtx
+            | (0b11 << 4)        // tex_coord_gen
+            | (0b111 << 6)       // tev_stage
+            | (1 << 9)           // alpha_compare
+            | (1 << 10)          // blend_mode
+            | (1 << 12)          // blend_mode_logic
+            | (1 << 14)          // indirect
+            | (0b11 << 15)       // proj_tex_gen
+            | (1 << 17);         // font_shadow
+
         let tex_count = self.texture_maps.len().min(3) as u32;
         let mtx_count = self.texture_transforms.len().min(3) as u32;
         let tex_coord_gen_count = self.tex_coord_gens.len().min(3) as u32;
         let tev_stage_count = self.tev_stages.len().min(7) as u32;
         let proj_tex_gen_count = self.proj_tex_gen_params.len().min(3) as u32;
 
-        let mut flags = 0u32;
-        flags |= tex_count & 0x3;
-        flags |= (mtx_count & 0x3) << 2;
-        flags |= (tex_coord_gen_count & 0x3) << 4;
-        flags |= (tev_stage_count & 0x7) << 6;
-        if self.alpha_compare.is_some() {
-            flags |= 1 << 9;
-        }
-        if self.blend_mode.is_some() {
-            flags |= 1 << 10;
-        }
-        if self.blend_mode_logic.is_some() {
-            flags |= 1 << 12;
-        }
-        if self.indirect_param.is_some() {
-            flags |= 1 << 14;
-        }
-        flags |= (proj_tex_gen_count & 0x3) << 15;
-        if self.font_shadow_param.is_some() {
-            flags |= 1 << 17;
-        }
-        // bits 11 (use texture only) and 18 (alpha interpolation) carry
-        // their original values from disk; preserve them.
-        let preserve_mask = (1u32 << 11) | (1u32 << 18);
-        self.flags_raw = (flags & !preserve_mask) | (self.flags_raw & preserve_mask);
+        let mut owned = 0u32;
+        owned |= tex_count & 0x3;
+        owned |= (mtx_count & 0x3) << 2;
+        owned |= (tex_coord_gen_count & 0x3) << 4;
+        owned |= (tev_stage_count & 0x7) << 6;
+        if self.alpha_compare.is_some() { owned |= 1 << 9; }
+        if self.blend_mode.is_some() { owned |= 1 << 10; }
+        if self.blend_mode_logic.is_some() { owned |= 1 << 12; }
+        if self.indirect_param.is_some() { owned |= 1 << 14; }
+        owned |= (proj_tex_gen_count & 0x3) << 15;
+        if self.font_shadow_param.is_some() { owned |= 1 << 17; }
+
+        // Keep every bit we don't own; overwrite the bits we do.
+        self.flags_raw = (self.flags_raw & !owned_mask) | (owned & owned_mask);
     }
 }
 
@@ -386,19 +413,22 @@ pub struct BlendMode {
     pub logic_op: u8,
 }
 
+/// IndirectParameter is 3 floats (rotation, scale_x, scale_y) = 12 bytes.
 #[derive(Debug, Clone, Default)]
 pub struct IndirectParameter {
-    pub raw: [u8; 24],
+    pub raw: [u8; 12],
 }
 
+/// ProjectionTexGenParam is 4 floats + 1 byte flags + 3 bytes padding = 20 bytes.
 #[derive(Debug, Clone, Default)]
 pub struct ProjectionTexGenParam {
-    pub raw: [u8; 24],
+    pub raw: [u8; 20],
 }
 
+/// FontShadowParameter is two RGBA8 colors = 8 bytes.
 #[derive(Debug, Clone, Default)]
 pub struct FontShadowParameter {
-    pub raw: [u8; 28],
+    pub raw: [u8; 8],
 }
 
 // ---------- Groups & user data ----------

@@ -11,22 +11,20 @@ is copied or linked. This project is licensed independently under the
 
 ## Status
 
-Read-side is solid. Write-side is partial and not yet exercised by the CLI.
-
 | Area | Status |
 |---|---|
-| BFLYT v8 / v9 parser | **Working** — round-trip tested against real Smash Ultimate `info_melee` (40 panes, 24 materials, 8 textures, 1 font; pane tree, materials with texture refs, all section types decoded) |
-| BFLYT writer | **Partial** — section sizes mismatch on round-trip (writes ~7% short on real files); not exposed via the CLI yet |
-| BNTX parser | **Working** — decodes 206 textures from a real `__Combined.bntx` with correct format codes (BC1/3/4/5/7, R8G8B8A8) and channel swizzles |
-| BNTX writer | **Stub** — returns an explicit error pointing at the C# CLI as a workaround |
-| Texture pipeline (PNG → BC7 → swizzled BNTX) | **Stub** — depends on BNTX writer |
+| BFLYT v8 / v9 parser + writer | **Working** — round-trip is byte-identical against every BFLYT in a real Smash Ultimate `layout.arc` (25/25 files including the 30 KB `info_melee_lct_player_00.bflyt` with 287 sections, 68 materials, and v9-specific material extensions) |
+| BNTX parser | **Working** — decodes 206 textures from a real `__Combined.bntx` (1.7 MB) with correct format codes (BC1/3/4/5/7, R8G8B8A8) and channel swizzles |
+| BNTX writer | **Stub** — returns an explicit error. Adding new textures programmatically requires this; tracked in TODOs |
+| Texture pipeline (PNG → BC7 → swizzled BNTX) | **Stub** — depends on BNTX writer; `intel_tex_2` and `tegra_swizzle` are wired into Cargo.toml ready for use |
 | SARC unpack | **Working** — uses [`sarc`](https://crates.io/crates/sarc) by jam1garner |
-| SARC pack | **Working** — output size differs from the original because the SARC crate doesn't deduplicate identical files; functionally equivalent |
+| SARC pack | **Working** — output size differs from the original because the `sarc` crate doesn't deduplicate identical files; functionally equivalent |
+| `layout-validate-manifest` | **Working** — read-only verifier for SGPO skin manifests; cross-validated against a layout produced by the C# CLI (passes 4/4) and the unmodified original (correctly fails 0/4) |
 
 The intent is to land BNTX writing and the texture pipeline in a follow-up.
-The current build covers the **inspection** workflows that the [SGPO skin
-converter](https://github.com/intpa/smash-gamepad-overlay) needs to
-validate a generated layout against its manifest.
+The current build covers the **inspection** and **validation** workflows
+that the [SGPO skin converter](https://github.com/intpa/smash-gamepad-overlay)
+needs to verify a generated layout against its manifest.
 
 ## Build
 
@@ -42,11 +40,14 @@ adding ~9 MB to the binary.
 ## Verbs
 
 ```text
-bflyt-inspect           Print a JSON or human-readable snapshot of a BFLYT
-bflyt-roundtrip-test    Internal: read a BFLYT and try to write it back; reports byte diffs
-bntx-inspect            Print a JSON or human-readable snapshot of a BNTX
-sarc-unpack             Extract a SARC archive to a directory
-sarc-pack               Pack a directory into a SARC archive
+bflyt-inspect             Print a JSON or human-readable snapshot of a BFLYT
+bflyt-roundtrip-test      Internal: read a BFLYT and write it back; reports byte diffs
+bflyt-section-diff        Internal: per-section size diff vs. the original
+bflyt-mat1-diff           Internal: per-material size diff vs. the original
+bntx-inspect              Print a JSON or human-readable snapshot of a BNTX
+layout-validate-manifest  Verify an unpacked layout matches an SGPO skin manifest
+sarc-unpack               Extract a SARC archive to a directory
+sarc-pack                 Pack a directory into a SARC archive
 ```
 
 Run `toolbox-cli <verb> --help` for the per-verb option list.
@@ -170,6 +171,11 @@ link against any GPL-3.0 binary or copy any GPL-3.0 source code.
 
 - Only Switch BFLYT v8 and v9 are supported. Wii U BFLYT (v5) and 3DS
   BCLYT/BRLYT are out of scope.
+- v9 BFLYTs include an undocumented 60-byte material extension on some
+  materials (gated by flag bit 19). We capture it verbatim for round-trip
+  preservation but don't decode the field. This means tools building
+  materials from scratch in Rust can't yet produce the v9 extension; the
+  workaround is to clone a template material that already has it.
 - BNTX texture-data round-trip is partial: dimensions, formats, and
   channels are captured, but the raw image bytes are not yet re-emitted
   by the writer. This blocks adding new textures programmatically; the
@@ -177,3 +183,17 @@ link against any GPL-3.0 binary or copy any GPL-3.0 source code.
 - SARC packing doesn't deduplicate identical files (the upstream `sarc`
   crate doesn't surface dedup), so output sizes will be larger than what
   Switch Toolbox produces. The packed file is still valid.
+
+## Round-trip test corpus
+
+The BFLYT writer is validated against every BFLYT in a real Smash
+Ultimate `layout.arc` (25 files, ranging from 9 KB to 30 KB, with section
+counts from 68 to 287). The full corpus passes a byte-identical
+`bflyt-roundtrip-test`. To reproduce on your own copy:
+
+```bash
+toolbox-cli sarc-unpack -i layout.arc -o unpacked/
+for f in unpacked/blyt/*.bflyt; do
+  toolbox-cli bflyt-roundtrip-test -i "$f"
+done
+```

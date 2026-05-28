@@ -29,6 +29,14 @@ pub fn write_bflyt(b: &BFLYT) -> Result<Vec<u8>, BflytError> {
     write_section(&mut out, b"lyt1", &lyt)?;
     section_count += 1;
 
+    // File-level usd1 comes right after lyt1 in real BFLYTs (the C#
+    // Switch Toolbox writer emits it at the end, but Smash Ultimate's
+    // layouts have it positioned here).
+    if let Some(ud) = &b.user_data {
+        write_section(&mut out, b"usd1", &ud.raw)?;
+        section_count += 1;
+    }
+
     // txl1 / fnl1 (only if non-empty; matches Switch Toolbox behavior)
     if !b.textures.is_empty() {
         let txl = build_string_list(&b.textures)?;
@@ -53,14 +61,15 @@ pub fn write_bflyt(b: &BFLYT) -> Result<Vec<u8>, BflytError> {
         write_pane_tree(&mut out, root, &mut section_count)?;
     }
 
-    // Group tree.
+    // Group tree (with grs1/gre1 markers around the root's children).
     if let Some(root_grp) = &b.root_group {
         write_group_tree(&mut out, root_grp, &mut section_count)?;
     }
 
-    // usd1 (file-level)
-    if let Some(ud) = &b.user_data {
-        write_section(&mut out, b"usd1", &ud.raw)?;
+    // cnt1 (control data) — Smash Ultimate's player layouts. Round-tripped
+    // verbatim. Real-file inspection shows it appears after the group tree.
+    if let Some(cnt) = &b.control_data {
+        write_section(&mut out, b"cnt1", &cnt.raw)?;
         section_count += 1;
     }
 
@@ -204,6 +213,9 @@ fn write_material<W: Write>(w: &mut W, m: &Material) -> std::io::Result<()> {
     if let Some(fs) = &m.font_shadow_param {
         w.write_all(&fs.raw)?;
     }
+    // Round-trip preservation for v9 trailing bytes (see Material.trailing
+    // doc).
+    w.write_all(&m.trailing)?;
     Ok(())
 }
 
@@ -216,6 +228,13 @@ fn write_pane_tree(
 ) -> Result<(), BflytError> {
     write_pane_section(out, pane)?;
     *section_count += 1;
+
+    // Per-pane usd1 lives between the pane section and the pas1 marker
+    // (or, for childless panes, between the pane and the next sibling).
+    if let Some(ud) = &pane.user_data {
+        write_section(out, b"usd1", &ud.raw)?;
+        *section_count += 1;
+    }
 
     if !pane.children.is_empty() {
         write_section(out, b"pas1", &[])?;
@@ -470,19 +489,22 @@ fn write_prt_payload(out: &mut Vec<u8>, p: &PartsPane) -> Result<(), BflytError>
 
 // ---- Groups ----
 
+/// v5+ group name slot is 34 bytes (Switch). See `read::read_group`.
+const GRP1_NAME_LEN: usize = 34;
+
 fn write_group_tree(
     out: &mut Vec<u8>,
     g: &Group,
     section_count: &mut u16,
 ) -> Result<(), BflytError> {
     let mut payload = Vec::new();
-    let mut name_buf = [0u8; PANE_NAME_LEN];
+    let mut name_buf = [0u8; GRP1_NAME_LEN];
     let bytes = g.name.as_bytes();
-    let n = bytes.len().min(PANE_NAME_LEN - 1);
+    let n = bytes.len().min(GRP1_NAME_LEN - 1);
     name_buf[..n].copy_from_slice(&bytes[..n]);
     payload.extend_from_slice(&name_buf);
     payload.write_u16::<LittleEndian>(g.panes.len() as u16)?;
-    payload.write_u16::<LittleEndian>(0)?; // padding
+    // v5+ has NO padding after numNodes (unlike v<5 which had a u16 pad).
     for pane_name in &g.panes {
         let mut nb = [0u8; PANE_NAME_LEN];
         let pb = pane_name.as_bytes();
