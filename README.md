@@ -35,7 +35,7 @@ cargo build --release
 # ./target/release/toolbox-cli.exe
 ```
 
-Requires Rust 1.74+. The release build statically links Intel ISPC for
+Requires Rust 1.96+. The release build statically links Intel ISPC for
 BC7 (via `intel_tex_2`), adding ~9 MB to the binary.
 
 ## End-to-end SGPO workflow

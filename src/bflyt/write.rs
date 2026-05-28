@@ -3,11 +3,6 @@
 //! byte-identical output (modulo any padding the original game tool may
 //! have left undefined — we always zero-fill).
 
-// The `x % 4 != 0` alignment-padding loops below are intentionally not
-// rewritten as `is_multiple_of` (stabilized in Rust 1.87) so we keep the
-// crate's documented 1.74 MSRV.
-#![allow(clippy::manual_is_multiple_of)]
-
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::io::Write;
 
@@ -108,7 +103,7 @@ fn write_section(out: &mut Vec<u8>, magic: &[u8; 4], payload: &[u8]) -> Result<(
     out.extend_from_slice(magic);
     out.write_u32::<LittleEndian>(0)?; // size placeholder
     out.extend_from_slice(payload);
-    while (out.len() - start) % 4 != 0 {
+    while !(out.len() - start).is_multiple_of(4) {
         out.push(0);
     }
     let size = (out.len() - start) as u32;
@@ -371,7 +366,7 @@ fn write_pane_section(out: &mut Vec<u8>, p: &BasePane) -> Result<(), BflytError>
     // 8 extra zero bytes some HDR-modded panes carry past the standard
     // pane base).
     out.extend_from_slice(&p.trailing);
-    while (out.len() - start) % 4 != 0 {
+    while !(out.len() - start).is_multiple_of(4) {
         out.push(0);
     }
     let size = (out.len() - start) as u32;
@@ -559,7 +554,7 @@ fn write_prt_payload(out: &mut Vec<u8>, p: &PartsPane) -> Result<(), BflytError>
     }
     out.write_all(p.part_name.as_bytes())?;
     out.write_u8(0)?; // null terminator
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
     out.write_all(&p.raw_property_data)?;

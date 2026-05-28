@@ -2,6 +2,7 @@
 name = "toolbox-cli"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.96"
 authors = ["crashbandicode"]
 license = "MIT"
 description = "Headless CLI for editing BFLYT/BNTX/SARC files used in Switch UI mods. Inspired by Switch-Toolbox; pure-Rust, no GPL dependencies."
