@@ -87,16 +87,15 @@ pub fn run(args: Args) -> Result<ExitCode> {
 /// `string_index` of the leaf the trie navigates to.
 fn lookup_via_trie(
     entries: &[crate::bntx::DictEntry],
-    strings: &[String],
+    _strings: &[String],
     key: &[u8],
 ) -> u32 {
     if entries.len() <= 1 {
         return 0;
     }
     let mut node = entries[0].left as usize;
-    let mut prev = node;
     loop {
-        prev = node;
+        let prev = node;
         let bit = bit_at(key, entries[node].ref_bit);
         node = if bit == 0 {
             entries[node].left as usize
@@ -111,11 +110,9 @@ fn lookup_via_trie(
         let prev_bit_signed = if prev_bit == 0xFFFF_FFFF { -1 } else { prev_bit };
         let node_bit_signed = if node_bit == 0xFFFF_FFFF { -1 } else { node_bit };
         if node_bit_signed <= prev_bit_signed {
-            break;
+            return entries[node].string_index;
         }
     }
-    let _ = strings;
-    entries[node].string_index
 }
 
 fn bit_at(bytes: &[u8], idx: u32) -> u8 {

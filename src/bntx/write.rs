@@ -94,11 +94,29 @@ pub fn write_bntx(b: &BntxFile) -> Result<Vec<u8>, Error> {
     let brtd_data_start = brtd_section_off + BRTD_HEADER_SIZE;
     let brtd_data_end = brtd_data_start + b.brtd.data.len();
 
-    // Relocation table starts immediately after BRTD data.
+    // Choose between preserving the original RLT verbatim (round-trip
+    // case for files written by other tools with idiosyncratic layouts)
+    // or regenerating a canonical RLT (after structural modifications
+    // like `append_texture`). Real Nintendo BNTX uses an 8-entry compact
+    // table keyed by structural landmarks; some other tools emit one
+    // entry per pointer. Either is functionally valid as long as every
+    // relocated pointer's position is listed.
+    let rlt_owned;
+    let rlt: &RelocationTable = if b.relocation_table_dirty {
+        rlt_owned = build_canonical_reloc_table(
+            b,
+            info_ptrs_off,
+            dict_section_off,
+            brti_array_start,
+            brtd_section_off,
+        );
+        &rlt_owned
+    } else {
+        &b.relocation_table
+    };
     let reloc_table_off = brtd_data_end;
-    let reloc_table_size = 16
-        + b.relocation_table.sections.len() * 24
-        + b.relocation_table.entries.len() * 8;
+    let reloc_table_size =
+        16 + rlt.sections.len() * 24 + rlt.entries.len() * 8;
     let file_size = reloc_table_off + reloc_table_size;
 
     // ---- Emit bytes. ----
@@ -162,10 +180,118 @@ pub fn write_bntx(b: &BntxFile) -> Result<Vec<u8>, Error> {
     // BRTD section.
     write_brtd(&mut out, brtd_section_off, b)?;
 
-    // _RLT relocation table — recompute positions to match the new layout.
-    write_reloc_table(&mut out, reloc_table_off, b, brtd_section_off)?;
+    // _RLT relocation table — emit either the preserved or canonical
+    // version (chosen above based on `relocation_table_dirty`).
+    write_reloc_table(&mut out, reloc_table_off, rlt)?;
 
     Ok(out)
+}
+
+/// Build a fresh `RelocationTable` matching the canonical Nintendo BNTX
+/// layout for `b`'s current structure (texture count, dict size, BRTI
+/// positions). This is what real `__Combined.bntx` files emit when
+/// produced by Nintendo's tooling: 2 sections + 8 entries per file
+/// regardless of texture count, with per-entry struct counts driven by
+/// `b.textures.len()`.
+fn build_canonical_reloc_table(
+    b: &BntxFile,
+    info_ptrs_off: usize,
+    dict_section_off: usize,
+    brti_array_start: usize,
+    brtd_section_off: usize,
+) -> RelocationTable {
+    let n = b.textures.len() as u16;
+    let dict_entry_count = b.dict.entries.len() as u16; // n + 1
+
+    // Section 0 covers everything from file start through the last BRTI
+    // block. Section 1 covers the BRTD section (data_blk_ptr +
+    // texture-data indirection slots).
+    let section_0_end = brti_array_start + (n as usize) * BRTI_BLOCK_STRIDE;
+    let sections = vec![
+        RltSection {
+            pointer: 0,
+            position: 0,
+            size: section_0_end as u32,
+            index: 0,
+            count: 6,
+        },
+        RltSection {
+            pointer: 0,
+            position: brtd_section_off as u32,
+            size: ((BRTD_HEADER_SIZE + b.brtd.data.len()) as u32),
+            index: 6,
+            count: 2,
+        },
+    ];
+
+    let entries = vec![
+        // Entry 0: NX header `info_ptrs_off` (1 ptr at file offset 0x28).
+        RltEntry {
+            position: 0x28,
+            struct_count: 1,
+            offset_count: 1,
+            padding_count: 0,
+        },
+        // Entry 1: NX header `dict_off` + `dict_size_field` (2 consecutive
+        // ptrs at 0x38).
+        RltEntry {
+            position: 0x38,
+            struct_count: 1,
+            offset_count: 2,
+            padding_count: 0,
+        },
+        // Entry 2: texture-info pointer array (`n` ptrs starting at 0x198).
+        RltEntry {
+            position: info_ptrs_off as u32,
+            struct_count: 1,
+            offset_count: n as u8,
+            padding_count: 0,
+        },
+        // Entry 3: dict name_ptrs (one ptr per dict entry, at +0x10 of
+        // each 16-byte dict entry; stride 2 qwords -- offset_count=1,
+        // padding_count=1).
+        RltEntry {
+            position: (dict_section_off + 0x10) as u32,
+            struct_count: dict_entry_count,
+            offset_count: 1,
+            padding_count: 1,
+        },
+        // Entry 4: BRTI name_addr/parent_addr/texture_addr_indirect (3
+        // consecutive ptrs at BRTI+0x60; stride is BRTI_BLOCK_STRIDE = 85
+        // qwords = offset_count=3 + padding_count=82).
+        RltEntry {
+            position: (brti_array_start + 0x60) as u32,
+            struct_count: n,
+            offset_count: 3,
+            padding_count: (BRTI_BLOCK_STRIDE / 8 - 3) as u8,
+        },
+        // Entry 5: BRTI's 2 trailing-block pointers at +0x80, +0x88
+        // (stride 85 qwords; offset_count=2, padding_count=83).
+        RltEntry {
+            position: (brti_array_start + 0x80) as u32,
+            struct_count: n,
+            offset_count: 2,
+            padding_count: (BRTI_BLOCK_STRIDE / 8 - 2) as u8,
+        },
+        // Entry 6: NX header `data_blk_ptr` (1 ptr at 0x30) -- belongs to
+        // section 1 because it points at BRTD.
+        RltEntry {
+            position: 0x30,
+            struct_count: 1,
+            offset_count: 1,
+            padding_count: 0,
+        },
+        // Entry 7: per-texture indirection slot at BRTI+0x2A0 (1 ptr per
+        // BRTI; stride 85 qwords).
+        RltEntry {
+            position: (brti_array_start + 0x2A0) as u32,
+            struct_count: n,
+            offset_count: 1,
+            padding_count: (BRTI_BLOCK_STRIDE / 8 - 1) as u8,
+        },
+    ];
+
+    RelocationTable { sections, entries }
 }
 
 // ============================================================
@@ -392,17 +518,16 @@ fn write_brtd(out: &mut Vec<u8>, offset: usize, b: &BntxFile) -> Result<(), Erro
 fn write_reloc_table(
     out: &mut Vec<u8>,
     offset: usize,
-    b: &BntxFile,
-    _brtd_off: usize,
+    rlt: &RelocationTable,
 ) -> Result<(), Error> {
     let mut c = std::io::Cursor::new(&mut out[offset..offset + 16]);
     c.write_all(b"_RLT")?;
     c.write_u32::<LittleEndian>(offset as u32)?;
-    c.write_u32::<LittleEndian>(b.relocation_table.sections.len() as u32)?;
+    c.write_u32::<LittleEndian>(rlt.sections.len() as u32)?;
     c.write_u32::<LittleEndian>(0)?; // padding
     drop(c);
 
-    for (i, s) in b.relocation_table.sections.iter().enumerate() {
+    for (i, s) in rlt.sections.iter().enumerate() {
         let pos = offset + 16 + i * 24;
         out[pos..pos + 8].copy_from_slice(&s.pointer.to_le_bytes());
         out[pos + 8..pos + 12].copy_from_slice(&s.position.to_le_bytes());
@@ -411,8 +536,8 @@ fn write_reloc_table(
         out[pos + 20..pos + 24].copy_from_slice(&s.count.to_le_bytes());
     }
 
-    let entries_start = offset + 16 + b.relocation_table.sections.len() * 24;
-    for (i, e) in b.relocation_table.entries.iter().enumerate() {
+    let entries_start = offset + 16 + rlt.sections.len() * 24;
+    for (i, e) in rlt.entries.iter().enumerate() {
         let pos = entries_start + i * 8;
         out[pos..pos + 4].copy_from_slice(&e.position.to_le_bytes());
         out[pos + 4..pos + 6].copy_from_slice(&e.struct_count.to_le_bytes());

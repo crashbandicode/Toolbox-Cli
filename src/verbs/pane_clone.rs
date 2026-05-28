@@ -65,9 +65,9 @@ pub fn run(args: Args) -> Result<ExitCode> {
     let new_name = args.name.clone();
     let parent_name = args.parent.clone();
     let bind_material = args.bind_material.clone();
-    if new_name.len() > 23 {
+    if new_name.len() > 24 {
         return Err(anyhow!(
-            "new pane name '{}' is {} bytes (max 23)",
+            "new pane name '{}' is {} bytes (max 24)",
             new_name,
             new_name.len()
         ));

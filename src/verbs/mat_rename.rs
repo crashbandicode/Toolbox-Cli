@@ -9,9 +9,10 @@ use std::process::ExitCode;
 use crate::bflyt::MAT_NAME_LEN_USIZE;
 use crate::verbs::bflyt_helpers::rewrite_bflyt;
 
-/// Re-exported here to avoid leaking the private `MAT_NAME_LEN` symbol
-/// from the bflyt module. The size is constrained by the format spec.
-pub const MAT_NAME_MAX_BYTES: usize = MAT_NAME_LEN_USIZE - 1;
+/// Material name slot is `MAT_NAME_LEN_USIZE` (28) bytes; names of
+/// exactly that length are valid because real BFLYTs use the full slot
+/// without a trailing null. Names longer than that are rejected.
+pub const MAT_NAME_MAX_BYTES: usize = MAT_NAME_LEN_USIZE;
 
 #[derive(Parser, Debug)]
 pub struct Args {
@@ -27,7 +28,7 @@ pub struct Args {
     #[arg(long)]
     from: String,
 
-    /// New material name. Must be unique within the BFLYT and ≤ 27 bytes.
+    /// New material name. Must be unique within the BFLYT and ≤ 28 bytes.
     #[arg(long)]
     to: String,
 }

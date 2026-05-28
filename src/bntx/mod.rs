@@ -75,6 +75,14 @@ pub struct BntxFile {
 
     /// `_RLT` relocation table — every pointer in the file is tracked.
     pub relocation_table: RelocationTable,
+    /// Set when modifications (`append_texture`, etc.) have invalidated
+    /// the original `relocation_table`. The writer regenerates a
+    /// canonical RLT in this case; for unmodified files the original is
+    /// emitted verbatim so round-trip is byte-identical even when the
+    /// source tool used an idiosyncratic RLT layout (e.g., the C#
+    /// Switch-Toolbox emits one RLT entry per pointer rather than a
+    /// compact stride-encoded entry).
+    pub relocation_table_dirty: bool,
 }
 
 /// BNTX file header (offsets are within the file).
@@ -401,10 +409,10 @@ impl BntxFile {
         // empty sentinel and idx 1 = container name).
         self.rebuild_dict();
 
-        // Update the relocation table to reflect the new BRTI block and
-        // texture-data slot.
-        self.update_reloc_table_for_new_texture();
-
+        // Mark the RLT for regeneration. The writer rebuilds a fresh
+        // canonical table when this is set; otherwise the original RLT
+        // is preserved verbatim (round-trip case).
+        self.relocation_table_dirty = true;
         Ok(())
     }
 
@@ -422,59 +430,16 @@ impl BntxFile {
         };
     }
 
-    /// After appending a texture, bump the relocation table's per-pattern
-    /// struct counts and section sizes. This keeps the table in sync with
-    /// the new file layout.
-    fn update_reloc_table_for_new_texture(&mut self) {
-        // Section 0 covers the BNTX/NX headers, info ptrs array, _STR,
-        // _DIC, and all BRTIs. Adding a texture adds:
-        //   * 1 BRTI block (= 0x2A8 bytes)
-        //   * 1 dict entry (= 0x10 bytes)
-        //   * 1 string entry (variable bytes — handled by writer)
-        //   * 1 texture-info pointer (= 8 bytes)
-        // The writer recomputes the absolute layout, so the section
-        // sizes here just need to GROW. We bump section 0 by the BRTI
-        // block stride only; the dict/string growth is small and the
-        // writer's placement logic handles those edges.
-        const BRTI_BLOCK_STRIDE: u32 = 0x2A8;
-        if let Some(s0) = self.relocation_table.sections.first_mut() {
-            s0.size += BRTI_BLOCK_STRIDE;
-        }
-        // Section 1 covers BRTD. Bump by the new texture's image size +
-        // the alignment padding we inserted.
-        if let Some(last) = self.textures.last() {
-            let new_data_bytes = (self.brtd.data.len() - last.data_offset_in_brtd
-                + (last.data_offset_in_brtd
-                    - self.textures.get(self.textures.len() - 2)
-                        .map(|t| t.data_offset_in_brtd + t.image_size as usize)
-                        .unwrap_or(0))) as u32;
-            if let Some(s1) = self.relocation_table.sections.get_mut(1) {
-                s1.size += new_data_bytes;
-            }
-        }
-
-        // Update entry struct_counts. The pattern-specific entries were
-        // identified by reverse-engineering an existing BNTX:
-        //   entry 2 = texture-info pointer array (1 ptr per texture)
-        //   entry 3 = dict name_ptrs (1 per (count+1) entries)
-        //   entry 4 = BRTI fields at +0x60 (3 ptrs)
-        //   entry 5 = BRTI fields at +0x80 (2 ptrs)
-        //   entry 7 = BRTI texture-data indirect slot (1 ptr)
-        // We bump every entry whose `struct_count` already equals the
-        // pre-add texture count or texture+1 (for the dict).
-        let textures_now = self.textures.len() as u16;
-        for entry in self.relocation_table.entries.iter_mut() {
-            if entry.struct_count == textures_now - 1 {
-                entry.struct_count = textures_now;
-            } else if entry.struct_count == textures_now {
-                // dict entry (already incremented by 1 due to root)
-                entry.struct_count = textures_now + 1;
-            }
-        }
-    }
 }
 
 /// Caller-supplied parameters for `BntxFile::append_texture`.
+///
+/// The default constructors cover the common cases:
+/// - `bc7_2d_default` — single-mip 2D BC7 (the SGPO face-button case)
+/// - `bc7_2d_with_mips` — multi-mip 2D BC7
+/// - `bc7_cube_default` — cube map (6 array layers)
+///
+/// Callers can also build the struct directly to set every field.
 #[derive(Debug, Clone)]
 pub struct AppendTextureSpec {
     pub format: TextureFormat,
@@ -489,6 +454,9 @@ pub struct AppendTextureSpec {
     pub channel_swizzle: u32,
     pub align: u32,
     pub flags: u8,
+    /// `dim` is the BNTX surface dimension code: 2 = 2D, 8 = cube. Most
+    /// callers should use the matching constructor rather than setting
+    /// this directly.
     pub dim: u8,
     pub tile_mode: u16,
     pub swizzle: u16,
@@ -501,12 +469,27 @@ pub struct AppendTextureSpec {
 }
 
 impl AppendTextureSpec {
-    /// Build a sensible default spec for a 2D BC7 texture. Caller should
-    /// fill in `width`, `height`, `swizzled_data`, `size_range`, and
-    /// override anything else.
+    /// Build a sensible default spec for a 2D BC7 texture with a single
+    /// mip level. Caller fills in `width`, `height`, `swizzled_data`,
+    /// and `size_range`, and overrides anything else.
     pub fn bc7_2d_default(
         width: u32,
         height: u32,
+        size_range: i32,
+        swizzled_data: Vec<u8>,
+        srgb: bool,
+    ) -> Self {
+        Self::bc7_2d_with_mips(width, height, 1, size_range, swizzled_data, srgb)
+    }
+
+    /// Build a spec for a 2D BC7 texture with `mip_count` mip levels. The
+    /// `swizzled_data` must already include all mips concatenated in
+    /// the layout `tegra_swizzle::surface::swizzle_surface` produces
+    /// (i.e., the result of running it with `mipmap_count = mip_count`).
+    pub fn bc7_2d_with_mips(
+        width: u32,
+        height: u32,
+        mip_count: u16,
         size_range: i32,
         swizzled_data: Vec<u8>,
         srgb: bool,
@@ -520,14 +503,14 @@ impl AppendTextureSpec {
             width,
             height,
             depth: 1,
-            mips_count: 1,
+            mips_count: mip_count,
             array_len: 1,
             size_range,
             // Channel swizzle: R=2, G=3, B=4, A=5 (standard mapping).
             channel_swizzle: 0x05_04_03_02,
             // 0x200 = 512 bytes (sufficient for BC7 textures up to ~256x256).
             // Larger textures may need a larger alignment; callers can
-            // override.
+            // override (use 0x1000 for 512x512+).
             align: 0x200,
             flags: 1,
             dim: 2, // 2D
@@ -540,5 +523,23 @@ impl AppendTextureSpec {
             parent_addr: 32,
             swizzled_data,
         }
+    }
+
+    /// Build a spec for a cube-map BC7 texture (6 array layers in the
+    /// canonical cube-map layout: +X, -X, +Y, -Y, +Z, -Z). The
+    /// `swizzled_data` must include all 6 layers (and any mips per
+    /// layer if `mip_count > 1`) concatenated in the layout
+    /// `swizzle_surface(layer_count = 6)` produces.
+    pub fn bc7_cube_default(
+        size: u32,
+        mip_count: u16,
+        size_range: i32,
+        swizzled_data: Vec<u8>,
+        srgb: bool,
+    ) -> Self {
+        let mut s = Self::bc7_2d_with_mips(size, size, mip_count, size_range, swizzled_data, srgb);
+        s.dim = 8; // cube
+        s.array_len = 6;
+        s
     }
 }

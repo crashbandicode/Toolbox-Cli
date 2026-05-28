@@ -1,18 +1,33 @@
-//! Optional integration tests that round-trip every BFLYT in
+//! Optional integration tests that round-trip every BFLYT under
 //! `tests/fixtures/`. Skipped when the directory is missing (CI does not
 //! ship real game assets).
 //!
-//! Drop your unpacked `layout.arc/blyt/*.bflyt` into `tests/fixtures/blyt/`
-//! to enable. The directory is gitignored.
+//! Drop unpacked archives or individual BFLYTs anywhere under
+//! `tests/fixtures/`; the test walks recursively.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use toolbox_cli::bflyt::{read_bflyt, write_bflyt};
 
+fn collect_bflyts(dir: &Path, out: &mut Vec<PathBuf>) {
+    if !dir.is_dir() {
+        return;
+    }
+    for entry in fs::read_dir(dir).expect("read dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_bflyts(&path, out);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("bflyt") {
+            out.push(path);
+        }
+    }
+}
+
 #[test]
 fn every_bflyt_in_fixtures_round_trips_byte_identically() {
-    let dir = Path::new("tests/fixtures/blyt");
+    let dir = Path::new("tests/fixtures");
     if !dir.exists() {
         eprintln!(
             "skipping real-fixture round-trip test (drop BFLYTs into {} to enable)",
@@ -21,15 +36,17 @@ fn every_bflyt_in_fixtures_round_trips_byte_identically() {
         return;
     }
 
+    let mut paths = Vec::new();
+    collect_bflyts(dir, &mut paths);
+    if paths.is_empty() {
+        eprintln!("no BFLYTs in {}", dir.display());
+        return;
+    }
+
     let mut tested = 0usize;
     let mut failed = Vec::new();
-    for entry in fs::read_dir(dir).expect("read fixtures dir") {
-        let entry = entry.expect("dir entry");
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("bflyt") {
-            continue;
-        }
-        let bytes = fs::read(&path).expect("read fixture");
+    for path in &paths {
+        let bytes = fs::read(path).expect("read fixture");
         let parsed = match read_bflyt(&bytes) {
             Ok(p) => p,
             Err(e) => {

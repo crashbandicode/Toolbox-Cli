@@ -53,11 +53,10 @@ fn walk_sections(label: &str, data: &[u8]) {
         let size = u32::from_le_bytes([
             data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
         ]);
-        if i < 20 || i >= n - 8 {
-            println!("  [{i:>3}] @0x{offset:08x}  {magic:<5}  size={size}");
-        } else if i == 20 {
-            println!("  [...]");
-        }
+        // Always emit every section so external diff tools can walk
+        // arbitrarily-large files. Trimming was easy for debugging the
+        // 25-section info_melee but bites us on 345-section HDR layouts.
+        println!("  [{i:>3}] @0x{offset:08x}  {magic:<5}  size={size}");
         total_section_bytes += size;
         offset += size as usize;
     }

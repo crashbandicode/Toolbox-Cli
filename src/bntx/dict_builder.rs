@@ -167,16 +167,14 @@ impl Trie {
             return 0;
         }
         let mut node = self.nodes[0].children[0];
-        let mut prev = node;
         loop {
-            prev = node;
+            let prev = node;
             let next_bit = self.bit_for_branch(node, key);
             node = self.nodes[node].children[next_bit as usize];
             if self.nodes[node].bit_inx <= self.nodes[prev].bit_inx {
-                break;
+                return prev;
             }
         }
-        prev
     }
 
     /// Determine which child of `node` to follow when searching for `key`.

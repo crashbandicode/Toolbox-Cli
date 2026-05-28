@@ -19,9 +19,9 @@ mod write;
 #[allow(unused_imports)]
 pub use sections::{
     AlphaCompare, BFLYT, BasePane, BflytError, BlendMode, Color8, FontShadowParameter, Group,
-    IndirectParameter, LayoutInfo, Material, PaneKind, PaneTexCoord, PartsPane, PartsProperty,
-    PicturePane, ProjectionTexGenParam, TevStage, TexCoordGen, TextBoxPane, TextureRef,
-    TextureTransform, UserData, Vec2, Vec3, WindowContent, WindowFrame, WindowPane,
+    IndirectParameter, LayoutInfo, Material, OpaqueSection, PaneKind, PaneTexCoord, PartsPane,
+    PartsProperty, PicturePane, ProjectionTexGenParam, TevStage, TexCoordGen, TextBoxPane,
+    TextureRef, TextureTransform, UserData, Vec2, Vec3, WindowContent, WindowFrame, WindowPane,
 };
 
 /// BFLYT material name slot size, exposed for callers that validate

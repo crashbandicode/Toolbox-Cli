@@ -64,6 +64,7 @@ pub fn read_bflyt(data: &[u8]) -> Result<BFLYT, BflytError> {
         root_group: None,
         user_data: None,
         control_data: None,
+        opaque_sections: Vec::new(),
     };
 
     // Pane parsing uses a flat arena keyed by index, mirroring the C#
@@ -85,7 +86,7 @@ pub fn read_bflyt(data: &[u8]) -> Result<BFLYT, BflytError> {
     let mut root_group_idx: Option<usize> = None;
 
     let mut offset = 0x14usize;
-    for _ in 0..section_count {
+    for sec_idx in 0..section_count {
         if offset + 8 > data.len() {
             return Err(BflytError::Format(format!(
                 "section table truncated at 0x{offset:x}"
@@ -104,11 +105,18 @@ pub fn read_bflyt(data: &[u8]) -> Result<BFLYT, BflytError> {
         }
         let payload = &data[offset + 8..offset + sec_size];
 
+        let magic_str = std::str::from_utf8(&sec_magic).unwrap_or("?").to_string();
+        let context = |e: BflytError| -> BflytError {
+            BflytError::Format(format!(
+                "section[{sec_idx}] '{magic_str}' at file offset 0x{offset:x}: {e}"
+            ))
+        };
+
         match &sec_magic {
-            b"lyt1" => bflyt.layout = read_lyt1(payload)?,
-            b"txl1" => bflyt.textures = read_string_list(payload)?,
-            b"fnl1" => bflyt.fonts = read_string_list(payload)?,
-            b"mat1" => bflyt.materials = read_mat1(payload)?,
+            b"lyt1" => bflyt.layout = read_lyt1(payload).map_err(context)?,
+            b"txl1" => bflyt.textures = read_string_list(payload).map_err(context)?,
+            b"fnl1" => bflyt.fonts = read_string_list(payload).map_err(context)?,
+            b"mat1" => bflyt.materials = read_mat1(payload).map_err(context)?,
 
             b"pan1" | b"pic1" | b"txt1" | b"wnd1" | b"prt1" | b"bnd1" => {
                 let kind = match &sec_magic {
@@ -120,7 +128,7 @@ pub fn read_bflyt(data: &[u8]) -> Result<BFLYT, BflytError> {
                     b"bnd1" => PaneKind::Bounding,
                     _ => unreachable!(),
                 };
-                let pane = read_pane(kind, payload, sec_size as u32)?;
+                let pane = read_pane(kind, payload, sec_size as u32).map_err(context)?;
                 let idx = arena.len();
                 arena.push((pane, parent_idx));
                 if root_idx.is_none() {
@@ -183,6 +191,26 @@ pub fn read_bflyt(data: &[u8]) -> Result<BFLYT, BflytError> {
                 });
             }
 
+            // Round-trip-safe handling for less-common section types we
+            // haven't decoded:
+            //
+            // - `scr1`: scissor pane (clip rect in addition to a regular pane)
+            // - `ali1`: alignment pane (auto-positioning rules)
+            // - `spi1`: shape-info pane (or similar -- 24 bytes in the only
+            //   fixture we've seen)
+            //
+            // These are emitted in pane-tree order along with the panes
+            // we DO decode, so we capture each as an `OpaqueSection`
+            // and re-emit it in the same position when writing.
+            b"scr1" | b"ali1" | b"spi1" => {
+                let after_pane_name = current_idx.map(|i| arena[i].0.name.clone());
+                bflyt.opaque_sections.push(OpaqueSection {
+                    magic: sec_magic,
+                    payload: payload.to_vec(),
+                    after_pane_name,
+                });
+            }
+
             other => return Err(BflytError::UnknownSection(*other)),
         }
 
@@ -236,6 +264,7 @@ fn materialize_tree(mut arena: Vec<(BasePane, Option<usize>)>, root: usize) -> B
                 parts: None,
                 user_data: None,
                 children: Vec::new(),
+                trailing: Vec::new(),
             },
         );
         for ci in children_indices {
@@ -363,7 +392,12 @@ fn read_mat1(payload: &[u8]) -> Result<Vec<Material>, BflytError> {
         }
         let _ = &mut starts; // silence unused-mut on fallthrough
         let mut mc = Cursor::new(&payload[start..end]);
-        let mat = read_material(&mut mc, end - start)?;
+        let mat = read_material(&mut mc, end - start).map_err(|e| {
+            BflytError::Format(format!(
+                "mat1 material[{i}] (size {} bytes): {e}",
+                end - start
+            ))
+        })?;
         materials.push(mat);
     }
 
@@ -381,16 +415,69 @@ fn read_material<R: Read + Seek>(r: &mut R, expected_size: usize) -> Result<Mate
     let black_color = Color8::read(r)?;
     let white_color = Color8::read(r)?;
 
-    let tex_count = (flags_raw & 0x3) as usize;
-    let mtx_count = ((flags_raw >> 2) & 0x3) as usize;
-    let tex_coord_gen_count = ((flags_raw >> 4) & 0x3) as usize;
-    let tev_stage_count = ((flags_raw >> 6) & 0x7) as usize;
-    let has_alpha_compare = ((flags_raw >> 9) & 0x1) != 0;
-    let has_blend = ((flags_raw >> 10) & 0x1) != 0;
-    let has_blend_logic = ((flags_raw >> 12) & 0x1) != 0;
-    let has_indirect = ((flags_raw >> 14) & 0x1) != 0;
-    let proj_tex_gen_count = ((flags_raw >> 15) & 0x3) as usize;
-    let has_font_shadow = ((flags_raw >> 17) & 0x1) != 0;
+    let mut tex_count = (flags_raw & 0x3) as usize;
+    let mut mtx_count = ((flags_raw >> 2) & 0x3) as usize;
+    let mut tex_coord_gen_count = ((flags_raw >> 4) & 0x3) as usize;
+    let mut tev_stage_count = ((flags_raw >> 6) & 0x7) as usize;
+    let mut has_alpha_compare = ((flags_raw >> 9) & 0x1) != 0;
+    let mut has_blend = ((flags_raw >> 10) & 0x1) != 0;
+    let mut has_blend_logic = ((flags_raw >> 12) & 0x1) != 0;
+    let mut has_indirect = ((flags_raw >> 14) & 0x1) != 0;
+    let mut proj_tex_gen_count = ((flags_raw >> 15) & 0x3) as usize;
+    let mut has_font_shadow = ((flags_raw >> 17) & 0x1) != 0;
+
+    // Defensive sub-section budget check. Some community-mod BFLYTs (HDR
+    // training-modpack mat1) have flag bits that don't match the actual
+    // byte budget --- the C# Switch-Toolbox tolerates this by reading
+    // available bytes and ignoring the rest. We do the same: if the
+    // flag-implied sizes exceed `expected_size`, scale down sub-section
+    // counts to fit. The dropped bytes (if any) get captured in
+    // `Material.trailing` and re-emitted verbatim.
+    let header_bytes = MAT_NAME_LEN + 4 + 4 + 4 + 4; // name + flags + unk + black + white = 44
+    let budget = expected_size.saturating_sub(header_bytes);
+    let demanded = tex_count * 4
+        + mtx_count * 20
+        + tex_coord_gen_count * 16
+        + tev_stage_count * 4
+        + if has_alpha_compare { 8 } else { 0 }
+        + if has_blend { 4 } else { 0 }
+        + if has_blend_logic { 4 } else { 0 }
+        + if has_indirect { 12 } else { 0 }
+        + proj_tex_gen_count * 20
+        + if has_font_shadow { 8 } else { 0 };
+    let flags_untrusted = demanded > budget;
+    if demanded > budget {
+        // Heuristic recovery: clamp the highest-count fields first.
+        // Empirically, mtx_count is the most common offender on HDR
+        // mods. This recovery only runs on malformed input.
+        let mut shrink = demanded - budget;
+        for (count_ref, size) in [
+            (&mut mtx_count, 20),
+            (&mut tex_coord_gen_count, 16),
+            (&mut tex_count, 4),
+            (&mut tev_stage_count, 4),
+            (&mut proj_tex_gen_count, 20),
+        ]
+        .iter_mut()
+        {
+            while shrink >= *size && **count_ref > 0 {
+                **count_ref -= 1;
+                shrink -= *size;
+            }
+        }
+        for (flag, size) in [
+            (&mut has_alpha_compare, 8usize),
+            (&mut has_blend, 4),
+            (&mut has_blend_logic, 4),
+            (&mut has_indirect, 12),
+            (&mut has_font_shadow, 8),
+        ] {
+            if shrink >= size && *flag {
+                *flag = false;
+                shrink -= size;
+            }
+        }
+    }
 
     let mut texture_maps = Vec::with_capacity(tex_count);
     for _ in 0..tex_count {
@@ -520,6 +607,7 @@ fn read_material<R: Read + Seek>(r: &mut R, expected_size: usize) -> Result<Mate
         proj_tex_gen_params,
         font_shadow_param,
         trailing,
+        flags_untrusted,
     })
 }
 
@@ -560,6 +648,29 @@ fn read_pane(kind: PaneKind, payload: &[u8], section_size: u32) -> Result<BasePa
         }
         _ => { /* pan1 and bnd1 have no kind-specific extension */ }
     }
+
+    // Capture pane-section trailing bytes for `pan1`, `bnd1`, and `pic1`.
+    //
+    // - `pan1`/`bnd1` have only the pane base; the cursor naturally ends
+    //   at the pane base's last field.
+    // - `pic1` has vertex_colors + material_index + tex_coords; cursor
+    //   stops cleanly after the last tex_coord. Some community mods
+    //   append 4 extra zero bytes per pic1 section.
+    //
+    // `txt1` and `prt1` use their own internal trailing fields
+    // (`TextBoxPane.trailing` / `PartsPane.raw_property_data`) for
+    // anything past the standard payload, and `wnd1` uses
+    // back-patched offsets so its cursor doesn't necessarily hit the
+    // end. Capturing base trailing for those would double-count.
+    if matches!(
+        kind,
+        PaneKind::Pane | PaneKind::Bounding | PaneKind::Picture
+    ) {
+        let consumed = c.stream_position()? as usize;
+        if consumed < payload.len() {
+            base.trailing = payload[consumed..].to_vec();
+        }
+    }
     Ok(base)
 }
 
@@ -598,6 +709,7 @@ fn read_pane_base<R: Read>(r: &mut R, kind: PaneKind) -> Result<BasePane, BflytE
         parts: None,
         user_data: None,
         children: Vec::new(),
+        trailing: Vec::new(),
     })
 }
 

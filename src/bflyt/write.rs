@@ -56,9 +56,24 @@ pub fn write_bflyt(b: &BFLYT) -> Result<Vec<u8>, BflytError> {
         section_count += 1;
     }
 
-    // Pane tree as flat sections with pas1/pae1 markers.
+    // Pane tree as flat sections with pas1/pae1 markers, with any opaque
+    // sections (scr1/ali1/spi1) interleaved at their original positions.
     if let Some(root) = &b.root_pane {
-        write_pane_tree(&mut out, root, &mut section_count)?;
+        // Pre-compute the queue of opaque sections per pane name.
+        let mut opaque_queue: std::collections::HashMap<String, Vec<&OpaqueSection>> =
+            std::collections::HashMap::new();
+        let mut file_level_opaque: Vec<&OpaqueSection> = Vec::new();
+        for s in &b.opaque_sections {
+            match &s.after_pane_name {
+                Some(name) => opaque_queue.entry(name.clone()).or_default().push(s),
+                None => file_level_opaque.push(s),
+            }
+        }
+        for s in &file_level_opaque {
+            write_section(&mut out, &s.magic, &s.payload)?;
+            section_count += 1;
+        }
+        write_pane_tree(&mut out, root, &mut section_count, &opaque_queue)?;
     }
 
     // Group tree (with grs1/gre1 markers around the root's children).
@@ -147,7 +162,30 @@ fn build_mat1(materials: &[Material]) -> Result<Vec<u8>, BflytError> {
     let mut offsets = Vec::with_capacity(materials.len());
     for mat in materials {
         let mut m = mat.clone();
-        m.rebuild_flags();
+        // When `flags_untrusted` is set, the reader had to shrink the
+        // sub-section counts to fit a malformed byte budget. Emit the
+        // original `flags_raw` verbatim in that case, so byte-identity
+        // is preserved on round-trip.
+        //
+        // Otherwise, reconstruct `flags_raw` only when the in-memory
+        // sub-section counts disagree with what `flags_raw` already
+        // encodes (the rare path where a caller actually mutated the
+        // counts).
+        if !m.flags_untrusted {
+            let counts_match = (m.flags_raw & 0x3) as usize == m.texture_maps.len()
+                && ((m.flags_raw >> 2) & 0x3) as usize == m.texture_transforms.len()
+                && ((m.flags_raw >> 4) & 0x3) as usize == m.tex_coord_gens.len()
+                && ((m.flags_raw >> 6) & 0x7) as usize == m.tev_stages.len()
+                && ((m.flags_raw >> 9) & 0x1 != 0) == m.alpha_compare.is_some()
+                && ((m.flags_raw >> 10) & 0x1 != 0) == m.blend_mode.is_some()
+                && ((m.flags_raw >> 12) & 0x1 != 0) == m.blend_mode_logic.is_some()
+                && ((m.flags_raw >> 14) & 0x1 != 0) == m.indirect_param.is_some()
+                && ((m.flags_raw >> 15) & 0x3) as usize == m.proj_tex_gen_params.len()
+                && ((m.flags_raw >> 17) & 0x1 != 0) == m.font_shadow_param.is_some();
+            if !counts_match {
+                m.rebuild_flags();
+            }
+        }
         // Material offsets are file-absolute (relative to the section's
         // `magic` byte). Within `p` (section payload), absolute = 8 + p.len()
         // because the section header is 8 bytes.
@@ -162,9 +200,13 @@ fn build_mat1(materials: &[Material]) -> Result<Vec<u8>, BflytError> {
 }
 
 fn write_material<W: Write>(w: &mut W, m: &Material) -> std::io::Result<()> {
+    // Name slot is `MAT_NAME_LEN` bytes; we cap at the full length, NOT
+    // `LEN - 1`. Real Smash files store fully-utilized names without a
+    // trailing null when the name is exactly `LEN` bytes long. The
+    // buffer is zero-initialized, so shorter names are still null-padded.
     let mut name_buf = [0u8; MAT_NAME_LEN];
     let bytes = m.name.as_bytes();
-    let n = bytes.len().min(MAT_NAME_LEN - 1);
+    let n = bytes.len().min(MAT_NAME_LEN);
     name_buf[..n].copy_from_slice(&bytes[..n]);
     w.write_all(&name_buf)?;
 
@@ -225,6 +267,7 @@ fn write_pane_tree(
     out: &mut Vec<u8>,
     pane: &BasePane,
     section_count: &mut u16,
+    opaque_queue: &std::collections::HashMap<String, Vec<&OpaqueSection>>,
 ) -> Result<(), BflytError> {
     write_pane_section(out, pane)?;
     *section_count += 1;
@@ -236,11 +279,20 @@ fn write_pane_tree(
         *section_count += 1;
     }
 
+    // Emit any opaque sections (scr1/ali1/spi1) that originally followed
+    // this pane in the file's section order, before pas1/children.
+    if let Some(opaque) = opaque_queue.get(&pane.name) {
+        for s in opaque {
+            write_section(out, &s.magic, &s.payload)?;
+            *section_count += 1;
+        }
+    }
+
     if !pane.children.is_empty() {
         write_section(out, b"pas1", &[])?;
         *section_count += 1;
         for child in &pane.children {
-            write_pane_tree(out, child, section_count)?;
+            write_pane_tree(out, child, section_count, opaque_queue)?;
         }
         write_section(out, b"pae1", &[])?;
         *section_count += 1;
@@ -287,6 +339,10 @@ fn write_pane_section(out: &mut Vec<u8>, p: &BasePane) -> Result<(), BflytError>
         }
         _ => {}
     }
+    // Round-trip the trailing bytes captured by the reader (e.g., the
+    // 8 extra zero bytes some HDR-modded panes carry past the standard
+    // pane base).
+    out.extend_from_slice(&p.trailing);
     while (out.len() - start) % 4 != 0 {
         out.push(0);
     }
@@ -301,9 +357,13 @@ fn write_pane_base<W: Write>(w: &mut W, p: &BasePane) -> std::io::Result<()> {
     w.write_u8(p.alpha)?;
     w.write_u8(p.flag_ex)?;
 
+    // Name slot is exactly `PANE_NAME_LEN` bytes. Some real BFLYTs use
+    // the full slot for max-length names without a trailing null, so we
+    // cap at `LEN`, not `LEN - 1`. The zero-initialized buffer pads
+    // shorter names automatically.
     let mut name_buf = [0u8; PANE_NAME_LEN];
     let bytes = p.name.as_bytes();
-    let n = bytes.len().min(PANE_NAME_LEN - 1);
+    let n = bytes.len().min(PANE_NAME_LEN);
     name_buf[..n].copy_from_slice(&bytes[..n]);
     w.write_all(&name_buf)?;
 
@@ -465,9 +525,11 @@ fn write_prt_payload(out: &mut Vec<u8>, p: &PartsPane) -> Result<(), BflytError>
     out.write_f32::<LittleEndian>(p.magnify.x)?;
     out.write_f32::<LittleEndian>(p.magnify.y)?;
     for prop in &p.properties {
+        // See `write_pane_base` for why we use `min(LEN)` instead of
+        // `min(LEN - 1)`.
         let mut name_buf = [0u8; PANE_NAME_LEN];
         let bytes = prop.name.as_bytes();
-        let n = bytes.len().min(PANE_NAME_LEN - 1);
+        let n = bytes.len().min(PANE_NAME_LEN);
         name_buf[..n].copy_from_slice(&bytes[..n]);
         out.write_all(&name_buf)?;
         out.write_u8(prop.usage_flag)?;
@@ -500,7 +562,9 @@ fn write_group_tree(
     let mut payload = Vec::new();
     let mut name_buf = [0u8; GRP1_NAME_LEN];
     let bytes = g.name.as_bytes();
-    let n = bytes.len().min(GRP1_NAME_LEN - 1);
+    // See `write_pane_base` for why we use `min(LEN)` instead of
+    // `min(LEN - 1)`.
+    let n = bytes.len().min(GRP1_NAME_LEN);
     name_buf[..n].copy_from_slice(&bytes[..n]);
     payload.extend_from_slice(&name_buf);
     payload.write_u16::<LittleEndian>(g.panes.len() as u16)?;
@@ -508,7 +572,7 @@ fn write_group_tree(
     for pane_name in &g.panes {
         let mut nb = [0u8; PANE_NAME_LEN];
         let pb = pane_name.as_bytes();
-        let pn = pb.len().min(PANE_NAME_LEN - 1);
+        let pn = pb.len().min(PANE_NAME_LEN);
         nb[..pn].copy_from_slice(&pb[..pn]);
         payload.extend_from_slice(&nb);
     }

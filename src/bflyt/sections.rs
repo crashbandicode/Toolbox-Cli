@@ -109,6 +109,24 @@ pub struct BFLYT {
     /// layouts. We don't decode the structure yet; the bytes are
     /// preserved verbatim for round-trip.
     pub control_data: Option<UserData>,
+    /// Pane-tree-adjacent sections we don't decode (`scr1` scissor, `ali1`
+    /// alignment, `spi1` shape-info, …). Re-emitted in the same position
+    /// they appeared on disk so round-trip is byte-identical.
+    pub opaque_sections: Vec<OpaqueSection>,
+}
+
+/// A pane-tree-adjacent section we preserve verbatim. `after_pane_name`
+/// is the name of the pane this section follows in the original file's
+/// section ordering; the writer re-emits it after that pane.
+#[derive(Debug, Clone)]
+pub struct OpaqueSection {
+    pub magic: [u8; 4],
+    pub payload: Vec<u8>,
+    /// Name of the pane this section follows. `None` means file-level
+    /// (before any pane). Multiple opaque sections may share the same
+    /// `after_pane_name`; they're emitted in the order they appeared on
+    /// disk.
+    pub after_pane_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +173,11 @@ pub struct BasePane {
     pub parts: Option<PartsPane>,
     pub user_data: Option<UserData>,
     pub children: Vec<BasePane>,
+    /// Trailing bytes within the pane section after the standard pane
+    /// base (and any kind-specific extension we decode). Some HDR mods
+    /// append 8 extra zero bytes per pane; we preserve them verbatim
+    /// for byte-identical round-trip.
+    pub trailing: Vec<u8>,
 }
 
 impl BasePane {
@@ -304,6 +327,13 @@ pub struct Material {
     /// to keep round-trip byte-identical without committing to a decode
     /// that may be wrong.
     pub trailing: Vec<u8>,
+    /// True when the reader had to shrink sub-section counts to fit the
+    /// material's declared byte budget (e.g., HDR mod produces materials
+    /// whose `flags_raw` says `mtx_count=2` but only one transform's
+    /// worth of data is present). When this is set, the writer must
+    /// emit `flags_raw` verbatim rather than recomputing from the
+    /// in-memory sub-section counts.
+    pub flags_untrusted: bool,
 }
 
 impl Material {

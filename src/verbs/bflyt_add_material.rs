@@ -38,12 +38,12 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
-    if args.name.len() > MAT_NAME_LEN_USIZE - 1 {
+    if args.name.len() > MAT_NAME_LEN_USIZE {
         return Err(anyhow!(
             "new material name '{}' is {} bytes (max {})",
             args.name,
             args.name.len(),
-            MAT_NAME_LEN_USIZE - 1
+            MAT_NAME_LEN_USIZE
         ));
     }
     let template_name = args.template.clone();

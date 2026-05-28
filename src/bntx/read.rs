@@ -76,13 +76,17 @@ pub fn read_bntx(data: &[u8]) -> Result<BntxFile, Error> {
     }
 
     // ---------- Container name ----------
-    let name = read_bntx_str(data, header.filename_offset as usize)?;
+    // `filename_offset` points to the BODY of the container name string
+    // (i.e., past the u16 length field) -- different from dict and BRTI
+    // name pointers, which point to the BntxStr struct start. We read it
+    // as a NUL-terminated C string.
+    let name = read_c_string(data, header.filename_offset as usize)?;
 
     // ---------- _STR section ----------
     // The _STR section follows the texture-info pointer array. The exact
     // start offset is implied by `header.first_block_offset` for our files.
     let str_off = header.first_block_offset as usize;
-    let (strings, str_section_end) = read_str_section(data, str_off)?;
+    let (strings, _str_section_end) = read_str_section(data, str_off)?;
 
     // ---------- _DIC section ----------
     let (dict, _dict_end) = read_dict_section(data, dict_off, &strings)?;
@@ -128,6 +132,7 @@ pub fn read_bntx(data: &[u8]) -> Result<BntxFile, Error> {
             data: brtd_raw,
         },
         relocation_table,
+        relocation_table_dirty: false,
     })
 }
 
@@ -469,4 +474,21 @@ fn read_bntx_str(data: &[u8], offset: usize) -> Result<String, Error> {
         )));
     }
     Ok(String::from_utf8_lossy(&data[start..start + len]).into_owned())
+}
+
+/// Read a NUL-terminated C string at `offset`. Used for the BNTX
+/// container name, whose `filename_offset` skips the BntxStr length
+/// field and points directly at the body bytes.
+fn read_c_string(data: &[u8], offset: usize) -> Result<String, Error> {
+    if offset >= data.len() {
+        return Err(Error::Truncated(format!(
+            "C string at 0x{offset:x} starts past EOF"
+        )));
+    }
+    let end = data[offset..]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|p| offset + p)
+        .unwrap_or(data.len());
+    Ok(String::from_utf8_lossy(&data[offset..end]).into_owned())
 }

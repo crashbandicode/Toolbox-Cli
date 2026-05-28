@@ -12,7 +12,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::bflyt::{read_bflyt, BasePane, PaneKind, BFLYT};
+use crate::bflyt::{read_bflyt, BasePane, BFLYT};
 use crate::bntx::{read_bntx, BntxFile};
 use crate::manifest::{SkinElement, SkinManifest};
 

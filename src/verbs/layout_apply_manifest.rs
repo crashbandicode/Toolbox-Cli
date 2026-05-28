@@ -18,7 +18,7 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::bflyt::{read_bflyt, write_bflyt, BFLYT, BasePane};
