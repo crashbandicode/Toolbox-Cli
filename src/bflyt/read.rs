@@ -608,6 +608,7 @@ fn read_material<R: Read + Seek>(r: &mut R, expected_size: usize) -> Result<Mate
         font_shadow_param,
         trailing,
         flags_untrusted,
+        original_section_size: Some(expected_size as u32),
     })
 }
 

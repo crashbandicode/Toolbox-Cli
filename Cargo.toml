@@ -47,6 +47,10 @@ anyhow = "1.0"
 thiserror = "1.0"
 
 [dev-dependencies]
+# Pure-Rust BC7 decoder (MIT/Apache, no GPL). Used by
+# `tests/texpipe_round_trip.rs` to verify the PNG → BC7 → swizzle path
+# survives a full deswizzle + decode comparison against the source.
+texture2ddecoder = "0.1"
 # (test fixtures live in tests/fixtures/, gitignored)
 
 [profile.release]

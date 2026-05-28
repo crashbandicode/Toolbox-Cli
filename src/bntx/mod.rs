@@ -430,6 +430,75 @@ impl BntxFile {
         };
     }
 
+    /// Remove a texture by name. This is a structural change: it shrinks
+    /// the BRTI array, the string pool, the dict, and the BRTD data
+    /// block (compacting subsequent textures' data forward, re-applying
+    /// each texture's own alignment so the resulting layout matches
+    /// what `append_texture` would produce from scratch). The
+    /// relocation table is marked dirty so the writer regenerates a
+    /// canonical layout.
+    ///
+    /// Errors if `name` is not present, or if the resolved string
+    /// happens to be the empty sentinel / container name (defensive —
+    /// `append_texture` refuses to create such names, but we still
+    /// guard against a hand-crafted BNTX that points a BRTI at the
+    /// container-name slot).
+    pub fn remove_texture(&mut self, name: &str) -> Result<(), BntxError> {
+        let tex_idx = self
+            .texture_index_by_name(name)
+            .ok_or_else(|| BntxError::Format(format!("texture '{name}' not found")))?;
+        let removed_string_idx = self.textures[tex_idx].name_string_index as usize;
+        if removed_string_idx < 2 {
+            return Err(BntxError::Format(format!(
+                "texture '{name}' resolves to string index {removed_string_idx} (reserved \
+                 for the empty sentinel / container name); refusing to remove"
+            )));
+        }
+
+        // Snapshot every *other* texture's pixel-data slice from the
+        // current BRTD before we touch anything. The slices are
+        // computed against `self.brtd.data` (unchanged here), so
+        // ordering is safe to do up-front. We can't borrow these
+        // slices once we start rewriting `self.brtd.data` below.
+        let mut remaining_data: Vec<Vec<u8>> = Vec::with_capacity(self.textures.len() - 1);
+        for (i, t) in self.textures.iter().enumerate() {
+            if i == tex_idx {
+                continue;
+            }
+            remaining_data.push(t.pixel_data(&self.brtd).to_vec());
+        }
+
+        self.textures.remove(tex_idx);
+
+        // Drop the removed texture's name from the string pool. Any
+        // texture whose own `name_string_index` was *after* the removed
+        // slot needs its index decremented by 1 — the underlying string
+        // didn't change but its position in `self.strings` did.
+        self.strings.remove(removed_string_idx);
+        for t in &mut self.textures {
+            if t.name_string_index as usize > removed_string_idx {
+                t.name_string_index -= 1;
+            }
+        }
+
+        // Rebuild BRTD by laying out the remaining textures back-to-back
+        // with each one's own alignment, exactly the way
+        // `append_texture` would produce them from scratch. Per-texture
+        // `data_offset_in_brtd` is updated in lockstep.
+        let mut new_data: Vec<u8> = Vec::with_capacity(self.brtd.data.len());
+        for (t, data) in self.textures.iter_mut().zip(remaining_data.iter()) {
+            let align = t.align.max(1) as usize;
+            let pad_to = (new_data.len() + align - 1) & !(align - 1);
+            new_data.extend(std::iter::repeat(0u8).take(pad_to - new_data.len()));
+            t.data_offset_in_brtd = new_data.len();
+            new_data.extend_from_slice(data);
+        }
+        self.brtd.data = new_data;
+
+        self.rebuild_dict();
+        self.relocation_table_dirty = true;
+        Ok(())
+    }
 }
 
 /// Caller-supplied parameters for `BntxFile::append_texture`.

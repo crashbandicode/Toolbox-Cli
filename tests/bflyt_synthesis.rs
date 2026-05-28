@@ -47,6 +47,7 @@ fn synthetic_minimal_layout_round_trips() {
             font_shadow_param: None,
             trailing: vec![],
             flags_untrusted: false,
+            original_section_size: None,
         }],
         root_pane: Some(BasePane {
             kind: PaneKind::Pane,

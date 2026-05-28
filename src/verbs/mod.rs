@@ -19,6 +19,8 @@ mod bflyt_section_diff;
 mod bntx_dict_test;
 mod bntx_import_png;
 mod bntx_inspect;
+mod bntx_remove_texture;
+mod bntx_replace_png;
 mod bntx_layout_dump;
 mod bntx_rlt_dump;
 mod bntx_roundtrip_test;
@@ -76,6 +78,17 @@ pub enum Verb {
     /// named texture in the BNTX. Writes the modified file back.
     BntxImportPng(bntx_import_png::Args),
 
+    /// Re-encode a PNG into BC7 + Tegra swizzle and overwrite an
+    /// existing texture's pixel data in place (no structural change to
+    /// dict / RLT, no rename). Replacement source must match the target
+    /// texture's dimensions and mip count.
+    BntxReplacePng(bntx_replace_png::Args),
+
+    /// Remove a named texture from a BNTX, shrinking the string pool,
+    /// dict, BRTI array, and BRTD data block. Triggers a canonical RLT
+    /// rebuild.
+    BntxRemoveTexture(bntx_remove_texture::Args),
+
     /// Internal: read a BNTX, write it back, and report whether the
     /// round-trip is byte-identical.
     BntxRoundtripTest(bntx_roundtrip_test::Args),
@@ -120,6 +133,8 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::PaneClone(args) => Ok(pane_clone::run(args)?),
         Verb::BntxInspect(args) => Ok(bntx_inspect::run(args)?),
         Verb::BntxImportPng(args) => Ok(bntx_import_png::run(args)?),
+        Verb::BntxReplacePng(args) => Ok(bntx_replace_png::run(args)?),
+        Verb::BntxRemoveTexture(args) => Ok(bntx_remove_texture::run(args)?),
         Verb::BntxRoundtripTest(args) => Ok(bntx_roundtrip_test::run(args)?),
         Verb::BntxDictTest(args) => Ok(bntx_dict_test::run(args)?),
         Verb::BntxRltDump(args) => Ok(bntx_rlt_dump::run(args)?),

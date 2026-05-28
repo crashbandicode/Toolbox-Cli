@@ -333,7 +333,20 @@ pub struct Material {
     /// worth of data is present). When this is set, the writer must
     /// emit `flags_raw` verbatim rather than recomputing from the
     /// in-memory sub-section counts.
+    ///
+    /// Mutating an untrusted material's sub-section counts WITHOUT
+    /// first calling `clear_untrusted_flag()` is a programmer error:
+    /// the writer would emit a file whose `flags_raw` disagrees with
+    /// its sub-section data, and the runtime would parse the wrong
+    /// number of entries. The writer's `debug_assert!` catches this
+    /// in dev builds.
     pub flags_untrusted: bool,
+    /// On-disk byte size of the material section as it was when read
+    /// from disk. `None` for materials constructed in code (synthetic
+    /// tests, builders). Used solely by the writer's
+    /// `debug_assert!` to verify untrusted materials haven't been
+    /// silently mutated since read time.
+    pub original_section_size: Option<u32>,
 }
 
 impl Material {
@@ -395,6 +408,74 @@ impl Material {
 
         // Keep every bit we don't own; overwrite the bits we do.
         self.flags_raw = (self.flags_raw & !owned_mask) | (owned & owned_mask);
+    }
+
+    /// Guard for save paths: returns an error if this material is still
+    /// in the untrusted state (i.e., the on-disk source had a malformed
+    /// `flags_raw` / sub-section-count mismatch). Call this before
+    /// performing structural mutations or before saving when you need
+    /// strong consistency guarantees on a particular material.
+    pub fn assert_flags_trusted(&self) -> Result<(), super::BflytError> {
+        if self.flags_untrusted {
+            Err(super::BflytError::Format(format!(
+                "material '{}' has flags_untrusted=true (the source BFLYT had a malformed mat1 \
+                 sub-section count); call `clear_untrusted_flag()` after verifying the \
+                 sub-section state is consistent before mutating or saving",
+                self.name
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Re-canonicalize this material: recompute `flags_raw` from the
+    /// in-memory sub-section counts, drop any `original_section_size`
+    /// snapshot, and clear the `flags_untrusted` bit. After this call
+    /// the material is in the same state a freshly-built material
+    /// would be in — fully owned by the in-memory representation —
+    /// and the writer will recompute `flags_raw` automatically when
+    /// counts change.
+    ///
+    /// Use this after manually fixing up an untrusted material's
+    /// sub-sections (e.g., padding `texture_transforms` with default
+    /// entries to match the count `flags_raw` originally claimed). The
+    /// writer will then trust the in-memory counts.
+    pub fn clear_untrusted_flag(&mut self) {
+        self.rebuild_flags();
+        self.flags_untrusted = false;
+        self.original_section_size = None;
+    }
+
+    /// Compute the byte size this material would emit through the BFLYT
+    /// writer. Mirrors the layout in `write::write_material`. Used by
+    /// the writer's `debug_assert!` to detect silent mutations on
+    /// untrusted materials.
+    pub fn emit_size(&self) -> u32 {
+        // header (matches the reader's `header_bytes` accounting):
+        //   name MAT_NAME_LEN + flags_raw 4 + flags_unknown 4 + black 4 + white 4
+        let mut s = MAT_NAME_LEN + 4 + 4 + 4 + 4;
+        s += self.texture_maps.len() * 4;
+        s += self.texture_transforms.len() * 20;
+        s += self.tex_coord_gens.len() * 16;
+        s += self.tev_stages.len() * 4;
+        if self.alpha_compare.is_some() {
+            s += 8;
+        }
+        if self.blend_mode.is_some() {
+            s += 4;
+        }
+        if self.blend_mode_logic.is_some() {
+            s += 4;
+        }
+        if self.indirect_param.is_some() {
+            s += 12;
+        }
+        s += self.proj_tex_gen_params.len() * 20;
+        if self.font_shadow_param.is_some() {
+            s += 8;
+        }
+        s += self.trailing.len();
+        s as u32
     }
 }
 

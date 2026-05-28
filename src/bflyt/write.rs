@@ -185,6 +185,29 @@ fn build_mat1(materials: &[Material]) -> Result<Vec<u8>, BflytError> {
             if !counts_match {
                 m.rebuild_flags();
             }
+        } else if let Some(orig_size) = m.original_section_size {
+            // Misuse guard: an untrusted material's `flags_raw` is being
+            // emitted verbatim, but the in-memory sub-section counts
+            // determine the actual section bytes. If the caller mutated
+            // those counts without first calling `clear_untrusted_flag()`,
+            // the resulting file would have `flags_raw` and section
+            // contents disagreeing — silently invalid for the runtime.
+            // Catch it loudly in dev builds. Release builds skip the
+            // check (the caller can use `assert_flags_trusted()` for an
+            // explicit production-safe check).
+            debug_assert_eq!(
+                m.emit_size(),
+                orig_size,
+                "material '{}' has flags_untrusted=true but its emit size ({}) \
+                 differs from the original on-disk size ({}); the caller mutated the \
+                 sub-section counts without calling `clear_untrusted_flag()` first, \
+                 so the writer would emit a file whose flags_raw disagrees with the \
+                 sub-section data. Call `mat.clear_untrusted_flag()` after verifying \
+                 the in-memory state is consistent, or restore the original counts.",
+                m.name,
+                m.emit_size(),
+                orig_size,
+            );
         }
         // Material offsets are file-absolute (relative to the section's
         // `magic` byte). Within `p` (section payload), absolute = 8 + p.len()
