@@ -15,7 +15,7 @@ fn lookup(entries: &[DictEntry], key: &[u8]) -> u32 {
         return 0;
     }
     let mut node = entries[0].left as usize;
-    let mut prev = node;
+    let mut prev;
     loop {
         prev = node;
         let bit = bit_at(key, entries[node].ref_bit);

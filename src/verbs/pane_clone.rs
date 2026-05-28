@@ -13,7 +13,6 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::bflyt::{BasePane, BFLYT};
 use crate::verbs::bflyt_helpers::rewrite_bflyt;
 
 #[derive(Parser, Debug)]
@@ -30,7 +29,7 @@ pub struct Args {
     #[arg(long)]
     template: String,
 
-    /// Name for the new pane. Must be unique and ≤ 23 bytes.
+    /// Name for the new pane. Must be unique and ≤ 24 bytes.
     #[arg(long)]
     name: String,
 
@@ -73,7 +72,7 @@ pub fn run(args: Args) -> Result<ExitCode> {
         ));
     }
     let n = rewrite_bflyt(&args.input, args.out.as_deref(), |bflyt| {
-        if find_pane(bflyt, &new_name).is_some() {
+        if bflyt.find_pane(&new_name).is_some() {
             return Err(anyhow!(
                 "pane '{}' already exists; refusing to create a duplicate",
                 new_name
@@ -90,12 +89,14 @@ pub fn run(args: Args) -> Result<ExitCode> {
             ),
             None => None,
         };
-        let template = find_pane(bflyt, &template_name)
+        let template = bflyt
+            .find_pane(&template_name)
             .ok_or_else(|| anyhow!("template pane '{}' not found", template_name))?
             .clone();
 
         let target_parent_name = parent_name.unwrap_or_else(|| {
-            find_parent_name(bflyt.root_pane.as_ref(), &template_name)
+            bflyt
+                .parent_pane_name(&template_name)
                 .unwrap_or_else(|| "RootPane".to_string())
         });
         if target_parent_name == new_name {
@@ -125,7 +126,8 @@ pub fn run(args: Args) -> Result<ExitCode> {
             }
         }
 
-        let parent = find_pane_mut(bflyt, &target_parent_name)
+        let parent = bflyt
+            .find_pane_mut(&target_parent_name)
             .ok_or_else(|| anyhow!("parent pane '{}' not found", target_parent_name))?;
         parent.children.push(clone);
         Ok(())
@@ -135,39 +137,4 @@ pub fn run(args: Args) -> Result<ExitCode> {
         args.template, args.name, n
     );
     Ok(ExitCode::SUCCESS)
-}
-
-fn find_pane<'a>(b: &'a BFLYT, name: &str) -> Option<&'a BasePane> {
-    fn rec<'a>(p: &'a BasePane, name: &str) -> Option<&'a BasePane> {
-        if p.name == name { return Some(p); }
-        for c in &p.children {
-            if let Some(found) = rec(c, name) { return Some(found); }
-        }
-        None
-    }
-    b.root_pane.as_ref().and_then(|r| rec(r, name))
-}
-
-fn find_pane_mut<'a>(b: &'a mut BFLYT, name: &str) -> Option<&'a mut BasePane> {
-    fn rec<'a>(p: &'a mut BasePane, name: &str) -> Option<&'a mut BasePane> {
-        if p.name == name { return Some(p); }
-        for c in &mut p.children {
-            if let Some(found) = rec(c, name) { return Some(found); }
-        }
-        None
-    }
-    b.root_pane.as_mut().and_then(|r| rec(r, name))
-}
-
-fn find_parent_name(root: Option<&BasePane>, target: &str) -> Option<String> {
-    let root = root?;
-    for c in &root.children {
-        if c.name == target {
-            return Some(root.name.clone());
-        }
-        if let Some(name) = find_parent_name(Some(c), target) {
-            return Some(name);
-        }
-    }
-    None
 }

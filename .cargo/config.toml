@@ -1,0 +1,10 @@
+# Link the C++ standard library on Linux so `intel_tex_2`'s bundled Intel
+# ISPC object files (ispc_texcomp) resolve their C++ runtime symbols
+# (e.g. `__gxx_personality_v0`) at link time. Without this, `cargo build`
+# / `cargo test` fail at the final link step on toolchains whose default
+# link line drops libstdc++.
+#
+# Scoped to the Linux GNU target only: Windows (MSVC) and macOS link the
+# C++ runtime through their own mechanisms and don't need this flag.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-lstdc++"]

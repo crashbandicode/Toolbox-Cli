@@ -370,8 +370,7 @@ impl BntxFile {
         // Pad BRTD data to the new texture's alignment boundary.
         let align = spec.align.max(1) as usize;
         let pad_to = (self.brtd.data.len() + align - 1) & !(align - 1);
-        let pad_bytes = pad_to - self.brtd.data.len();
-        self.brtd.data.extend(std::iter::repeat(0u8).take(pad_bytes));
+        self.brtd.data.resize(pad_to, 0);
         let data_offset_in_brtd = self.brtd.data.len();
         self.brtd.data.extend_from_slice(&spec.swizzled_data);
 
@@ -489,7 +488,7 @@ impl BntxFile {
         for (t, data) in self.textures.iter_mut().zip(remaining_data.iter()) {
             let align = t.align.max(1) as usize;
             let pad_to = (new_data.len() + align - 1) & !(align - 1);
-            new_data.extend(std::iter::repeat(0u8).take(pad_to - new_data.len()));
+            new_data.resize(pad_to, 0);
             t.data_offset_in_brtd = new_data.len();
             new_data.extend_from_slice(data);
         }

@@ -63,17 +63,7 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
-    let quality = match args.quality.as_str() {
-        "ultra-fast" | "ultrafast" => Bc7Quality::UltraFast,
-        "fast" => Bc7Quality::Fast,
-        "basic" => Bc7Quality::Basic,
-        "slow" => Bc7Quality::Slow,
-        other => {
-            return Err(anyhow!(
-                "unknown --quality {other}; valid: ultra-fast, fast, basic, slow"
-            ));
-        }
-    };
+    let quality: Bc7Quality = args.quality.parse().map_err(|e| anyhow!("{e}"))?;
 
     let bntx_bytes = fs::read(&args.input)
         .with_context(|| format!("reading {}", args.input.display()))?;
@@ -157,14 +147,9 @@ pub fn run(args: Args) -> Result<ExitCode> {
     }
 
     let compressed = if is_cube {
-        let face_arr: [PathBuf; 6] = [
-            args.cube_faces[0].clone(),
-            args.cube_faces[1].clone(),
-            args.cube_faces[2].clone(),
-            args.cube_faces[3].clone(),
-            args.cube_faces[4].clone(),
-            args.cube_faces[5].clone(),
-        ];
+        let face_arr: [PathBuf; 6] = args.cube_faces.clone().try_into().map_err(
+            |v: Vec<PathBuf>| anyhow!("expected exactly 6 cube faces; got {}", v.len()),
+        )?;
         compress_cube_bc7(&face_arr, quality, exp.mips as u32)?
     } else {
         let path = args.image.as_ref().expect("checked above");
@@ -249,13 +234,7 @@ pub fn run(args: Args) -> Result<ExitCode> {
 
     let written = write_bntx(&bntx).map_err(|e| anyhow::anyhow!("{}", e))?;
     let out_path = args.out.as_ref().unwrap_or(&args.input);
-    if let Some(parent) = out_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-    fs::write(out_path, &written)
-        .with_context(|| format!("writing {}", out_path.display()))?;
+    crate::verbs::write_output(out_path, &written)?;
 
     let kind = if is_cube { "BC7-cube" } else { "BC7" };
     println!(

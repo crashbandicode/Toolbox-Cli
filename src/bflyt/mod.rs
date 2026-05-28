@@ -24,8 +24,10 @@ pub use sections::{
     TextureRef, TextureTransform, UserData, Vec2, Vec3, WindowContent, WindowFrame, WindowPane,
 };
 
-/// BFLYT material name slot size, exposed for callers that validate
-/// proposed names (max bytes = `MAT_NAME_LEN_USIZE - 1`).
+/// BFLYT material name slot size (28 bytes), exposed for callers that
+/// validate proposed names. The full slot is usable: real BFLYTs store
+/// names of exactly this length without a trailing null, so the max
+/// accepted name length is `MAT_NAME_LEN_USIZE` bytes.
 pub const MAT_NAME_LEN_USIZE: usize = 0x1C;
 
 pub use read::read_bflyt;

@@ -70,24 +70,10 @@ pub fn write_bntx(b: &BntxFile) -> Result<Vec<u8>, Error> {
     let brti_array_start = dict_end;
     let brti_array_end = brti_array_start + b.textures.len() * BRTI_BLOCK_STRIDE;
 
-    // BRTD begins at the next 0x1000-aligned offset matching `align_shift`
-    // (12 -> 4096). Real Smash files have BRTD at 0x25FF0 with a 1.7 MB
-    // texture data block; the alignment value is the texture-data
-    // alignment, not necessarily the BRTD section start. We mirror the
-    // file's recorded location by using `data_blk_ptr` from the original.
-    //
-    // For now, compute by using the original file's recorded BRTD offset
-    // (we capture it at read time — TODO: derive from layout). For the
-    // round-trip test we'll just preserve the original.
-    //
-    // Approach for round-trip: we store the original BRTD offset directly
-    // in `BrtdSection.declared_block_size`'s sibling. To keep the API
-    // simple, we recover it from the `Texture.data_offset_in_brtd`
-    // values once we have computed all positions.
-
-    // Determine BRTD offset by aligning brti_array_end to texture data
-    // alignment boundaries. Real files use a fixed alignment of
-    // 1 << align_shift. For 4096 (the Smash files), that's 0x1000.
+    // BRTD starts at the next texture-data-alignment boundary after the
+    // BRTI array (alignment = 1 << alignment_shift; 0x1000 for the Smash
+    // files), accounting for the BRTD header. The last BRTI's recorded
+    // block size absorbs the padding before BRTD, matching real files.
     let texture_data_alignment = 1usize << b.header.alignment_shift;
     let brti_padding_needed = align_up_pad(brti_array_end + BRTD_HEADER_SIZE, texture_data_alignment);
     let brtd_section_off = brti_array_end + brti_padding_needed;
@@ -299,7 +285,7 @@ fn build_canonical_reloc_table(
 // ============================================================
 
 fn write_bntx_header(
-    out: &mut Vec<u8>,
+    out: &mut [u8],
     b: &BntxFile,
     file_size: usize,
     reloc_table_off: usize,
@@ -325,7 +311,7 @@ fn write_bntx_header(
 }
 
 fn write_nx_header(
-    out: &mut Vec<u8>,
+    out: &mut [u8],
     b: &BntxFile,
     info_ptrs_off: usize,
     brtd_off: usize,
@@ -393,7 +379,7 @@ fn bntx_str_size(s: &str) -> usize {
 }
 
 fn write_str_section(
-    out: &mut Vec<u8>,
+    out: &mut [u8],
     b: &BntxFile,
     offset: usize,
     layout: &StrLayout,
@@ -418,15 +404,16 @@ fn write_str_section(
 }
 
 fn write_dict_section(
-    out: &mut Vec<u8>,
+    out: &mut [u8],
     b: &BntxFile,
     offset: usize,
     str_layout: &StrLayout,
 ) -> Result<(), Error> {
-    let mut c = std::io::Cursor::new(&mut out[offset..offset + 8]);
-    c.write_all(b"_DIC")?;
-    c.write_u32::<LittleEndian>(b.dict.count)?;
-    drop(c);
+    {
+        let mut c = std::io::Cursor::new(&mut out[offset..offset + 8]);
+        c.write_all(b"_DIC")?;
+        c.write_u32::<LittleEndian>(b.dict.count)?;
+    }
 
     for (i, e) in b.dict.entries.iter().enumerate() {
         let pos = offset + 8 + i * 16;
@@ -443,11 +430,11 @@ fn write_dict_section(
 }
 
 fn write_brti(
-    out: &mut Vec<u8>,
+    out: &mut [u8],
     offset: usize,
     tex: &Texture,
     str_layout: &StrLayout,
-    _texture_indirect_slot: usize,
+    texture_indirect_slot: usize,
     block_size: u32,
 ) -> Result<(), Error> {
     let mut c = std::io::Cursor::new(&mut out[offset..offset + BRTI_HEADER_SIZE]);
@@ -481,7 +468,7 @@ fn write_brti(
     let name_ptr = str_layout.string_offsets[tex.name_string_index as usize] as u64;
     c.write_u64::<LittleEndian>(name_ptr)?;
     c.write_u64::<LittleEndian>(tex.parent_addr)?;
-    c.write_u64::<LittleEndian>(_texture_indirect_slot as u64)?;
+    c.write_u64::<LittleEndian>(texture_indirect_slot as u64)?;
 
     // Trailing 0x30 bytes of the BRTI header. These are NOT documented in
     // any public spec; jam1garner/bntx writes them from a template:
@@ -502,7 +489,7 @@ fn write_brti(
     Ok(())
 }
 
-fn write_brtd(out: &mut Vec<u8>, offset: usize, b: &BntxFile) -> Result<(), Error> {
+fn write_brtd(out: &mut [u8], offset: usize, b: &BntxFile) -> Result<(), Error> {
     let block_size = (BRTD_HEADER_SIZE + b.brtd.data.len()) as u64;
     {
         let mut c = std::io::Cursor::new(&mut out[offset..offset + BRTD_HEADER_SIZE]);
@@ -516,16 +503,17 @@ fn write_brtd(out: &mut Vec<u8>, offset: usize, b: &BntxFile) -> Result<(), Erro
 }
 
 fn write_reloc_table(
-    out: &mut Vec<u8>,
+    out: &mut [u8],
     offset: usize,
     rlt: &RelocationTable,
 ) -> Result<(), Error> {
-    let mut c = std::io::Cursor::new(&mut out[offset..offset + 16]);
-    c.write_all(b"_RLT")?;
-    c.write_u32::<LittleEndian>(offset as u32)?;
-    c.write_u32::<LittleEndian>(rlt.sections.len() as u32)?;
-    c.write_u32::<LittleEndian>(0)?; // padding
-    drop(c);
+    {
+        let mut c = std::io::Cursor::new(&mut out[offset..offset + 16]);
+        c.write_all(b"_RLT")?;
+        c.write_u32::<LittleEndian>(offset as u32)?;
+        c.write_u32::<LittleEndian>(rlt.sections.len() as u32)?;
+        c.write_u32::<LittleEndian>(0)?; // padding
+    }
 
     for (i, s) in rlt.sections.iter().enumerate() {
         let pos = offset + 16 + i * 24;

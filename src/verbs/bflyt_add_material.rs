@@ -26,7 +26,7 @@ pub struct Args {
     #[arg(long)]
     template: String,
 
-    /// Name for the new material. Must be unique and ≤ 27 bytes.
+    /// Name for the new material. Must be unique and ≤ 28 bytes.
     #[arg(long)]
     name: String,
 

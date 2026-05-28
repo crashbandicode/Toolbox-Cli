@@ -13,7 +13,7 @@ use toolbox_cli::bflyt;
 fn synthetic_minimal_layout_round_trips() {
     use bflyt::*;
 
-    let mut bflyt = BFLYT {
+    let bflyt = BFLYT {
         version: 0x09000000,
         layout: LayoutInfo {
             draw_centered: true,

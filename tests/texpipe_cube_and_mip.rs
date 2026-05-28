@@ -98,8 +98,8 @@ fn assert_within_budget(label: &str, mean: f64, peak: u8) {
 /// next 4-pixel multiple before encoding, so width and height should
 /// already be multiples of 4 here.
 fn bc7_mip_size_bytes(w: u32, h: u32) -> usize {
-    let blocks_w = (w + 3) / 4;
-    let blocks_h = (h + 3) / 4;
+    let blocks_w = w.div_ceil(4);
+    let blocks_h = h.div_ceil(4);
     (blocks_w * blocks_h * 16) as usize
 }
 
@@ -139,7 +139,7 @@ fn multi_mip_2d_round_trip_64x64() {
     assert_eq!(compressed.mip_count, mip_count);
     assert_eq!(compressed.array_count, 1);
 
-    // Sanity: linear_size == sum of per-mip BC7 sizes. Mismatch would
+    // Sanity: image_size == sum of per-mip BC7 sizes. Mismatch would
     // mean texpipe's mip-chain build disagrees with our layout
     // accounting (and thus the deswizzle output offsets we use below).
     let expected_linear: usize = (0..mip_count)
@@ -149,9 +149,9 @@ fn multi_mip_2d_round_trip_64x64() {
         })
         .sum();
     assert_eq!(
-        compressed.linear_size as usize, expected_linear,
-        "linear_size {} disagrees with per-mip BC7 size sum {}",
-        compressed.linear_size, expected_linear
+        compressed.image_size as usize, expected_linear,
+        "image_size {} disagrees with per-mip BC7 size sum {}",
+        compressed.image_size, expected_linear
     );
 
     let block_height =
@@ -220,9 +220,9 @@ fn cube_map_single_mip_round_trip_64x64() {
 
     let face_size = bc7_mip_size_bytes(compressed.width, compressed.height);
     assert_eq!(
-        compressed.linear_size as usize,
+        compressed.image_size as usize,
         face_size * 6,
-        "cube linear_size disagrees with 6 * face_size",
+        "cube image_size disagrees with 6 * face_size",
     );
 
     let block_height =
@@ -280,10 +280,10 @@ fn cube_map_multi_mip_round_trip_64x64() {
         })
         .sum();
     assert_eq!(
-        compressed.linear_size as usize,
+        compressed.image_size as usize,
         per_face * 6,
-        "cube+mip linear_size {} != 6 * per_face {}",
-        compressed.linear_size,
+        "cube+mip image_size {} != 6 * per_face {}",
+        compressed.image_size,
         per_face * 6,
     );
 

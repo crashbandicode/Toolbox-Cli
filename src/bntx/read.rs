@@ -96,13 +96,10 @@ pub fn read_bntx(data: &[u8]) -> Result<BntxFile, Error> {
     for &brti_off in &texture_info_ptrs {
         textures.push(read_brti(data, brti_off, &strings)?);
     }
-    // Suppress unused-mut: we keep `mut` for symmetry with future passes
-    // that may post-process the texture list.
-    let _ = &mut textures;
 
     // ---------- BRTD section (texture data block) ----------
     let brtd_off = _data_blk_ptr;
-    if &data[brtd_off..brtd_off + 4] != MAGIC_BRTD {
+    if data[brtd_off..brtd_off + 4] != MAGIC_BRTD {
         return Err(Error::Format(format!(
             "expected BRTD magic at 0x{brtd_off:x}"
         )));
@@ -388,7 +385,7 @@ fn read_brti(data: &[u8], offset: usize, strings: &[String]) -> Result<Texture, 
 fn find_brtd(data: &[u8]) -> Result<usize, Error> {
     // The BRTD offset is recorded in the NX header at 0x30.
     let off = read_u64(data, 0x30) as usize;
-    if off + 4 > data.len() || &data[off..off + 4] != MAGIC_BRTD {
+    if off + 4 > data.len() || data[off..off + 4] != MAGIC_BRTD {
         return Err(Error::Format("BRTD section not found".into()));
     }
     Ok(off)

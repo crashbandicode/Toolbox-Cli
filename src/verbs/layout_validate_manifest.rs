@@ -12,7 +12,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::bflyt::{read_bflyt, BasePane, BFLYT};
+use crate::bflyt::{read_bflyt, BFLYT};
 use crate::bntx::{read_bntx, BntxFile};
 use crate::manifest::{SkinElement, SkinManifest};
 
@@ -138,7 +138,7 @@ fn validate_element(
     let mut failures = Vec::new();
 
     // --- Pane lookup + parent check ---
-    let pane = find_pane(bflyt.root_pane.as_ref(), &el.pane_name);
+    let pane = bflyt.find_pane(&el.pane_name);
     let pane = match pane {
         Some(p) => p,
         None => {
@@ -154,7 +154,8 @@ fn validate_element(
             };
         }
     };
-    let parent_name = find_parent_name(bflyt.root_pane.as_ref(), &el.pane_name)
+    let parent_name = bflyt
+        .parent_pane_name(&el.pane_name)
         .unwrap_or_else(|| "<none>".to_string());
     if parent_name != manifest.root_pane_name {
         failures.push(format!(
@@ -256,30 +257,4 @@ fn validate_element(
         ok,
         failures,
     }
-}
-
-fn find_pane<'a>(root: Option<&'a BasePane>, name: &str) -> Option<&'a BasePane> {
-    let root = root?;
-    if root.name == name {
-        return Some(root);
-    }
-    for c in &root.children {
-        if let Some(found) = find_pane(Some(c), name) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn find_parent_name(root: Option<&BasePane>, target: &str) -> Option<String> {
-    let root = root?;
-    for c in &root.children {
-        if c.name == target {
-            return Some(root.name.clone());
-        }
-        if let Some(name) = find_parent_name(Some(c), target) {
-            return Some(name);
-        }
-    }
-    None
 }

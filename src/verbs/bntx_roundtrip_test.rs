@@ -29,7 +29,7 @@ pub fn run(args: Args) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let diff = first_diff(&original, &written);
+    let diff = super::first_diff(&original, &written);
     println!(
         "DIFF: original={} bytes, rewritten={} bytes, first_diff_at=0x{:x}",
         original.len(),
@@ -43,14 +43,4 @@ pub fn run(args: Args) -> Result<ExitCode> {
     println!("  original[0x{lo:x}..0x{hi_o:x}] = {:02x?}", &original[lo..hi_o]);
     println!("  rewritten[0x{lo:x}..0x{hi_w:x}] = {:02x?}", &written[lo..hi_w]);
     Ok(ExitCode::from(1))
-}
-
-fn first_diff(a: &[u8], b: &[u8]) -> usize {
-    let n = a.len().min(b.len());
-    for i in 0..n {
-        if a[i] != b[i] {
-            return i;
-        }
-    }
-    n
 }

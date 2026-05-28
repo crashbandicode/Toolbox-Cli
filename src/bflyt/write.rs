@@ -3,6 +3,11 @@
 //! byte-identical output (modulo any padding the original game tool may
 //! have left undefined — we always zero-fill).
 
+// The `x % 4 != 0` alignment-padding loops below are intentionally not
+// rewritten as `is_multiple_of` (stabilized in Rust 1.87) so we keep the
+// crate's documented 1.74 MSRV.
+#![allow(clippy::manual_is_multiple_of)]
+
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::io::Write;
 
@@ -134,7 +139,7 @@ fn build_string_list(strings: &[String]) -> Result<Vec<u8>, BflytError> {
     p.write_u16::<LittleEndian>(0)?; // padding
 
     let table_base = p.len();
-    p.extend(std::iter::repeat(0u8).take(strings.len() * 4));
+    p.resize(p.len() + strings.len() * 4, 0);
 
     let mut offsets = Vec::with_capacity(strings.len());
     for s in strings {
@@ -157,7 +162,7 @@ fn build_mat1(materials: &[Material]) -> Result<Vec<u8>, BflytError> {
     p.write_u16::<LittleEndian>(0)?; // padding
 
     let table_pos = p.len();
-    p.extend(std::iter::repeat(0u8).take(materials.len() * 4));
+    p.resize(p.len() + materials.len() * 4, 0);
 
     let mut offsets = Vec::with_capacity(materials.len());
     for mat in materials {
@@ -458,23 +463,12 @@ fn write_txt_payload(out: &mut Vec<u8>, t: &TextBoxPane) -> Result<(), BflytErro
 }
 
 fn write_wnd_payload(out: &mut Vec<u8>, wnd: &WindowPane) -> Result<(), BflytError> {
-    // Capture the section start so we can convert payload offsets to
-    // file-absolute offsets relative to the `magic` byte. The current
-    // section header occupies the 8 bytes ending at `out.len() - <pane base size>`.
-    // For simplicity we recover the section start by scanning back from
-    // the call site context — but we don't have access to that here.
-    // Instead, we know that:
-    //   abs_offset(of x) = (out.len() at moment of x) - section_start
-    // So we record `section_start` from the caller's stack. Cleanest fix:
-    // require the caller to pass it in.
-    //
-    // The caller (`write_pane_section`) records `start` as the section
-    // start byte. We can recover it here as `start = out.len() - <fixed
-    // pane base size> - 4 - 4 - <prefix already written for wnd>`. That's
-    // brittle; use the simpler invariant: at the time write_wnd_payload
-    // runs, the only thing not yet written for THIS section is the wnd1
-    // payload. We capture the current `out.len()` here as the pre-payload
-    // mark; the section's own `magic` byte is at `pre - (header 8 + base 0x4C)`.
+    // wnd1 stores its content/frame tables as offsets that are
+    // file-absolute relative to the section's `magic` byte, so we need
+    // the section start to back-patch them. When this runs, the only
+    // bytes written for this section so far are the 8-byte section header
+    // and the 0x4C-byte pane base, so the section start is `out.len()`
+    // minus those.
     let pre = out.len();
     let section_start = pre - (8 + 0x4C);
 
@@ -527,7 +521,7 @@ fn write_wnd_payload(out: &mut Vec<u8>, wnd: &WindowPane) -> Result<(), BflytErr
     out[frame_off_pos..frame_off_pos + 4].copy_from_slice(&frame_off.to_le_bytes());
 
     let table_bytes = wnd.frames.len() * 4;
-    out.extend(std::iter::repeat(0u8).take(table_bytes));
+    out.resize(out.len() + table_bytes, 0);
 
     let mut frame_offsets = Vec::with_capacity(wnd.frames.len());
     for f in &wnd.frames {

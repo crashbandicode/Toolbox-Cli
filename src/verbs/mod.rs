@@ -32,9 +32,37 @@ mod pane_set;
 mod sarc_pack;
 mod sarc_unpack;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Subcommand;
+use std::path::Path;
 use std::process::ExitCode;
+
+/// Write `bytes` to `target`, creating parent directories as needed.
+/// Shared by the mutating verbs so the "make parent dir, then write"
+/// dance lives in one place.
+pub(crate) fn write_output(target: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(target, bytes)
+        .with_context(|| format!("writing {}", target.display()))?;
+    Ok(())
+}
+
+/// Index of the first byte where `a` and `b` differ, or the length of
+/// the shorter slice if one is a prefix of the other. Shared by the
+/// round-trip test verbs.
+pub(crate) fn first_diff(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    for i in 0..n {
+        if a[i] != b[i] {
+            return i;
+        }
+    }
+    n
+}
 
 #[derive(Subcommand, Debug)]
 pub enum Verb {

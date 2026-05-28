@@ -7,7 +7,6 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::bflyt::{BasePane, BFLYT};
 use crate::verbs::bflyt_helpers::rewrite_bflyt;
 
 #[derive(Parser, Debug)]
@@ -69,7 +68,8 @@ pub fn run(args: Args) -> Result<ExitCode> {
             None => None,
         };
 
-        let pane = find_pane_mut(bflyt, &pane_name)
+        let pane = bflyt
+            .find_pane_mut(&pane_name)
             .ok_or_else(|| anyhow!("pane '{}' not found", pane_name))?;
 
         if let Some(v) = args.translate_x { pane.translate.x = v; }
@@ -97,19 +97,4 @@ pub fn run(args: Args) -> Result<ExitCode> {
     })?;
     println!("ok: pane '{}' updated ({} bytes)", args.pane, n);
     Ok(ExitCode::SUCCESS)
-}
-
-fn find_pane_mut<'a>(b: &'a mut BFLYT, name: &str) -> Option<&'a mut BasePane> {
-    fn rec<'a>(p: &'a mut BasePane, name: &str) -> Option<&'a mut BasePane> {
-        if p.name == name {
-            return Some(p);
-        }
-        for c in &mut p.children {
-            if let Some(found) = rec(c, name) {
-                return Some(found);
-            }
-        }
-        None
-    }
-    b.root_pane.as_mut().and_then(|r| rec(r, name))
 }

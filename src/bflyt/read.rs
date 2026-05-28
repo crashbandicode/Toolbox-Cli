@@ -288,7 +288,7 @@ fn materialize_group_tree(mut arena: Vec<(Group, Option<usize>)>, root: usize) -
         child_lists: &mut Vec<Vec<usize>>,
     ) -> Group {
         let children_indices = std::mem::take(&mut child_lists[idx]);
-        let mut node = std::mem::replace(&mut arena[idx].0, Group::default());
+        let mut node = std::mem::take(&mut arena[idx].0);
         for ci in children_indices {
             node.children.push(build(ci, arena, child_lists));
         }
@@ -377,7 +377,7 @@ fn read_mat1(payload: &[u8]) -> Result<Vec<Material>, BflytError> {
     // section end for the last material). We pass the size into
     // `read_material` so it can capture trailing bytes for v9-specific
     // sub-sections we don't decode yet.
-    let mut starts: Vec<usize> = offsets
+    let starts: Vec<usize> = offsets
         .iter()
         .map(|o| o.checked_sub(8).unwrap_or(0))
         .collect();
@@ -390,7 +390,6 @@ fn read_mat1(payload: &[u8]) -> Result<Vec<Material>, BflytError> {
                 "mat1 material[{i}] offset range [{start:x}..{end:x}] is invalid"
             )));
         }
-        let _ = &mut starts; // silence unused-mut on fallthrough
         let mut mc = Cursor::new(&payload[start..end]);
         let mat = read_material(&mut mc, end - start).map_err(|e| {
             BflytError::Format(format!(

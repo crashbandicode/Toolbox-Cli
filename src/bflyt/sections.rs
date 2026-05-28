@@ -193,6 +193,73 @@ impl BasePane {
     pub fn influence_alpha(&self) -> bool {
         (self.flag & 0x02) != 0
     }
+
+    /// Find this pane or any descendant by exact name (depth-first,
+    /// file order).
+    pub fn find(&self, name: &str) -> Option<&BasePane> {
+        if self.name == name {
+            return Some(self);
+        }
+        for c in &self.children {
+            if let Some(found) = c.find(name) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Mutable variant of [`find`](Self::find).
+    pub fn find_mut(&mut self, name: &str) -> Option<&mut BasePane> {
+        if self.name == name {
+            return Some(self);
+        }
+        for c in &mut self.children {
+            if let Some(found) = c.find_mut(name) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Name of the parent of the descendant named `target`, searching
+    /// from this pane down. Returns `None` if `target` isn't found below
+    /// this pane (or is this pane itself, which has no parent here).
+    fn parent_name_of(&self, target: &str) -> Option<String> {
+        for c in &self.children {
+            if c.name == target {
+                return Some(self.name.clone());
+            }
+            if let Some(name) = c.parent_name_of(target) {
+                return Some(name);
+            }
+        }
+        None
+    }
+}
+
+impl BFLYT {
+    /// Find a pane by exact name anywhere in the pane tree.
+    pub fn find_pane(&self, name: &str) -> Option<&BasePane> {
+        self.root_pane.as_ref().and_then(|r| r.find(name))
+    }
+
+    /// Mutable variant of [`find_pane`](Self::find_pane).
+    pub fn find_pane_mut(&mut self, name: &str) -> Option<&mut BasePane> {
+        self.root_pane.as_mut().and_then(|r| r.find_mut(name))
+    }
+
+    /// True if a pane named `name` exists anywhere in the tree.
+    pub fn pane_exists(&self, name: &str) -> bool {
+        self.find_pane(name).is_some()
+    }
+
+    /// Name of the parent of the pane named `target`. Returns `None` if
+    /// `target` doesn't exist or is the root pane (which has no parent).
+    pub fn parent_pane_name(&self, target: &str) -> Option<String> {
+        self.root_pane
+            .as_ref()
+            .and_then(|r| r.parent_name_of(target))
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -350,9 +417,8 @@ pub struct Material {
 }
 
 impl Material {
-    /// Raw section data after the name slot for bits we don't fully decode.
-    /// Currently every field above IS decoded, so this stays empty unless
-    /// we hit an unknown sub-section.
+    /// Number of texture maps, clamped to the maximum the 2-bit
+    /// `flags_raw` count field can encode (3).
     pub fn texture_count(&self) -> u8 {
         self.texture_maps.len().min(3) as u8
     }

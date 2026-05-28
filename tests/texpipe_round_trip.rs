@@ -113,11 +113,11 @@ fn round_trip_one(png_path: &Path) -> Result<(), String> {
     )
     .map_err(|e| format!("deswizzle_surface: {e:?}"))?;
 
-    if linear_bc7.len() != compressed.linear_size as usize {
+    if linear_bc7.len() != compressed.image_size as usize {
         return Err(format!(
-            "deswizzle output size {} != expected linear_size {}",
+            "deswizzle output size {} != expected image_size {}",
             linear_bc7.len(),
-            compressed.linear_size
+            compressed.image_size
         ));
     }
 

@@ -52,13 +52,7 @@ pub fn run(args: Args) -> Result<ExitCode> {
 
     let written = write_bntx(&bntx).map_err(|e| anyhow::anyhow!("{}", e))?;
     let out_path = args.out.as_ref().unwrap_or(&args.input);
-    if let Some(parent) = out_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-    fs::write(out_path, &written)
-        .with_context(|| format!("writing {}", out_path.display()))?;
+    crate::verbs::write_output(out_path, &written)?;
 
     println!(
         "ok: removed texture '{}' ({} -> {} textures, BRTD {} -> {} bytes), file is now {} bytes",

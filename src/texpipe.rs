@@ -36,6 +36,39 @@ impl Bc7Quality {
     }
 }
 
+impl std::str::FromStr for Bc7Quality {
+    type Err = String;
+
+    /// Parse a `--quality` CLI value. Accepts `ultra-fast`/`ultrafast`,
+    /// `fast`, `basic`, and `slow`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "ultra-fast" | "ultrafast" => Bc7Quality::UltraFast,
+            "fast" => Bc7Quality::Fast,
+            "basic" => Bc7Quality::Basic,
+            "slow" => Bc7Quality::Slow,
+            other => {
+                return Err(format!(
+                    "unknown quality '{other}'; valid: ultra-fast, fast, basic, slow"
+                ))
+            }
+        })
+    }
+}
+
+/// Convert tegra_swizzle's `BlockHeight` into the log2 value BNTX records
+/// in the BRTI `size_range` field.
+fn block_height_to_log2(bh: BlockHeight) -> u32 {
+    match bh {
+        BlockHeight::One => 0,
+        BlockHeight::Two => 1,
+        BlockHeight::Four => 2,
+        BlockHeight::Eight => 3,
+        BlockHeight::Sixteen => 4,
+        BlockHeight::ThirtyTwo => 5,
+    }
+}
+
 /// Result of compressing an image: the BC7-swizzled bytes ready to write
 /// into a BNTX BRTD section, plus the metadata BNTX needs to record.
 #[derive(Debug, Clone)]
@@ -49,12 +82,9 @@ pub struct CompressedTexture {
     /// Block-height-log2 actually used for swizzling (caller wants this
     /// to write back into the BRTI metadata).
     pub block_height_log2: u32,
-    /// Same as `swizzled_data.len()` — convenient pre-computed value
-    /// since BNTX records `image_size` as a u32.
+    /// Total size in bytes of the BC7 blocks before swizzling, summed
+    /// over all mip / array levels.
     pub image_size: u32,
-    /// Total bytes the BC7 BLOCKS take before swizzling. Used for
-    /// validation only.
-    pub linear_size: u32,
 }
 
 /// Compute the smallest power-of-two ≥ 1 mip-chain length for a texture
@@ -150,15 +180,7 @@ pub fn compress_image_bc7(
     // swizzler chose. `block_height_mip0` takes height in BLOCKS, so we
     // divide by the format's block dim.
     let height_in_blocks = height / 4;
-    let block_height: BlockHeight = block_height_mip0(height_in_blocks);
-    let block_height_log2 = match block_height {
-        BlockHeight::One => 0,
-        BlockHeight::Two => 1,
-        BlockHeight::Four => 2,
-        BlockHeight::Eight => 3,
-        BlockHeight::Sixteen => 4,
-        BlockHeight::ThirtyTwo => 5,
-    };
+    let block_height_log2 = block_height_to_log2(block_height_mip0(height_in_blocks));
 
     Ok(CompressedTexture {
         width,
@@ -168,7 +190,6 @@ pub fn compress_image_bc7(
         swizzled_data: swizzled,
         block_height_log2,
         image_size: bc7_blocks.len() as u32, // pre-swizzle linear size matches BRTI image_size in real files
-        linear_size: bc7_blocks.len() as u32,
     })
 }
 
@@ -260,14 +281,7 @@ pub fn compress_image_bc7_with_mips(
     )
     .map_err(|e| anyhow!("Tegra swizzle failed (mip): {e:?}"))?;
 
-    let block_height_log2 = match block_height_mip0(height / 4) {
-        BlockHeight::One => 0,
-        BlockHeight::Two => 1,
-        BlockHeight::Four => 2,
-        BlockHeight::Eight => 3,
-        BlockHeight::Sixteen => 4,
-        BlockHeight::ThirtyTwo => 5,
-    };
+    let block_height_log2 = block_height_to_log2(block_height_mip0(height / 4));
 
     Ok(CompressedTexture {
         width,
@@ -277,7 +291,6 @@ pub fn compress_image_bc7_with_mips(
         swizzled_data: swizzled,
         block_height_log2,
         image_size: linear_blocks.len() as u32,
-        linear_size: linear_blocks.len() as u32,
     })
 }
 
@@ -365,14 +378,7 @@ pub fn compress_cube_bc7(
     )
     .map_err(|e| anyhow!("Tegra swizzle failed (cube): {e:?}"))?;
 
-    let block_height_log2 = match block_height_mip0(size / 4) {
-        BlockHeight::One => 0,
-        BlockHeight::Two => 1,
-        BlockHeight::Four => 2,
-        BlockHeight::Eight => 3,
-        BlockHeight::Sixteen => 4,
-        BlockHeight::ThirtyTwo => 5,
-    };
+    let block_height_log2 = block_height_to_log2(block_height_mip0(size / 4));
 
     Ok(CompressedTexture {
         width: size,
@@ -382,7 +388,6 @@ pub fn compress_cube_bc7(
         swizzled_data: swizzled,
         block_height_log2,
         image_size: linear_blocks.len() as u32,
-        linear_size: linear_blocks.len() as u32,
     })
 }
 

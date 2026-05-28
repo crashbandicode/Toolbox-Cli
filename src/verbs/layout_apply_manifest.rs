@@ -21,7 +21,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::bflyt::{read_bflyt, write_bflyt, BFLYT, BasePane};
+use crate::bflyt::{read_bflyt, write_bflyt};
 use crate::bntx::{read_bntx, write_bntx, AppendTextureSpec};
 use crate::manifest::SkinManifest;
 use crate::texpipe::{import_png, Bc7Quality};
@@ -94,17 +94,7 @@ pub fn run(args: Args) -> Result<ExitCode> {
     let mut bntx = read_bntx(&fs::read(&bntx_path)?)
         .map_err(|e| anyhow::anyhow!("parsing BNTX: {}", e))?;
 
-    let quality = match args.quality.as_str() {
-        "ultra-fast" | "ultrafast" => Bc7Quality::UltraFast,
-        "fast" => Bc7Quality::Fast,
-        "basic" => Bc7Quality::Basic,
-        "slow" => Bc7Quality::Slow,
-        other => {
-            return Err(anyhow!(
-                "unknown --quality {other} (valid: ultra-fast, fast, basic, slow)"
-            ));
-        }
-    };
+    let quality: Bc7Quality = args.quality.parse().map_err(|e| anyhow!("{e}"))?;
 
     let mut applied = 0usize;
     let mut skipped = 0usize;
@@ -112,7 +102,7 @@ pub fn run(args: Args) -> Result<ExitCode> {
     for el in &manifest.elements {
         let texture_name = el.texture_name();
         let already_in_bntx = bntx.texture_index_by_name(&texture_name).is_some();
-        let already_in_bflyt = pane_exists(&bflyt, &el.pane_name);
+        let already_in_bflyt = bflyt.pane_exists(&el.pane_name);
 
         if args.skip_existing && already_in_bntx && already_in_bflyt {
             println!("skip: {} already present", el.pane_name);
@@ -189,8 +179,9 @@ pub fn run(args: Args) -> Result<ExitCode> {
             .unwrap();
 
         // 4. Clone the template pane under <pane_name> with manifest transform.
-        if !pane_exists(&bflyt, &el.pane_name) {
-            let template = find_pane(&bflyt, &args.pane_template)
+        if !bflyt.pane_exists(&el.pane_name) {
+            let template = bflyt
+                .find_pane(&args.pane_template)
                 .ok_or_else(|| anyhow!("pane template '{}' not found", args.pane_template))?
                 .clone();
             let mut clone = template.clone();
@@ -205,7 +196,8 @@ pub fn run(args: Args) -> Result<ExitCode> {
             if let Some(p) = clone.picture.as_mut() {
                 p.material_index = material_index as u16;
             }
-            let parent = find_pane_mut(&mut bflyt, &manifest.root_pane_name)
+            let parent = bflyt
+                .find_pane_mut(&manifest.root_pane_name)
                 .ok_or_else(|| {
                     anyhow!(
                         "root pane '{}' (from manifest) not found in BFLYT",
@@ -237,42 +229,4 @@ pub fn run(args: Args) -> Result<ExitCode> {
         bntx_bytes.len()
     );
     Ok(ExitCode::SUCCESS)
-}
-
-// ============================================================
-// Helpers
-// ============================================================
-
-fn pane_exists(b: &BFLYT, name: &str) -> bool {
-    find_pane(b, name).is_some()
-}
-
-fn find_pane<'a>(b: &'a BFLYT, name: &str) -> Option<&'a BasePane> {
-    fn rec<'a>(p: &'a BasePane, name: &str) -> Option<&'a BasePane> {
-        if p.name == name {
-            return Some(p);
-        }
-        for c in &p.children {
-            if let Some(found) = rec(c, name) {
-                return Some(found);
-            }
-        }
-        None
-    }
-    b.root_pane.as_ref().and_then(|r| rec(r, name))
-}
-
-fn find_pane_mut<'a>(b: &'a mut BFLYT, name: &str) -> Option<&'a mut BasePane> {
-    fn rec<'a>(p: &'a mut BasePane, name: &str) -> Option<&'a mut BasePane> {
-        if p.name == name {
-            return Some(p);
-        }
-        for c in &mut p.children {
-            if let Some(found) = rec(c, name) {
-                return Some(found);
-            }
-        }
-        None
-    }
-    b.root_pane.as_mut().and_then(|r| rec(r, name))
 }

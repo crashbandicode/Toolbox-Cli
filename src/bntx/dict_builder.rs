@@ -45,6 +45,12 @@ pub struct Trie {
     nodes: Vec<TrieNode>,
 }
 
+impl Default for Trie {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Trie {
     pub fn new() -> Self {
         // Root: bit_inx = -1, both children point to itself.

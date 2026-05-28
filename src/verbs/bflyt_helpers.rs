@@ -20,12 +20,6 @@ pub fn rewrite_bflyt(
     f(&mut bflyt)?;
     let written = write_bflyt(&bflyt).map_err(|e| anyhow::anyhow!("{}", e))?;
     let target = out.unwrap_or(input);
-    if let Some(parent) = target.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-    fs::write(target, &written)
-        .with_context(|| format!("writing {}", target.display()))?;
+    super::write_output(target, &written)?;
     Ok(written.len())
 }
