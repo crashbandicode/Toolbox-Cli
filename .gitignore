@@ -1,0 +1,22 @@
+# Cargo / Rust
+target/
+Cargo.lock.bak
+**/*.rs.bk
+
+# IDE / editor noise
+.idea/
+.vscode/
+.specstory/
+.cursorindexingignore
+
+# Local test fixtures (game assets, never committed)
+tests/fixtures/
+local-assets/
+*.bflyt
+*.bntx
+*.arc
+*.szs
+*.png
+
+# Allow the README assets if any are added later
+!docs/assets/*.png

@@ -1,0 +1,52 @@
+[package]
+name = "toolbox-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["crashbandicode"]
+license = "MIT"
+description = "Headless CLI for editing BFLYT/BNTX/SARC files used in Switch UI mods. Inspired by Switch-Toolbox; pure-Rust, no GPL dependencies."
+repository = "https://github.com/crashbandicode/Toolbox-Cli"
+readme = "README.md"
+keywords = ["nintendo", "switch", "bflyt", "bntx", "modding"]
+categories = ["command-line-utilities"]
+default-run = "toolbox-cli"
+
+[[bin]]
+name = "toolbox-cli"
+path = "src/main.rs"
+
+[dependencies]
+# Binary IO
+binrw = "0.13"
+byteorder = "1.5"
+
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive"] }
+
+# JSON output and manifest parsing
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Image / texture pipeline
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+intel_tex_2 = "0.5"
+tegra_swizzle = "0.4"
+
+# SARC archive
+sarc = "1.2"
+
+# Walk directories for SARC packing
+walkdir = "2.5"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+[dev-dependencies]
+# (test fixtures live in tests/fixtures/, gitignored)
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
