@@ -22,6 +22,7 @@ mod bntx_inspect;
 mod bntx_layout_dump;
 mod bntx_rlt_dump;
 mod bntx_roundtrip_test;
+mod layout_apply_manifest;
 mod layout_validate_manifest;
 mod mat_rename;
 mod pane_clone;
@@ -90,6 +91,11 @@ pub enum Verb {
     /// the BRTD block.
     BntxLayoutDump(bntx_layout_dump::Args),
 
+    /// Apply an SGPO skin manifest to an unpacked layout: encode each
+    /// element's PNG to BC7 + append to BNTX, then add the matching
+    /// txl1/material/pane in BFLYT. Modifies files in place.
+    LayoutApplyManifest(layout_apply_manifest::Args),
+
     /// Validate that an unpacked layout directory matches an SGPO skin
     /// manifest. Exits 0 on full match, 1 on any element mismatch.
     LayoutValidateManifest(layout_validate_manifest::Args),
@@ -118,6 +124,7 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::BntxDictTest(args) => Ok(bntx_dict_test::run(args)?),
         Verb::BntxRltDump(args) => Ok(bntx_rlt_dump::run(args)?),
         Verb::BntxLayoutDump(args) => Ok(bntx_layout_dump::run(args)?),
+        Verb::LayoutApplyManifest(args) => Ok(layout_apply_manifest::run(args)?),
         Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),
         Verb::SarcUnpack(args) => Ok(sarc_unpack::run(args)?),
         Verb::SarcPack(args) => Ok(sarc_pack::run(args)?),
