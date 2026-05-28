@@ -9,12 +9,18 @@
 //! - 2 = invocation error (bad flags) — handled by clap
 //! - 64 = unhandled internal case
 
+mod bflyt_add_material;
+mod bflyt_add_texture_ref;
+mod bflyt_helpers;
 mod bflyt_inspect;
 mod bflyt_mat1_diff;
 mod bflyt_roundtrip_test;
 mod bflyt_section_diff;
 mod bntx_inspect;
 mod layout_validate_manifest;
+mod mat_rename;
+mod pane_clone;
+mod pane_set;
 mod sarc_pack;
 mod sarc_unpack;
 
@@ -41,6 +47,22 @@ pub enum Verb {
     /// rewritten size differs from the original.
     BflytMat1Diff(bflyt_mat1_diff::Args),
 
+    /// Add a texture name to BFLYT txl1 (idempotent).
+    BflytAddTextureRef(bflyt_add_texture_ref::Args),
+
+    /// Clone a template material under a new name; optionally rebind its
+    /// first texture map.
+    BflytAddMaterial(bflyt_add_material::Args),
+
+    /// Rename a material in mat1 in-place.
+    MatRename(mat_rename::Args),
+
+    /// Edit a pane's transform / alpha / visibility / material binding.
+    PaneSet(pane_set::Args),
+
+    /// Clone a template pane (e.g. an SGPO marker) under a new name.
+    PaneClone(pane_clone::Args),
+
     /// Print a structured snapshot of a BNTX. Use --json for tool consumption.
     BntxInspect(bntx_inspect::Args),
 
@@ -61,6 +83,11 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::BflytRoundtripTest(args) => Ok(bflyt_roundtrip_test::run(args)?),
         Verb::BflytSectionDiff(args) => Ok(bflyt_section_diff::run(args)?),
         Verb::BflytMat1Diff(args) => Ok(bflyt_mat1_diff::run(args)?),
+        Verb::BflytAddTextureRef(args) => Ok(bflyt_add_texture_ref::run(args)?),
+        Verb::BflytAddMaterial(args) => Ok(bflyt_add_material::run(args)?),
+        Verb::MatRename(args) => Ok(mat_rename::run(args)?),
+        Verb::PaneSet(args) => Ok(pane_set::run(args)?),
+        Verb::PaneClone(args) => Ok(pane_clone::run(args)?),
         Verb::BntxInspect(args) => Ok(bntx_inspect::run(args)?),
         Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),
         Verb::SarcUnpack(args) => Ok(sarc_unpack::run(args)?),

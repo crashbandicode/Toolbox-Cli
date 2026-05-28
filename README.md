@@ -20,6 +20,7 @@ is copied or linked. This project is licensed independently under the
 | SARC unpack | **Working** — uses [`sarc`](https://crates.io/crates/sarc) by jam1garner |
 | SARC pack | **Working** — output size differs from the original because the `sarc` crate doesn't deduplicate identical files; functionally equivalent |
 | `layout-validate-manifest` | **Working** — read-only verifier for SGPO skin manifests; cross-validated against a layout produced by the C# CLI (passes 4/4) and the unmodified original (correctly fails 0/4) |
+| BFLYT mutation verbs (`bflyt-add-texture-ref`, `bflyt-add-material`, `mat-rename`, `pane-clone`, `pane-set`) | **Working** — replicated the SGPO 4-button `proof-one-pane` workflow in pure Rust against `info_melee.bflyt`; the Rust-built layout passes all BFLYT-side manifest checks (pane present, parent correct, material binding correct, texture-by-name in txl1). Only the "texture in BNTX" check fails — see "Limitations" below |
 
 The intent is to land BNTX writing and the texture pipeline in a follow-up.
 The current build covers the **inspection** and **validation** workflows
@@ -39,15 +40,32 @@ adding ~9 MB to the binary.
 
 ## Verbs
 
+Read-only:
+
 ```text
 bflyt-inspect             Print a JSON or human-readable snapshot of a BFLYT
-bflyt-roundtrip-test      Internal: read a BFLYT and write it back; reports byte diffs
-bflyt-section-diff        Internal: per-section size diff vs. the original
-bflyt-mat1-diff           Internal: per-material size diff vs. the original
 bntx-inspect              Print a JSON or human-readable snapshot of a BNTX
 layout-validate-manifest  Verify an unpacked layout matches an SGPO skin manifest
 sarc-unpack               Extract a SARC archive to a directory
+```
+
+Mutating:
+
+```text
+bflyt-add-texture-ref     Add a texture name to BFLYT txl1 (idempotent)
+bflyt-add-material        Clone a template material; optionally bind a texture
+mat-rename                Rename an existing material in mat1
+pane-clone                Clone a template pane (e.g. SGPO marker) under a new name
+pane-set                  Edit a pane's transform / alpha / visibility / material binding
 sarc-pack                 Pack a directory into a SARC archive
+```
+
+Internal/debug (used to develop and validate the writer):
+
+```text
+bflyt-roundtrip-test      Read a BFLYT and write it back; reports byte diffs
+bflyt-section-diff        Per-section size diff vs. the original
+bflyt-mat1-diff           Per-material size diff vs. the original
 ```
 
 Run `toolbox-cli <verb> --help` for the per-verb option list.
