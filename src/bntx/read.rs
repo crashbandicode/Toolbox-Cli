@@ -3,7 +3,7 @@
 //! Smash Ultimate-style assets).
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read};
 
 use super::*;
 use super::error::Error;
@@ -11,7 +11,6 @@ use super::error::Error;
 const MAGIC_BNTX: [u8; 4] = *b"BNTX";
 const MAGIC_NX: [u8; 4] = *b"NX  ";
 const MAGIC_BRTI: [u8; 4] = *b"BRTI";
-const MAGIC_BRTD: [u8; 4] = *b"BRTD";
 
 pub fn read_bntx(data: &[u8]) -> Result<BNTX, Error> {
     let mut c = Cursor::new(data);
@@ -22,7 +21,7 @@ pub fn read_bntx(data: &[u8]) -> Result<BNTX, Error> {
         return Err(Error::BadMagic(magic));
     }
     let _padding = c.read_u32::<LittleEndian>()?;
-    let version = c.read_u32::<LittleEndian>()?;
+    let _version = c.read_u32::<LittleEndian>()?;
     let bom = c.read_u16::<LittleEndian>()?;
     if bom != 0xFEFF {
         return Err(Error::Format(format!("unexpected BOM 0x{bom:04x}")));

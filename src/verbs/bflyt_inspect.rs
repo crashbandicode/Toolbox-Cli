@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::bflyt::{read_bflyt, BasePane, BFLYT, PaneKind};
+use crate::bflyt::{read_bflyt, BasePane, PaneKind, BFLYT};
 
 #[derive(Parser, Debug)]
 pub struct Args {

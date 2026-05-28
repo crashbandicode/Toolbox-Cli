@@ -10,11 +10,13 @@ pub mod error;
 mod read;
 mod write;
 
-pub use error::Error as BntxError;
 pub use read::read_bntx;
+// `error::Error as BntxError` and `write::write_bntx` are re-exported but
+// not currently used by any consumer; suppress the unused-import warnings.
+#[allow(unused_imports)]
+pub use error::Error as BntxError;
+#[allow(unused_imports)]
 pub use write::write_bntx;
-
-use std::collections::BTreeMap;
 
 /// Top-level in-memory model.
 #[derive(Debug, Clone)]
@@ -221,6 +223,3 @@ pub enum SurfaceDim {
     DimCube,
 }
 
-// Avoid unused-warning. BTreeMap may be useful when we extend support.
-#[allow(dead_code)]
-fn _btreemap_marker(_: &BTreeMap<u32, u32>) {}

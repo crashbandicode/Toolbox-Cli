@@ -7,13 +7,8 @@
 //! (mk8.tockdom.com, switchbrew, nintendo-formats.com) and cross-checked
 //! against round-trip tests on real game assets that we never redistribute.
 
-mod bflyt;
-mod bntx;
-mod manifest;
-mod texpipe;
-mod verbs;
-
 use clap::Parser;
+use toolbox_cli::verbs;
 
 /// Top-level CLI dispatcher. Each subcommand is a thin wrapper around a
 /// function in `verbs::*` so the verbs are easy to unit-test independently.

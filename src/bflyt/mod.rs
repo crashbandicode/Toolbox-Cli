@@ -14,6 +14,9 @@ mod read;
 mod sections;
 mod write;
 
+// Re-export the types CLI verbs and external callers need. Internal-only
+// types stay private inside `sections` and `read`/`write`.
+#[allow(unused_imports)]
 pub use sections::{
     AlphaCompare, BFLYT, BasePane, BflytError, BlendMode, Color8, FontShadowParameter, Group,
     IndirectParameter, LayoutInfo, Material, PaneKind, PaneTexCoord, PartsPane, PartsProperty,

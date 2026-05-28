@@ -11,6 +11,10 @@ keywords = ["nintendo", "switch", "bflyt", "bntx", "modding"]
 categories = ["command-line-utilities"]
 default-run = "toolbox-cli"
 
+[lib]
+name = "toolbox_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "toolbox-cli"
 path = "src/main.rs"
