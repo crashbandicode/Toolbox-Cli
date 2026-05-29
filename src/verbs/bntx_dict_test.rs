@@ -17,8 +17,8 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
-    let bytes = fs::read(&args.input)
-        .with_context(|| format!("reading {}", args.input.display()))?;
+    let bytes =
+        fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
     let bntx = read_bntx(&bytes).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     println!(
@@ -85,11 +85,7 @@ pub fn run(args: Args) -> Result<ExitCode> {
 
 /// Walk a flat dict entry list as a BNTX runtime would, returning the
 /// `string_index` of the leaf the trie navigates to.
-fn lookup_via_trie(
-    entries: &[crate::bntx::DictEntry],
-    _strings: &[String],
-    key: &[u8],
-) -> u32 {
+fn lookup_via_trie(entries: &[crate::bntx::DictEntry], _strings: &[String], key: &[u8]) -> u32 {
     if entries.len() <= 1 {
         return 0;
     }
@@ -107,8 +103,16 @@ fn lookup_via_trie(
         let node_bit = entries[node].ref_bit as i64;
         // The root sentinel has ref_bit = 0xFFFFFFFF which we want to
         // treat as a bit-index of -1; cast carefully.
-        let prev_bit_signed = if prev_bit == 0xFFFF_FFFF { -1 } else { prev_bit };
-        let node_bit_signed = if node_bit == 0xFFFF_FFFF { -1 } else { node_bit };
+        let prev_bit_signed = if prev_bit == 0xFFFF_FFFF {
+            -1
+        } else {
+            prev_bit
+        };
+        let node_bit_signed = if node_bit == 0xFFFF_FFFF {
+            -1
+        } else {
+            node_bit
+        };
         if node_bit_signed <= prev_bit_signed {
             return entries[node].string_index;
         }

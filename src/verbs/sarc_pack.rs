@@ -1,10 +1,12 @@
+//! `sarc-pack`: pack a directory tree into a SARC archive. Thin wrapper
+//! over [`crate::sarc::pack_directory_with_endian`].
+
 use anyhow::{Context, Result};
 use clap::Parser;
-use sarc::{Endian, SarcEntry, SarcFile};
-use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use walkdir::WalkDir;
+
+use crate::sarc;
 
 #[derive(Parser, Debug)]
 pub struct Args {
@@ -22,46 +24,14 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
-    if !args.input.is_dir() {
-        anyhow::bail!("input directory not found: {}", args.input.display());
-    }
-
-    let mut entries = Vec::new();
-    let root = args.input.canonicalize()?;
-    for entry in WalkDir::new(&root).follow_links(false) {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let abs = entry.path();
-        let rel = abs
-            .strip_prefix(&root)
-            .with_context(|| "computing relative path")?
-            .to_string_lossy()
-            .replace(std::path::MAIN_SEPARATOR, "/");
-        entries.push(SarcEntry {
-            name: Some(rel),
-            data: fs::read(abs)?,
-        });
-    }
-
-    let endian = if args.big_endian {
-        Endian::Big
-    } else {
-        Endian::Little
-    };
-    let sarc = SarcFile {
-        byte_order: endian,
-        files: entries,
-    };
-    let mut out = Vec::new();
-    sarc.write(&mut out)
-        .map_err(|e| anyhow::anyhow!("writing SARC: {}", e))?;
+    let bytes = sarc::pack_directory_with_endian(&args.input, args.big_endian)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     if let Some(parent) = args.out.parent() {
-        fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
     }
-    fs::write(&args.out, &out)?;
-
-    println!("packed {} files -> {}", sarc.files.len(), args.out.display());
+    std::fs::write(&args.out, &bytes).with_context(|| format!("writing {}", args.out.display()))?;
+    println!("packed -> {} ({} bytes)", args.out.display(), bytes.len());
     Ok(ExitCode::SUCCESS)
 }

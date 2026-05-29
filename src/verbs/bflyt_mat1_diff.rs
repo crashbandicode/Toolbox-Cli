@@ -18,8 +18,8 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
-    let original = fs::read(&args.input)
-        .with_context(|| format!("reading {}", args.input.display()))?;
+    let original =
+        fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
     let parsed = read_bflyt(&original).map_err(|e| anyhow::anyhow!("{}", e))?;
     let rewritten = write_bflyt(&parsed).map_err(|e| anyhow::anyhow!("{}", e))?;
 

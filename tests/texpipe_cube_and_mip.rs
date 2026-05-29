@@ -25,11 +25,9 @@
 use std::path::Path;
 
 use image::DynamicImage;
+use nx_layout_toolbox::texpipe::{compress_cube_bc7, compress_image_bc7_with_mips, Bc7Quality};
 use tegra_swizzle::surface::{deswizzle_surface, BlockDim};
 use tegra_swizzle::BlockHeight;
-use toolbox_cli::texpipe::{
-    compress_cube_bc7, compress_image_bc7_with_mips, Bc7Quality,
-};
 
 /// Loose budgets for BC7 `Fast` quality with alpha — same calibration
 /// as the single-mip round-trip test. Mip 0 is the unresized source
@@ -210,7 +208,12 @@ fn cube_map_single_mip_round_trip_64x64() {
         return;
     }
     let face_paths: [std::path::PathBuf; 6] = [
-        png.into(), png.into(), png.into(), png.into(), png.into(), png.into(),
+        png.into(),
+        png.into(),
+        png.into(),
+        png.into(),
+        png.into(),
+        png.into(),
     ];
     let mip_count = 1u32;
     let compressed = compress_cube_bc7(&face_paths, Bc7Quality::Fast, mip_count).expect("encode");
@@ -245,8 +248,7 @@ fn cube_map_single_mip_round_trip_64x64() {
     for face_idx in 0..6 {
         let start = face_idx * face_size;
         let face_bytes = &linear[start..start + face_size];
-        let decoded =
-            decode_bc7_to_rgba(face_bytes, compressed.width, compressed.height);
+        let decoded = decode_bc7_to_rgba(face_bytes, compressed.width, compressed.height);
         let (mean, peak) = per_channel_error(src_rgba.as_raw(), &decoded);
         assert_within_budget(&format!("cube face {face_idx}"), mean, peak);
     }
@@ -264,7 +266,12 @@ fn cube_map_multi_mip_round_trip_64x64() {
         return;
     }
     let face_paths: [std::path::PathBuf; 6] = [
-        png.into(), png.into(), png.into(), png.into(), png.into(), png.into(),
+        png.into(),
+        png.into(),
+        png.into(),
+        png.into(),
+        png.into(),
+        png.into(),
     ];
     let mip_count = 3u32;
     let compressed = compress_cube_bc7(&face_paths, Bc7Quality::Fast, mip_count).expect("encode");

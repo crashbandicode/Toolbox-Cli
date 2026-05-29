@@ -16,7 +16,7 @@
 //! BFLYT (so it doesn't need real game assets) and gates on
 //! `cfg(debug_assertions)` because release builds compile out the guard.
 
-use toolbox_cli::bflyt::*;
+use nx_layout_toolbox::bflyt::*;
 
 #[test]
 fn trusted_material_passes_assert() {
@@ -53,7 +53,11 @@ fn clear_untrusted_flag_resets_state_and_unlocks_assert() {
         flags_untrusted: true,
         original_section_size: Some(99),
         flags_raw: 0xFFFF_FFFF,
-        texture_maps: vec![TextureRef { index: 0, wrap_mode_u: 0, wrap_mode_v: 0 }],
+        texture_maps: vec![TextureRef {
+            index: 0,
+            wrap_mode_u: 0,
+            wrap_mode_v: 0,
+        }],
         ..Material::default()
     };
     mat.clear_untrusted_flag();
@@ -94,8 +98,16 @@ fn build_synthetic_bflyt(mat: Material) -> BFLYT {
             flag_ex: 0,
             name: "RootPane".into(),
             user_data_field: [0; 8],
-            translate: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
-            rotate: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+            translate: Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            rotate: Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
             scale: Vec2 { x: 1.0, y: 1.0 },
             width: 1280.0,
             height: 720.0,
@@ -126,10 +138,24 @@ fn untrusted_consistent_material(original_size: u32) -> Material {
     let mut m = Material {
         name: "untrusted_mat".into(),
         flags_unknown: 0,
-        black_color: Color8 { r: 0, g: 0, b: 0, a: 0 },
-        white_color: Color8 { r: 255, g: 255, b: 255, a: 255 },
+        black_color: Color8 {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        },
+        white_color: Color8 {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        },
         flags_raw: 0,
-        texture_maps: vec![TextureRef { index: 0, wrap_mode_u: 0, wrap_mode_v: 0 }],
+        texture_maps: vec![TextureRef {
+            index: 0,
+            wrap_mode_u: 0,
+            wrap_mode_v: 0,
+        }],
         texture_transforms: vec![],
         tex_coord_gens: vec![],
         tev_stages: vec![],

@@ -40,8 +40,8 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
-    let bntx_bytes = fs::read(&args.input)
-        .with_context(|| format!("reading {}", args.input.display()))?;
+    let bntx_bytes =
+        fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
     let mut bntx = read_bntx(&bntx_bytes).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let before_count = bntx.textures.len();

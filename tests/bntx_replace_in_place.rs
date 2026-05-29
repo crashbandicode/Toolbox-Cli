@@ -16,8 +16,8 @@
 use std::fs;
 use std::path::Path;
 
-use toolbox_cli::bntx::{read_bntx, write_bntx, TextureFormat};
-use toolbox_cli::texpipe::{compress_image_bc7, Bc7Quality};
+use nx_layout_toolbox::bntx::{read_bntx, write_bntx, TextureFormat};
+use nx_layout_toolbox::texpipe::{compress_image_bc7, Bc7Quality};
 
 #[test]
 fn splice_same_size_preserves_layout_and_other_textures() {

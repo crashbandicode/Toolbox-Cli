@@ -17,9 +17,9 @@
 use std::fs;
 use std::path::Path;
 
+use nx_layout_toolbox::texpipe::{compress_image_bc7, Bc7Quality};
 use tegra_swizzle::surface::{deswizzle_surface, BlockDim};
 use tegra_swizzle::BlockHeight;
-use toolbox_cli::texpipe::{compress_image_bc7, Bc7Quality};
 
 /// Per-channel error budgets, sized for the BC7 `Fast` quality preset
 /// with alpha. The numbers are deliberately loose enough to absorb
@@ -97,8 +97,12 @@ fn round_trip_one(png_path: &Path) -> Result<(), String> {
         ));
     }
 
-    let block_height = block_height_from_log2(compressed.block_height_log2)
-        .ok_or_else(|| format!("unsupported block_height_log2 {}", compressed.block_height_log2))?;
+    let block_height = block_height_from_log2(compressed.block_height_log2).ok_or_else(|| {
+        format!(
+            "unsupported block_height_log2 {}",
+            compressed.block_height_log2
+        )
+    })?;
 
     let linear_bc7 = deswizzle_surface(
         compressed.width,

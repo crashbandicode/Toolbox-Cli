@@ -16,11 +16,11 @@ pub fn write_bflyt(b: &BFLYT) -> Result<Vec<u8>, BflytError> {
     // ---- File header (20 bytes; back-patched at the end). ----
     out.extend_from_slice(&MAGIC_FLYT);
     out.write_u16::<LittleEndian>(0xFEFF)?; // BOM
-    out.write_u16::<LittleEndian>(0x14)?;   // header size
+    out.write_u16::<LittleEndian>(0x14)?; // header size
     out.write_u32::<LittleEndian>(b.version)?;
-    out.write_u32::<LittleEndian>(0)?;      // file size — back-patched
-    out.write_u16::<LittleEndian>(0)?;      // section count — back-patched
-    out.write_u16::<LittleEndian>(0)?;      // padding
+    out.write_u32::<LittleEndian>(0)?; // file size — back-patched
+    out.write_u16::<LittleEndian>(0)?; // section count — back-patched
+    out.write_u16::<LittleEndian>(0)?; // padding
 
     let mut section_count: u16 = 0;
 
@@ -235,8 +235,18 @@ fn write_material<W: Write>(w: &mut W, m: &Material) -> std::io::Result<()> {
 
     w.write_u32::<LittleEndian>(m.flags_raw)?;
     w.write_u32::<LittleEndian>(m.flags_unknown)?;
-    w.write_all(&[m.black_color.r, m.black_color.g, m.black_color.b, m.black_color.a])?;
-    w.write_all(&[m.white_color.r, m.white_color.g, m.white_color.b, m.white_color.a])?;
+    w.write_all(&[
+        m.black_color.r,
+        m.black_color.g,
+        m.black_color.b,
+        m.black_color.a,
+    ])?;
+    w.write_all(&[
+        m.white_color.r,
+        m.white_color.g,
+        m.white_color.b,
+        m.white_color.a,
+    ])?;
 
     for tr in &m.texture_maps {
         w.write_i16::<LittleEndian>(tr.index)?;
@@ -477,11 +487,11 @@ fn write_wnd_payload(out: &mut Vec<u8>, wnd: &WindowPane) -> Result<(), BflytErr
     out.write_u16::<LittleEndian>(wnd.frame_size_b)?;
     out.write_u8(wnd.frame_count)?;
     out.write_u8(wnd.flag)?;
-    out.write_u16::<LittleEndian>(0)?;       // padding
+    out.write_u16::<LittleEndian>(0)?; // padding
     let content_off_pos = out.len();
-    out.write_u32::<LittleEndian>(0)?;       // back-patch
+    out.write_u32::<LittleEndian>(0)?; // back-patch
     let frame_off_pos = out.len();
-    out.write_u32::<LittleEndian>(0)?;       // back-patch
+    out.write_u32::<LittleEndian>(0)?; // back-patch
 
     // Content immediately after.
     let content_pos = out.len();

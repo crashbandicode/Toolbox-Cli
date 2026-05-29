@@ -8,7 +8,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use toolbox_cli::bflyt::{read_bflyt, write_bflyt};
+use nx_layout_toolbox::bflyt::{read_bflyt, write_bflyt};
 
 fn collect_bflyts(dir: &Path, out: &mut Vec<PathBuf>) {
     if !dir.is_dir() {

@@ -94,9 +94,12 @@ pub fn read_bflyt(data: &[u8]) -> Result<BFLYT, BflytError> {
         }
         let mut sec_magic = [0u8; 4];
         sec_magic.copy_from_slice(&data[offset..offset + 4]);
-        let sec_size =
-            u32::from_le_bytes([data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7]])
-                as usize;
+        let sec_size = u32::from_le_bytes([
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
+        ]) as usize;
         if sec_size < 8 || offset + sec_size > data.len() {
             return Err(BflytError::Format(format!(
                 "section {:?} at 0x{offset:x} has invalid size 0x{sec_size:x}",
@@ -338,7 +341,9 @@ fn read_string_list(payload: &[u8]) -> Result<Vec<String>, BflytError> {
     let _padding = c.read_u16::<LittleEndian>()?;
     let table_base = 4usize; // offsets are measured from this position
     if table_base + count * 4 > payload.len() {
-        return Err(BflytError::TruncatedSection("txl1/fnl1 offset table".into()));
+        return Err(BflytError::TruncatedSection(
+            "txl1/fnl1 offset table".into(),
+        ));
     }
     let mut offsets = Vec::with_capacity(count);
     for _ in 0..count {

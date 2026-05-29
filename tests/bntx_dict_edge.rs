@@ -5,8 +5,8 @@
 //! adversarial cases: empty trie, single insert, prefix names,
 //! non-ASCII names, and many short names with shared prefixes.
 
-use toolbox_cli::bntx::dict_builder::Trie;
-use toolbox_cli::bntx::DictEntry;
+use nx_layout_toolbox::bntx::dict_builder::Trie;
+use nx_layout_toolbox::bntx::DictEntry;
 
 /// Walk the entries as the BNTX runtime would, returning the
 /// `string_index` of the leaf reached by following `key`'s bits.
@@ -26,8 +26,16 @@ fn lookup(entries: &[DictEntry], key: &[u8]) -> u32 {
         };
         let prev_bit = entries[prev].ref_bit as i64;
         let node_bit = entries[node].ref_bit as i64;
-        let prev_signed = if prev_bit == 0xFFFF_FFFF { -1 } else { prev_bit };
-        let node_signed = if node_bit == 0xFFFF_FFFF { -1 } else { node_bit };
+        let prev_signed = if prev_bit == 0xFFFF_FFFF {
+            -1
+        } else {
+            prev_bit
+        };
+        let node_signed = if node_bit == 0xFFFF_FFFF {
+            -1
+        } else {
+            node_bit
+        };
         if node_signed <= prev_signed {
             break;
         }

@@ -21,8 +21,8 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
-    let original = fs::read(&args.input)
-        .with_context(|| format!("reading {}", args.input.display()))?;
+    let original =
+        fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
     let parsed = read_bflyt(&original).map_err(|e| anyhow::anyhow!("{}", e))?;
     let written = write_bflyt(&parsed).map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -45,7 +45,13 @@ pub fn run(args: Args) -> Result<ExitCode> {
     let lo = diff.saturating_sub(context);
     let hi_o = (diff + context).min(original.len());
     let hi_w = (diff + context).min(written.len());
-    println!("  original[{lo:x}..{hi_o:x}] = {:02x?}", &original[lo..hi_o]);
-    println!("  rewritten[{lo:x}..{hi_w:x}] = {:02x?}", &written[lo..hi_w]);
+    println!(
+        "  original[{lo:x}..{hi_o:x}] = {:02x?}",
+        &original[lo..hi_o]
+    );
+    println!(
+        "  rewritten[{lo:x}..{hi_w:x}] = {:02x?}",
+        &written[lo..hi_w]
+    );
     Ok(ExitCode::from(1))
 }

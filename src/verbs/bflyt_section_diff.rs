@@ -17,8 +17,8 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
-    let original = fs::read(&args.input)
-        .with_context(|| format!("reading {}", args.input.display()))?;
+    let original =
+        fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
     let parsed = read_bflyt(&original).map_err(|e| anyhow::anyhow!("{}", e))?;
     let rewritten = write_bflyt(&parsed).map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -49,9 +49,14 @@ fn walk_sections(label: &str, data: &[u8]) {
             println!("  [{i:>3}] truncated at 0x{offset:x}");
             return;
         }
-        let magic = std::str::from_utf8(&data[offset..offset + 4]).unwrap_or("?").to_string();
+        let magic = std::str::from_utf8(&data[offset..offset + 4])
+            .unwrap_or("?")
+            .to_string();
         let size = u32::from_le_bytes([
-            data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
         ]);
         // Always emit every section so external diff tools can walk
         // arbitrarily-large files. Trimming was easy for debugging the
@@ -61,5 +66,8 @@ fn walk_sections(label: &str, data: &[u8]) {
         offset += size as usize;
     }
     println!("  total section bytes (incl. headers) = {total_section_bytes}");
-    println!("  trailing after last section: 0x{offset:x} (file size 0x{:x})", data.len());
+    println!(
+        "  trailing after last section: 0x{offset:x} (file size 0x{:x})",
+        data.len()
+    );
 }

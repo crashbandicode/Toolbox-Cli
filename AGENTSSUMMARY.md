@@ -7,10 +7,12 @@ long output.
 
 ## Project
 
-Pure-Rust CLI for editing Nintendo Switch UI assets used by Smash
+Pure-Rust **library + CLI** (crate `nx-layout-toolbox`, lib
+`nx_layout_toolbox`) for editing Nintendo Switch UI assets used by Smash
 Ultimate (and other Switch games). Produces byte-identical round-trips
 of BFLYT v8/v9, BNTX, and SARC files. Used by the SGPO project to apply
-custom face-button skins.
+custom face-button skins. The CLI is behind a default `cli` feature;
+`default-features = false` gives just the format library (no clap/anyhow).
 
 - Repo: https://github.com/crashbandicode/Toolbox-Cli
 - License: MIT (no GPL deps)
@@ -172,6 +174,31 @@ Resolved this session:
 7. ~~`tests/texpipe_cube_and_mip.rs`~~ — done (commit pending).
 
 ## Session log
+
+### 2026-05-29 — Library-ify + crates.io prep + RLT >255 hardening
+Renamed the crate to `nx-layout-toolbox` (lib `nx_layout_toolbox`, bin
+`nx-layout-toolbox`). Gated the CLI behind a default `cli` feature so the
+library builds with no `clap`/`anyhow` (verified `--no-default-features`).
+Added a unified `nx_layout_toolbox::Error` / `Result` (thiserror) and moved
+`texpipe` off `anyhow`. Extracted the reusable logic out of the CLI verbs
+into the library so SGPO can import it directly:
+- `sarc` module — `pack_directory`, `unpack`, `unpack_to_dir`.
+- `BFLYT` methods — `add_texture_ref`, `add_material_from_template`,
+  `rename_material`, `clone_pane` (`ClonePaneSpec`), `set_pane` (`PaneEdit`).
+- `bntx::pipeline` — `import_image` / `import_png_file` /
+  `import_cube_png_files`, `replace_texture` (`ReplaceSource`).
+- `layout` — `apply_manifest` (`ApplyOptions`/`ApplyReport`),
+  `validate_manifest` (`ValidateOptions`/`ValidateReport`).
+All CLI verbs are now thin wrappers over these. Added a crate-level rustdoc
+overview + a `prelude`, a `build.rs` that emits `-lstdc++` on linux-gnu so
+downstream binaries link `intel_tex_2`'s ISPC objects without extra config,
+and `[package.metadata.docs.rs]`. Phase-0 fix: `build_canonical_reloc_table`'s
+texture-info-array entry used `offset_count: n as u8`, truncating for >=256
+textures; it now uses one-pointer-per-struct past 255 (preserving the
+in-game-verified <=255 encoding), covered by `tests/bntx_rlt_large.rs`.
+`cargo clippy` is clean; `cargo publish --dry-run` packages + verify-builds;
+all tests pass with and without default features. Not yet published / no GH
+release workflow (those were intentionally deferred).
 
 ### 2026-05-29 — Fix `_DIC` rebuild order (in-game-validated bug)
 `BntxFile::rebuild_dict` built the dictionary trie in **string-pool

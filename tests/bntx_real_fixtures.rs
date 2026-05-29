@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::Path;
 
-use toolbox_cli::bntx::{read_bntx, write_bntx};
+use nx_layout_toolbox::bntx::{read_bntx, write_bntx};
 
 #[test]
 fn every_bntx_in_fixtures_round_trips() {

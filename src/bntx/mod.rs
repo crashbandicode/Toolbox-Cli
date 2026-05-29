@@ -27,8 +27,9 @@
 //! supported by edit operations on the parsed state followed by a full
 //! re-serialize.
 
-pub mod error;
 pub mod dict_builder;
+pub mod error;
+pub mod pipeline;
 mod read;
 mod write;
 
@@ -336,9 +337,12 @@ impl TextureFormat {
 impl BntxFile {
     /// Find a texture by exact name match.
     pub fn texture_index_by_name(&self, name: &str) -> Option<usize> {
-        self.textures
-            .iter()
-            .position(|t| self.strings.get(t.name_string_index as usize).map(String::as_str) == Some(name))
+        self.textures.iter().position(|t| {
+            self.strings
+                .get(t.name_string_index as usize)
+                .map(String::as_str)
+                == Some(name)
+        })
     }
 
     /// Look up the channel-swizzle bytes for a texture (4 entries: R,G,B,A
@@ -357,7 +361,11 @@ impl BntxFile {
     /// module from a PNG). After the call, `self.textures.last()` is
     /// the new texture. The dict trie, relocation table struct counts,
     /// and BRTD data block are all updated automatically.
-    pub fn append_texture(&mut self, name: String, spec: AppendTextureSpec) -> Result<(), BntxError> {
+    pub fn append_texture(
+        &mut self,
+        name: String,
+        spec: AppendTextureSpec,
+    ) -> Result<(), BntxError> {
         if name.is_empty() {
             return Err(BntxError::Format("texture name cannot be empty".into()));
         }

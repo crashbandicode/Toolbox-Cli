@@ -10,18 +10,22 @@
 //! - https://github.com/FuryBaguette/SwitchLayoutEditor (SwitchThemesCommon)
 //! - http://mk8.tockdom.com/wiki/
 
+mod ops;
 mod read;
 mod sections;
 mod write;
+
+pub use ops::{ClonePaneSpec, PaneEdit};
 
 // Re-export the types CLI verbs and external callers need. Internal-only
 // types stay private inside `sections` and `read`/`write`.
 #[allow(unused_imports)]
 pub use sections::{
-    AlphaCompare, BFLYT, BasePane, BflytError, BlendMode, Color8, FontShadowParameter, Group,
+    AlphaCompare, BasePane, BflytError, BlendMode, Color8, FontShadowParameter, Group,
     IndirectParameter, LayoutInfo, Material, OpaqueSection, PaneKind, PaneTexCoord, PartsPane,
     PartsProperty, PicturePane, ProjectionTexGenParam, TevStage, TexCoordGen, TextBoxPane,
     TextureRef, TextureTransform, UserData, Vec2, Vec3, WindowContent, WindowFrame, WindowPane,
+    BFLYT,
 };
 
 /// BFLYT material name slot size (28 bytes), exposed for callers that

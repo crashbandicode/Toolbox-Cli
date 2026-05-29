@@ -19,9 +19,9 @@ mod bflyt_section_diff;
 mod bntx_dict_test;
 mod bntx_import_png;
 mod bntx_inspect;
+mod bntx_layout_dump;
 mod bntx_remove_texture;
 mod bntx_replace_png;
-mod bntx_layout_dump;
 mod bntx_rlt_dump;
 mod bntx_roundtrip_test;
 mod layout_apply_manifest;
@@ -46,8 +46,7 @@ pub(crate) fn write_output(target: &Path, bytes: &[u8]) -> Result<()> {
             std::fs::create_dir_all(parent)?;
         }
     }
-    std::fs::write(target, bytes)
-        .with_context(|| format!("writing {}", target.display()))?;
+    std::fs::write(target, bytes).with_context(|| format!("writing {}", target.display()))?;
     Ok(())
 }
 

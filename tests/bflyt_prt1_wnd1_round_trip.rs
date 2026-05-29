@@ -21,7 +21,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use toolbox_cli::bflyt::*;
+use nx_layout_toolbox::bflyt::*;
 
 fn walk_bflyts(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -75,11 +75,17 @@ fn for_each_pane(p: &BasePane, f: &mut dyn FnMut(&BasePane)) {
 fn most_complex_wnd1_round_trips_byte_identically() {
     let root = Path::new("tests/fixtures");
     if !root.exists() {
-        eprintln!("skipping prt1/wnd1 test (no fixtures at {})", root.display());
+        eprintln!(
+            "skipping prt1/wnd1 test (no fixtures at {})",
+            root.display()
+        );
         return;
     }
     let bflyts = walk_bflyts(root);
-    assert!(!bflyts.is_empty(), "fixture sweep should find at least one BFLYT");
+    assert!(
+        !bflyts.is_empty(),
+        "fixture sweep should find at least one BFLYT"
+    );
 
     // Score = frame_count * 100 + tex_coord_count * 10 + has_picture-style
     // packing. We weight frame_count highest because that's the most
@@ -152,10 +158,10 @@ fn most_complex_wnd1_round_trips_byte_identically() {
 
     // (2) the wnd1's structural detail survives a re-parse.
     let reparsed = read_bflyt(&written).expect("re-parse the written bytes");
-    let original_pane = find_pane(parsed.root_pane.as_ref(), &pane_name)
-        .expect("locate wnd1 in original parse");
-    let recovered_pane = find_pane(reparsed.root_pane.as_ref(), &pane_name)
-        .expect("locate wnd1 in re-parsed copy");
+    let original_pane =
+        find_pane(parsed.root_pane.as_ref(), &pane_name).expect("locate wnd1 in original parse");
+    let recovered_pane =
+        find_pane(reparsed.root_pane.as_ref(), &pane_name).expect("locate wnd1 in re-parsed copy");
     let orig = original_pane
         .window
         .as_ref()
@@ -220,7 +226,10 @@ fn most_complex_wnd1_round_trips_byte_identically() {
 fn most_complex_prt1_round_trips_byte_identically() {
     let root = Path::new("tests/fixtures");
     if !root.exists() {
-        eprintln!("skipping prt1/wnd1 test (no fixtures at {})", root.display());
+        eprintln!(
+            "skipping prt1/wnd1 test (no fixtures at {})",
+            root.display()
+        );
         return;
     }
     let bflyts = walk_bflyts(root);
@@ -248,8 +257,8 @@ fn most_complex_prt1_round_trips_byte_identically() {
                     if (prt.property_count as usize) == 0 {
                         return;
                     }
-                    let score = (prt.property_count as usize) * 1_000_000
-                        + prt.raw_property_data.len();
+                    let score =
+                        (prt.property_count as usize) * 1_000_000 + prt.raw_property_data.len();
                     let challenger_score = local_best
                         .as_ref()
                         .map(|(_, pc, rd)| pc * 1_000_000 + rd)
@@ -361,7 +370,10 @@ fn most_complex_prt1_round_trips_byte_identically() {
 fn fixture_corpus_contains_non_trivial_prt1_and_wnd1() {
     let root = Path::new("tests/fixtures");
     if !root.exists() {
-        eprintln!("skipping fixture-coverage test (no fixtures at {})", root.display());
+        eprintln!(
+            "skipping fixture-coverage test (no fixtures at {})",
+            root.display()
+        );
         return;
     }
     let bflyts = walk_bflyts(root);

@@ -25,8 +25,8 @@
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::io::Write;
 
-use super::*;
 use super::error::Error;
+use super::*;
 
 const BNTX_HEADER_SIZE: usize = 0x20;
 const NX_HEADER_SIZE: usize = 0x28;
@@ -75,7 +75,8 @@ pub fn write_bntx(b: &BntxFile) -> Result<Vec<u8>, Error> {
     // files), accounting for the BRTD header. The last BRTI's recorded
     // block size absorbs the padding before BRTD, matching real files.
     let texture_data_alignment = 1usize << b.header.alignment_shift;
-    let brti_padding_needed = align_up_pad(brti_array_end + BRTD_HEADER_SIZE, texture_data_alignment);
+    let brti_padding_needed =
+        align_up_pad(brti_array_end + BRTD_HEADER_SIZE, texture_data_alignment);
     let brtd_section_off = brti_array_end + brti_padding_needed;
     let brtd_data_start = brtd_section_off + BRTD_HEADER_SIZE;
     let brtd_data_end = brtd_data_start + b.brtd.data.len();
@@ -101,8 +102,7 @@ pub fn write_bntx(b: &BntxFile) -> Result<Vec<u8>, Error> {
         &b.relocation_table
     };
     let reloc_table_off = brtd_data_end;
-    let reloc_table_size =
-        16 + rlt.sections.len() * 24 + rlt.entries.len() * 8;
+    let reloc_table_size = 16 + rlt.sections.len() * 24 + rlt.entries.len() * 8;
     let file_size = reloc_table_off + reloc_table_size;
 
     // ---- Emit bytes. ----
@@ -119,7 +119,13 @@ pub fn write_bntx(b: &BntxFile) -> Result<Vec<u8>, Error> {
     )?;
 
     // NX header.
-    write_nx_header(&mut out, b, info_ptrs_off, brtd_section_off, dict_section_off)?;
+    write_nx_header(
+        &mut out,
+        b,
+        info_ptrs_off,
+        brtd_section_off,
+        dict_section_off,
+    )?;
 
     // Memory pool already initialized to zero.
 
@@ -210,6 +216,29 @@ fn build_canonical_reloc_table(
         },
     ];
 
+    // The texture-info pointer array is `n` consecutive pointers at 0x198.
+    // `RltEntry::offset_count` is a u8, so once a file has more than 255
+    // textures we can't encode all of them as consecutive offsets in a
+    // single struct — instead we emit one pointer per struct (`struct_count`
+    // is a u16). Both encodings relocate exactly the same `n` consecutive
+    // qwords; the `<= 255` form is what Nintendo emits and what we keep for
+    // the common case (and what is validated in-game).
+    let info_ptr_entry = if n <= 255 {
+        RltEntry {
+            position: info_ptrs_off as u32,
+            struct_count: 1,
+            offset_count: n as u8,
+            padding_count: 0,
+        }
+    } else {
+        RltEntry {
+            position: info_ptrs_off as u32,
+            struct_count: n,
+            offset_count: 1,
+            padding_count: 0,
+        }
+    };
+
     let entries = vec![
         // Entry 0: NX header `info_ptrs_off` (1 ptr at file offset 0x28).
         RltEntry {
@@ -227,12 +256,8 @@ fn build_canonical_reloc_table(
             padding_count: 0,
         },
         // Entry 2: texture-info pointer array (`n` ptrs starting at 0x198).
-        RltEntry {
-            position: info_ptrs_off as u32,
-            struct_count: 1,
-            offset_count: n as u8,
-            padding_count: 0,
-        },
+        // Encoding chosen above to stay within `offset_count`'s u8 range.
+        info_ptr_entry,
         // Entry 3: dict name_ptrs (one ptr per dict entry, at +0x10 of
         // each 16-byte dict entry; stride 2 qwords -- offset_count=1,
         // padding_count=1).
@@ -502,11 +527,7 @@ fn write_brtd(out: &mut [u8], offset: usize, b: &BntxFile) -> Result<(), Error> 
     Ok(())
 }
 
-fn write_reloc_table(
-    out: &mut [u8],
-    offset: usize,
-    rlt: &RelocationTable,
-) -> Result<(), Error> {
+fn write_reloc_table(out: &mut [u8], offset: usize, rlt: &RelocationTable) -> Result<(), Error> {
     {
         let mut c = std::io::Cursor::new(&mut out[offset..offset + 16]);
         c.write_all(b"_RLT")?;

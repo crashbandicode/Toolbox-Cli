@@ -19,8 +19,8 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
-    let bytes = fs::read(&args.input)
-        .with_context(|| format!("reading {}", args.input.display()))?;
+    let bytes =
+        fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
     let bntx = read_bntx(&bytes).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let alignment = 1u64 << bntx.header.alignment_shift;

@@ -8,13 +8,13 @@
 //! against round-trip tests on real game assets that we never redistribute.
 
 use clap::Parser;
-use toolbox_cli::verbs;
+use nx_layout_toolbox::verbs;
 
 /// Top-level CLI dispatcher. Each subcommand is a thin wrapper around a
 /// function in `verbs::*` so the verbs are easy to unit-test independently.
 #[derive(Parser, Debug)]
 #[command(
-    name = "toolbox-cli",
+    name = "nx-layout-toolbox",
     version,
     about = "Pure-Rust CLI for BFLYT v8 / BNTX / SARC editing. Inspired by Switch-Toolbox.",
     long_about = None,
@@ -30,7 +30,7 @@ fn main() -> std::process::ExitCode {
         Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err}");
-            if std::env::var("TOOLBOX_CLI_TRACE").as_deref() == Ok("1") {
+            if std::env::var("NX_LAYOUT_TOOLBOX_TRACE").as_deref() == Ok("1") {
                 eprintln!("{err:?}");
             }
             std::process::ExitCode::from(1)

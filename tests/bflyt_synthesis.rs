@@ -7,7 +7,7 @@
 //! drop them into `tests/fixtures/` (gitignored) and they'll be picked up
 //! by `tests/bflyt_real_fixtures.rs` when present.
 
-use toolbox_cli::bflyt;
+use nx_layout_toolbox::bflyt;
 
 #[test]
 fn synthetic_minimal_layout_round_trips() {
@@ -28,10 +28,24 @@ fn synthetic_minimal_layout_round_trips() {
         materials: vec![Material {
             name: "mat_test".into(),
             flags_unknown: 0,
-            black_color: Color8 { r: 0, g: 0, b: 0, a: 0 },
-            white_color: Color8 { r: 255, g: 255, b: 255, a: 255 },
+            black_color: Color8 {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0,
+            },
+            white_color: Color8 {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            },
             flags_raw: 0, // rebuild_flags will fix this
-            texture_maps: vec![TextureRef { index: 0, wrap_mode_u: 0, wrap_mode_v: 0 }],
+            texture_maps: vec![TextureRef {
+                index: 0,
+                wrap_mode_u: 0,
+                wrap_mode_v: 0,
+            }],
             texture_transforms: vec![TextureTransform {
                 translate: Vec2 { x: 0.0, y: 0.0 },
                 rotate: 0.0,
@@ -57,8 +71,16 @@ fn synthetic_minimal_layout_round_trips() {
             flag_ex: 0,
             name: "RootPane".into(),
             user_data_field: [0; 8],
-            translate: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
-            rotate: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+            translate: Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            rotate: Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
             scale: Vec2 { x: 1.0, y: 1.0 },
             width: 1280.0,
             height: 720.0,

@@ -1,9 +1,12 @@
-# Toolbox-Cli
+# nx-layout-toolbox
 
-Pure-Rust CLI for editing Nintendo Switch UI assets — BFLYT (Cafe
-Layout v8/v9), BNTX (texture container), and SARC archives. End-to-end
+Pure-Rust **library and CLI** for editing Nintendo Switch UI assets — BFLYT
+(Cafe Layout v8/v9), BNTX (texture container), and SARC archives. End-to-end
 pipeline: take an unpacked game layout + a JSON manifest + a folder of
 PNGs and produce a modified, deployable layout.
+
+> Crate name: `nx-layout-toolbox` (binary + library `nx_layout_toolbox`).
+> The source repository is still named `Toolbox-Cli`.
 
 **Inspired by** [KillzXGaming/Switch-Toolbox](https://github.com/KillzXGaming/Switch-Toolbox)
 (GPL-3.0, archived). All format parsers, writers, and the Patricia-trie
@@ -32,33 +35,61 @@ real Smash Ultimate assets.
 
 ```bash
 cargo build --release
-# ./target/release/toolbox-cli.exe
+# ./target/release/nx-layout-toolbox.exe
 ```
 
 Requires Rust 1.96+. The release build statically links Intel ISPC for
-BC7 (via `intel_tex_2`), adding ~9 MB to the binary.
+BC7 (via `intel_tex_2`), adding ~9 MB to the binary. Prebuilt BC7 binaries
+ship for x86_64 Linux, Windows, and macOS, so no ISPC/libclang toolchain is
+needed to build.
+
+## Use as a library
+
+The crate is also a library. Depend on it with the CLI machinery (`clap` +
+`anyhow`) disabled when you only need the format API:
+
+```toml
+[dependencies]
+nx-layout-toolbox = { version = "0.1", default-features = false }
+```
+
+```rust
+use nx_layout_toolbox::prelude::*;
+use std::path::Path;
+
+let mut bntx = read_bntx(&std::fs::read("__Combined.bntx")?)?;
+let opts = ImportOptions { quality: Bc7Quality::Fast, ..Default::default() };
+import_png_file(&mut bntx, "tex_button_a", Path::new("a.png"), &opts)?;
+std::fs::write("__Combined.bntx", write_bntx(&bntx)?)?;
+```
+
+The default `cli` feature builds the `nx-layout-toolbox` binary; library
+consumers use `default-features = false`. High-level building blocks live in
+`bflyt` (mutation ops on `BFLYT`), `bntx` (+ `bntx::pipeline` for PNG
+import/replace), `sarc`, `texpipe`, `manifest`, and `layout`
+(`apply_manifest` / `validate_manifest`).
 
 ## End-to-end SGPO workflow
 
 ```bash
 # Unpack the original layout archive.
-toolbox-cli sarc-unpack -i info_melee.arc -o unpacked/
+nx-layout-toolbox sarc-unpack -i info_melee.arc -o unpacked/
 
 # Apply the SGPO skin manifest: encodes 4 face-button PNGs to BC7,
 # appends them to BNTX, then adds the matching BFLYT panes/materials.
-toolbox-cli layout-apply-manifest \
+nx-layout-toolbox layout-apply-manifest \
   --layout-dir unpacked/ \
   --manifest skin_manifest.json \
   --skin-dir my_skin_pngs/ \
   --quality fast
 
 # Verify the result matches the manifest (4/4 elements should pass).
-toolbox-cli layout-validate-manifest \
+nx-layout-toolbox layout-validate-manifest \
   --layout-dir unpacked/ \
   --manifest skin_manifest.json
 
 # Repack into a deployable SARC.
-toolbox-cli sarc-pack -i unpacked/ -o info_melee_modded.arc
+nx-layout-toolbox sarc-pack -i unpacked/ -o info_melee_modded.arc
 ```
 
 ## Verbs
@@ -98,7 +129,7 @@ bntx-rlt-dump             Dump the _RLT relocation-table layout
 bntx-layout-dump          Dump per-texture data offsets/alignment in BRTD
 ```
 
-Run `toolbox-cli <verb> --help` for the per-verb option list.
+Run `nx-layout-toolbox <verb> --help` for the per-verb option list.
 
 ### `bflyt-inspect --json`
 
@@ -223,9 +254,9 @@ The BNTX writer is validated against the 1.7 MB `__Combined.bntx`. To
 reproduce on your own copy:
 
 ```bash
-toolbox-cli sarc-unpack -i layout.arc -o unpacked/
+nx-layout-toolbox sarc-unpack -i layout.arc -o unpacked/
 for f in unpacked/blyt/*.bflyt; do
-  toolbox-cli bflyt-roundtrip-test -i "$f"
+  nx-layout-toolbox bflyt-roundtrip-test -i "$f"
 done
-toolbox-cli bntx-roundtrip-test -i unpacked/timg/__Combined.bntx
+nx-layout-toolbox bntx-roundtrip-test -i unpacked/timg/__Combined.bntx
 ```

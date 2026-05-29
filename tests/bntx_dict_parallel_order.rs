@@ -14,7 +14,7 @@
 //! `rebuild_dict` ever reverts to iterating `strings` instead of
 //! `textures`.
 
-use toolbox_cli::bntx::{
+use nx_layout_toolbox::bntx::{
     BntxFile, BntxHeader, BrtdSection, DictSection, NxHeader, RelocationTable, Texture,
     TextureFormat,
 };

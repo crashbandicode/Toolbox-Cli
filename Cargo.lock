@@ -427,6 +427,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nx-layout-toolbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "binrw",
+ "byteorder",
+ "clap",
+ "image",
+ "intel_tex_2",
+ "sarc",
+ "serde",
+ "serde_json",
+ "tegra_swizzle",
+ "texture2ddecoder",
+ "thiserror",
+ "walkdir",
+]
+
+[[package]]
 name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -649,25 +668,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "toolbox-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "binrw",
- "byteorder",
- "clap",
- "image",
- "intel_tex_2",
- "sarc",
- "serde",
- "serde_json",
- "tegra_swizzle",
- "texture2ddecoder",
- "thiserror",
- "walkdir",
 ]
 
 [[package]]

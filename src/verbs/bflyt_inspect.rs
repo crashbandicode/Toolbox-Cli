@@ -23,8 +23,8 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
-    let bytes = fs::read(&args.input)
-        .with_context(|| format!("reading {}", args.input.display()))?;
+    let bytes =
+        fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
     let bflyt = read_bflyt(&bytes).map_err(|e| anyhow::anyhow!("{}", e))?;
     let doc = build_document(&bflyt, &args.input, bytes.len());
 
@@ -115,7 +115,12 @@ fn build_document(b: &BFLYT, path: &std::path::Path, file_size: usize) -> Value 
     })
 }
 
-fn collect_panes(p: &BasePane, parent: Option<&str>, materials: &[crate::bflyt::Material], out: &mut Vec<Value>) {
+fn collect_panes(
+    p: &BasePane,
+    parent: Option<&str>,
+    materials: &[crate::bflyt::Material],
+    out: &mut Vec<Value>,
+) {
     let kind = match p.kind {
         PaneKind::Pane => "pan1",
         PaneKind::Picture => "pic1",
@@ -128,11 +133,15 @@ fn collect_panes(p: &BasePane, parent: Option<&str>, materials: &[crate::bflyt::
     let (mat_idx, mat_name) = match (&p.picture, &p.text) {
         (Some(pic), _) => (
             Some(pic.material_index as i32),
-            materials.get(pic.material_index as usize).map(|m| m.name.clone()),
+            materials
+                .get(pic.material_index as usize)
+                .map(|m| m.name.clone()),
         ),
         (_, Some(t)) => (
             Some(t.material_index as i32),
-            materials.get(t.material_index as usize).map(|m| m.name.clone()),
+            materials
+                .get(t.material_index as usize)
+                .map(|m| m.name.clone()),
         ),
         _ => (None, None),
     };

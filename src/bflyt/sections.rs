@@ -143,12 +143,12 @@ pub struct LayoutInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneKind {
-    Pane,    // pan1
-    Picture, // pic1
-    Text,    // txt1
-    Window,  // wnd1
-    Parts,   // prt1
-    Bounding,// bnd1
+    Pane,     // pan1
+    Picture,  // pic1
+    Text,     // txt1
+    Window,   // wnd1
+    Parts,    // prt1
+    Bounding, // bnd1
 }
 
 /// A pane tree node. Holds the common ResPane fields, an optional kind-
@@ -452,7 +452,7 @@ impl Material {
             | (1 << 12)          // blend_mode_logic
             | (1 << 14)          // indirect
             | (0b11 << 15)       // proj_tex_gen
-            | (1 << 17);         // font_shadow
+            | (1 << 17); // font_shadow
 
         let tex_count = self.texture_maps.len().min(3) as u32;
         let mtx_count = self.texture_transforms.len().min(3) as u32;
@@ -465,12 +465,22 @@ impl Material {
         owned |= (mtx_count & 0x3) << 2;
         owned |= (tex_coord_gen_count & 0x3) << 4;
         owned |= (tev_stage_count & 0x7) << 6;
-        if self.alpha_compare.is_some() { owned |= 1 << 9; }
-        if self.blend_mode.is_some() { owned |= 1 << 10; }
-        if self.blend_mode_logic.is_some() { owned |= 1 << 12; }
-        if self.indirect_param.is_some() { owned |= 1 << 14; }
+        if self.alpha_compare.is_some() {
+            owned |= 1 << 9;
+        }
+        if self.blend_mode.is_some() {
+            owned |= 1 << 10;
+        }
+        if self.blend_mode_logic.is_some() {
+            owned |= 1 << 12;
+        }
+        if self.indirect_param.is_some() {
+            owned |= 1 << 14;
+        }
         owned |= (proj_tex_gen_count & 0x3) << 15;
-        if self.font_shadow_param.is_some() { owned |= 1 << 17; }
+        if self.font_shadow_param.is_some() {
+            owned |= 1 << 17;
+        }
 
         // Keep every bit we don't own; overwrite the bits we do.
         self.flags_raw = (self.flags_raw & !owned_mask) | (owned & owned_mask);
@@ -612,7 +622,7 @@ pub struct FontShadowParameter {
 
 #[derive(Debug, Clone, Default)]
 pub struct Group {
-    pub name: String, // 24 bytes
+    pub name: String,       // 24 bytes
     pub panes: Vec<String>, // 24-byte names
     pub children: Vec<Group>,
 }
@@ -644,9 +654,16 @@ pub mod error {
             match self {
                 Error::Io(e) => write!(f, "io: {e}"),
                 Error::BadMagic(m) => {
-                    write!(f, "not a BFLYT (magic = {:?})", std::str::from_utf8(m).unwrap_or("?"))
+                    write!(
+                        f,
+                        "not a BFLYT (magic = {:?})",
+                        std::str::from_utf8(m).unwrap_or("?")
+                    )
                 }
-                Error::BadBom(b) => write!(f, "unsupported BOM 0x{b:04x} (only little-endian supported)"),
+                Error::BadBom(b) => write!(
+                    f,
+                    "unsupported BOM 0x{b:04x} (only little-endian supported)"
+                ),
                 Error::UnsupportedVersion(v) => write!(
                     f,
                     "unsupported BFLYT version {}.{}.{}.{} (this CLI is Switch v8 only)",

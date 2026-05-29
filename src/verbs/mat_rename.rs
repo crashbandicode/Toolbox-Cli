@@ -1,18 +1,12 @@
-//! `mat-rename`: change a material's name in-place. Used by SGPO when
-//! renaming materials to follow the `mat_<pane_name>` convention.
+//! `mat-rename`: change a material's name in-place. Thin wrapper over
+//! [`crate::bflyt::BFLYT::rename_material`].
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::bflyt::MAT_NAME_LEN_USIZE;
 use crate::verbs::bflyt_helpers::rewrite_bflyt;
-
-/// Material name slot is `MAT_NAME_LEN_USIZE` (28) bytes; names of
-/// exactly that length are valid because real BFLYTs use the full slot
-/// without a trailing null. Names longer than that are rejected.
-pub const MAT_NAME_MAX_BYTES: usize = MAT_NAME_LEN_USIZE;
 
 #[derive(Parser, Debug)]
 pub struct Args {
@@ -34,29 +28,10 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
-    if args.to.len() > MAT_NAME_MAX_BYTES {
-        return Err(anyhow!(
-            "new material name '{}' is {} bytes (max {})",
-            args.to,
-            args.to.len(),
-            MAT_NAME_MAX_BYTES
-        ));
-    }
     let from = args.from.clone();
     let to = args.to.clone();
     let n = rewrite_bflyt(&args.input, args.out.as_deref(), |bflyt| {
-        if bflyt.materials.iter().any(|m| m.name == to) {
-            return Err(anyhow!(
-                "material '{}' already exists in mat1; refusing to create a duplicate",
-                to
-            ));
-        }
-        let idx = bflyt
-            .materials
-            .iter()
-            .position(|m| m.name == from)
-            .ok_or_else(|| anyhow!("material '{}' not found in mat1", from))?;
-        bflyt.materials[idx].name = to.clone();
+        bflyt.rename_material(&from, &to)?;
         Ok(())
     })?;
     println!("ok: renamed '{}' -> '{}' ({} bytes)", args.from, args.to, n);

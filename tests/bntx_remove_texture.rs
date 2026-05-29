@@ -17,7 +17,7 @@
 use std::fs;
 use std::path::Path;
 
-use toolbox_cli::bntx::{read_bntx, write_bntx, BntxFile};
+use nx_layout_toolbox::bntx::{read_bntx, write_bntx, BntxFile};
 
 /// Snapshot of a texture's identity + pixel bytes, captured before a
 /// remove operation so we can verify it's preserved afterward.
@@ -68,7 +68,10 @@ fn assert_snapshots_preserved(snaps: &[TexSnapshot], modified: &BntxFile) {
 fn load_fixture() -> Option<BntxFile> {
     let path = Path::new("tests/fixtures/bntx/info_melee_original__Combined.bntx");
     if !path.exists() {
-        eprintln!("skipping bntx_remove_texture test (no fixture at {})", path.display());
+        eprintln!(
+            "skipping bntx_remove_texture test (no fixture at {})",
+            path.display()
+        );
         return None;
     }
     let bytes = fs::read(path).expect("read fixture");
@@ -209,7 +212,7 @@ fn remove_nonexistent_texture_errors_and_preserves_state() {
 /// differs from the original).
 #[test]
 fn remove_then_append_back_yields_same_named_set() {
-    use toolbox_cli::bntx::AppendTextureSpec;
+    use nx_layout_toolbox::bntx::AppendTextureSpec;
 
     let Some(parsed) = load_fixture() else { return };
     let original_count = parsed.textures.len();

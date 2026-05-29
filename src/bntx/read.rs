@@ -5,8 +5,8 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{Cursor, Read};
 
-use super::*;
 use super::error::Error;
+use super::*;
 
 const MAGIC_BNTX: [u8; 4] = *b"BNTX";
 const MAGIC_NX: [u8; 4] = *b"NX  ";
@@ -22,7 +22,9 @@ const TEX_PTR_ARRAY_START: usize = MEMORY_POOL_START + MEMORY_POOL_SIZE; // 0x19
 
 pub fn read_bntx(data: &[u8]) -> Result<BntxFile, Error> {
     if data.len() < 0x48 {
-        return Err(Error::Truncated("file is too small for BNTX+NX headers".into()));
+        return Err(Error::Truncated(
+            "file is too small for BNTX+NX headers".into(),
+        ));
     }
 
     // ---------- BNTX header (0x00-0x1F) ----------
@@ -57,7 +59,10 @@ pub fn read_bntx(data: &[u8]) -> Result<BntxFile, Error> {
     }
 
     // ---------- Memory pool (must be all zeros) ----------
-    if !data[MEMORY_POOL_START..TEX_PTR_ARRAY_START].iter().all(|&b| b == 0) {
+    if !data[MEMORY_POOL_START..TEX_PTR_ARRAY_START]
+        .iter()
+        .all(|&b| b == 0)
+    {
         return Err(Error::Format(
             "memory pool is non-zero (unexpected for the BNTX format we target)".into(),
         ));
@@ -230,9 +235,7 @@ fn read_dict_section(
 ) -> Result<(DictSection, usize), Error> {
     let magic = &data[offset..offset + 4];
     if magic != MAGIC_DIC {
-        return Err(Error::Format(format!(
-            "expected _DIC at 0x{offset:x}"
-        )));
+        return Err(Error::Format(format!("expected _DIC at 0x{offset:x}")));
     }
     let count = read_u32(data, offset + 4);
     let entry_count = (count + 1) as usize; // +1 root sentinel
@@ -261,10 +264,7 @@ fn read_dict_section(
         });
     }
     Ok((
-        DictSection {
-            count,
-            entries,
-        },
+        DictSection { count, entries },
         entries_start + entry_count * 16,
     ))
 }
@@ -272,11 +272,7 @@ fn read_dict_section(
 /// Resolve a file-absolute `BntxStr` pointer to the matching index in
 /// `strings`. We do this by reading the string at that offset and finding
 /// the matching entry. (The strings are unique in well-formed BNTX files.)
-fn string_index_at_offset(
-    data: &[u8],
-    offset: usize,
-    strings: &[String],
-) -> Result<u32, Error> {
+fn string_index_at_offset(data: &[u8], offset: usize, strings: &[String]) -> Result<u32, Error> {
     let s = read_bntx_str(data, offset)?;
     strings
         .iter()
@@ -394,9 +390,7 @@ fn find_brtd(data: &[u8]) -> Result<usize, Error> {
 fn read_relocation_table(data: &[u8], offset: usize) -> Result<RelocationTable, Error> {
     let magic = &data[offset..offset + 4];
     if magic != MAGIC_RLT {
-        return Err(Error::Format(format!(
-            "expected _RLT at 0x{offset:x}"
-        )));
+        return Err(Error::Format(format!("expected _RLT at 0x{offset:x}")));
     }
     let _self_off = read_u32(data, offset + 4);
     let section_count = read_u32(data, offset + 8) as usize;
@@ -452,16 +446,20 @@ fn read_u32(data: &[u8], off: usize) -> u32 {
 
 fn read_u64(data: &[u8], off: usize) -> u64 {
     u64::from_le_bytes([
-        data[off], data[off + 1], data[off + 2], data[off + 3],
-        data[off + 4], data[off + 5], data[off + 6], data[off + 7],
+        data[off],
+        data[off + 1],
+        data[off + 2],
+        data[off + 3],
+        data[off + 4],
+        data[off + 5],
+        data[off + 6],
+        data[off + 7],
     ])
 }
 
 fn read_bntx_str(data: &[u8], offset: usize) -> Result<String, Error> {
     if offset + 2 > data.len() {
-        return Err(Error::Truncated(format!(
-            "BntxStr header at 0x{offset:x}"
-        )));
+        return Err(Error::Truncated(format!("BntxStr header at 0x{offset:x}")));
     }
     let len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
     let start = offset + 2;

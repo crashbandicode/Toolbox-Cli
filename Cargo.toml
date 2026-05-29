@@ -1,5 +1,5 @@
 [package]
-name = "toolbox-cli"
+name = "nx-layout-toolbox"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.96"
@@ -9,24 +9,35 @@ description = "Headless CLI for editing BFLYT/BNTX/SARC files used in Switch UI 
 repository = "https://github.com/crashbandicode/Toolbox-Cli"
 readme = "README.md"
 keywords = ["nintendo", "switch", "bflyt", "bntx", "modding"]
-categories = ["command-line-utilities"]
-default-run = "toolbox-cli"
+categories = ["command-line-utilities", "parser-implementations"]
+default-run = "nx-layout-toolbox"
+# Internal dev log; not useful to crate consumers.
+exclude = ["/AGENTSSUMMARY.md"]
+
+[features]
+default = ["cli"]
+# The `cli` feature pulls in clap + anyhow and the `verbs` module that backs
+# the `nx-layout-toolbox` binary. Library consumers (e.g. SGPO) can depend on
+# this crate with `default-features = false` to get just the format library
+# with no CLI dependencies.
+cli = ["dep:clap", "dep:anyhow"]
 
 [lib]
-name = "toolbox_cli"
+name = "nx_layout_toolbox"
 path = "src/lib.rs"
 
 [[bin]]
-name = "toolbox-cli"
+name = "nx-layout-toolbox"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [dependencies]
 # Binary IO
 binrw = "0.13"
 byteorder = "1.5"
 
-# CLI argument parsing
-clap = { version = "4.5", features = ["derive"] }
+# CLI argument parsing (only needed for the `cli` feature / the binary)
+clap = { version = "4.5", features = ["derive"], optional = true }
 
 # JSON output and manifest parsing
 serde = { version = "1.0", features = ["derive"] }
@@ -43,8 +54,9 @@ sarc = "1.2"
 # Walk directories for SARC packing
 walkdir = "2.5"
 
-# Error handling
-anyhow = "1.0"
+# Error handling. `anyhow` is only used by the CLI layer (the `verbs`
+# module); the library API uses the typed `thiserror`-based error types.
+anyhow = { version = "1.0", optional = true }
 thiserror = "1.0"
 
 [dev-dependencies]
@@ -59,3 +71,7 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Document the full public surface (CLI verbs included) on docs.rs.
+[package.metadata.docs.rs]
+all-features = true

@@ -4,7 +4,7 @@
 //! source image into the swizzled BC7 layout that BNTX texture data
 //! blocks expect.
 
-use anyhow::{anyhow, Context, Result};
+use crate::error::{Error, Result};
 use image::{DynamicImage, GenericImageView};
 use intel_tex_2::{bc7, RgbaSurface};
 use tegra_swizzle::surface::{swizzle_surface, BlockDim};
@@ -41,7 +41,7 @@ impl std::str::FromStr for Bc7Quality {
 
     /// Parse a `--quality` CLI value. Accepts `ultra-fast`/`ultrafast`,
     /// `fast`, `basic`, and `slow`.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         Ok(match s {
             "ultra-fast" | "ultrafast" => Bc7Quality::UltraFast,
             "fast" => Bc7Quality::Fast,
@@ -108,10 +108,7 @@ pub fn natural_mip_count(width: u32, height: u32) -> u32 {
 /// multiple of 4 we transparent-pad the right and bottom edges to the
 /// next multiple. The compressed texture's `width`/`height` will reflect
 /// the padded dimensions, not the source.
-pub fn compress_image_bc7(
-    image: &DynamicImage,
-    quality: Bc7Quality,
-) -> Result<CompressedTexture> {
+pub fn compress_image_bc7(image: &DynamicImage, quality: Bc7Quality) -> Result<CompressedTexture> {
     let (src_w, src_h) = image.dimensions();
     let width = (src_w + 3) & !3;
     let height = (src_h + 3) & !3;
@@ -150,11 +147,7 @@ pub fn compress_image_bc7(
     // intel_tex_2 expects an output buffer sized to bc7::calc_output_size(w, h).
     let output_size = bc7::calc_output_size(width, height) as usize;
     let mut bc7_blocks = vec![0u8; output_size];
-    bc7::compress_blocks_into(
-        &quality.settings(has_alpha),
-        &surface,
-        &mut bc7_blocks,
-    );
+    bc7::compress_blocks_into(&quality.settings(has_alpha), &surface, &mut bc7_blocks);
 
     // BC7 has a 4x4 block size and 16 bytes/block. Swizzle into Tegra
     // block-linear layout.
@@ -172,7 +165,7 @@ pub fn compress_image_bc7(
         1, // mip count
         1, // layer count
     )
-    .map_err(|e| anyhow!("Tegra swizzle failed: {e:?}"))?;
+    .map_err(|e| Error::Texpipe(format!("Tegra swizzle failed: {e:?}")))?;
 
     // The swizzler picks `block_height` internally when we pass `None`;
     // BNTX records the value as a log2 in BRTI's `size_range` field. Use
@@ -195,7 +188,8 @@ pub fn compress_image_bc7(
 
 /// Open a PNG/JPG/BMP image and run the BC7+swizzle pipeline.
 pub fn import_png(path: &std::path::Path, quality: Bc7Quality) -> Result<CompressedTexture> {
-    let img = image::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let img = image::open(path)
+        .map_err(|e| Error::Texpipe(format!("opening {}: {e}", path.display())))?;
     compress_image_bc7(&img, quality)
 }
 
@@ -210,7 +204,7 @@ pub fn compress_image_bc7_with_mips(
     mip_count: u32,
 ) -> Result<CompressedTexture> {
     if mip_count == 0 {
-        return Err(anyhow!("mip_count must be >= 1"));
+        return Err(Error::Texpipe("mip_count must be >= 1".into()));
     }
     let (src_w, src_h) = image.dimensions();
     let width = (src_w + 3) & !3;
@@ -279,7 +273,7 @@ pub fn compress_image_bc7_with_mips(
         mip_count,
         1,
     )
-    .map_err(|e| anyhow!("Tegra swizzle failed (mip): {e:?}"))?;
+    .map_err(|e| Error::Texpipe(format!("Tegra swizzle failed (mip): {e:?}")))?;
 
     let block_height_log2 = block_height_to_log2(block_height_mip0(height / 4));
 
@@ -303,32 +297,31 @@ pub fn compress_cube_bc7(
     mip_count: u32,
 ) -> Result<CompressedTexture> {
     if mip_count == 0 {
-        return Err(anyhow!("mip_count must be >= 1"));
+        return Err(Error::Texpipe("mip_count must be >= 1".into()));
     }
     let mut faces = Vec::with_capacity(6);
     for p in face_paths.iter() {
-        faces.push(image::open(p).with_context(|| format!("opening {}", p.display()))?);
+        faces.push(
+            image::open(p).map_err(|e| Error::Texpipe(format!("opening {}: {e}", p.display())))?,
+        );
     }
     let (w0, h0) = faces[0].dimensions();
     if w0 != h0 {
-        return Err(anyhow!(
-            "cube-map face 0 is {}x{}; cube faces must be square",
-            w0, h0
-        ));
+        return Err(Error::Texpipe(format!(
+            "cube-map face 0 is {w0}x{h0}; cube faces must be square"
+        )));
     }
     if w0 % 4 != 0 {
-        return Err(anyhow!(
-            "cube-map face dimension {} is not a multiple of 4 (required for BC7)",
-            w0
-        ));
+        return Err(Error::Texpipe(format!(
+            "cube-map face dimension {w0} is not a multiple of 4 (required for BC7)"
+        )));
     }
     for (i, f) in faces.iter().enumerate() {
         let (w, h) = f.dimensions();
         if (w, h) != (w0, h0) {
-            return Err(anyhow!(
-                "cube-map face {} is {}x{}; expected {}x{}",
-                i, w, h, w0, h0
-            ));
+            return Err(Error::Texpipe(format!(
+                "cube-map face {i} is {w}x{h}; expected {w0}x{h0}"
+            )));
         }
     }
     let size = w0;
@@ -376,7 +369,7 @@ pub fn compress_cube_bc7(
         mip_count,
         6, // 6 cube faces
     )
-    .map_err(|e| anyhow!("Tegra swizzle failed (cube): {e:?}"))?;
+    .map_err(|e| Error::Texpipe(format!("Tegra swizzle failed (cube): {e:?}")))?;
 
     let block_height_log2 = block_height_to_log2(block_height_mip0(size / 4));
 
@@ -390,4 +383,3 @@ pub fn compress_cube_bc7(
         image_size: linear_blocks.len() as u32,
     })
 }
-
