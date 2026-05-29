@@ -415,12 +415,22 @@ impl BntxFile {
         Ok(())
     }
 
-    /// Rebuild `self.dict` from the current `self.strings` list. Texture
-    /// names live at `strings[2..]` (idx 0 = empty, idx 1 = container).
+    /// Rebuild `self.dict` from the current textures.
+    ///
+    /// CRITICAL: the `_DIC` is a *parallel array* to the texture (BRTI)
+    /// array — a name lookup resolves to a node **index**, and the game's
+    /// loader uses that index to fetch `texture[index - 1]`. So the dict
+    /// nodes must be inserted in **texture (BRTI) order**, not string-pool
+    /// order: `entries[i + 1]` must describe `self.textures[i]`. The
+    /// string pool is stored in a different order than the BRTI array in
+    /// real Smash files (e.g. `texture[0]`'s name sits deep in `_STR`),
+    /// so iterating `self.strings` here scrambles every existing texture's
+    /// name→texture mapping and corrupts unrelated HUD textures in-game.
     pub fn rebuild_dict(&mut self) {
         let mut trie = crate::bntx::dict_builder::Trie::new();
-        for (idx, s) in self.strings.iter().enumerate().skip(2) {
-            trie.insert(s.as_bytes(), idx as u32);
+        for tex in &self.textures {
+            let name = &self.strings[tex.name_string_index as usize];
+            trie.insert(name.as_bytes(), tex.name_string_index);
         }
         let entries = trie.to_entries();
         self.dict = DictSection {

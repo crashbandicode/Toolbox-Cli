@@ -173,6 +173,27 @@ Resolved this session:
 
 ## Session log
 
+### 2026-05-29 — Fix `_DIC` rebuild order (in-game-validated bug)
+`BntxFile::rebuild_dict` built the dictionary trie in **string-pool
+order**, but `_DIC` is a *parallel array* to the BRTI/texture array: a
+name lookup resolves to a node **index** and the loader reads
+`texture[index - 1]`. Real Smash `__Combined.bntx` stores `_STR` in a
+different order than the BRTI array, so every appended layout resolved
+**206/207 existing names to the WRONG texture** — scrambling unrelated
+HUD textures in-game (timer / percent / name-plate / portrait corrupted)
+while the appended texture (last in both pools) looked fine. Found via
+Switch/emulator testing on the SGPO project after a static byte-audit had
+(wrongly) cleared the append. Fix: iterate `self.textures` (BRTI order)
+in `rebuild_dict`; rebuilding the stock dict now reproduces Nintendo's
+`_DIC` **byte-for-byte (0/207 entry mismatches)**, and the regenerated
+227-texture SGPO layout is 227/227 parallel with stock texture bytes
+intact. Added `tests/bntx_dict_parallel_order.rs` pinning the
+node-order == texture-order invariant — the round-trip path never
+exercised it (it emits the dict verbatim) and `bntx-dict-test` only
+checked name→string_index resolution, which holds regardless of node
+order. `remove_texture` shares `rebuild_dict`, so it's fixed too. All
+38 tests pass + the new regression test.
+
 ### 2026-05-28 — agent-fixtures expansion (commit 0208194)
 Round-trip coverage: 25 → 508 BFLYTs (4 game archives + 3 community
 mods, including 28 HDR layout archives). Fixed name-slot off-by-one,
