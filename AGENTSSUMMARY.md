@@ -62,7 +62,12 @@ src/
 │   └── dict.rs         DictRegistry: ZsDic.pack loader, id-keyed (zs=1, bcett=2, pack=3)
 ├── texpipe.rs          PNG → BC7/BC1/BC3/BC4/BC5 (intel_tex_2) → Tegra swizzle
 ├── dds.rs              DDS (DX10) read/write; DXGI↔TextureFormat; interchange
-├── sarc.rs             SARC native reader + custom per-file-alignment writer (no `sarc` crate)
+├── sarc/               Native SARC read+write (no `sarc` crate); crate-extractable
+│   ├── mod.rs          Public API, ArcFile/ArcEntry/UnpackedFile, format constants
+│   ├── read.rs         Reader (header/SFAT/SFNT, bounds-checked) — pure std
+│   ├── write.rs        Per-file-alignment writer + file_alignment — pure std
+│   ├── error.rs        SarcError (std + thiserror only; no walkdir)
+│   └── fsutil.rs       pack_directory / unpack_to_dir (the only walkdir/fs users)
 ├── layout.rs           apply_manifest / validate_manifest / apply_manifest_to_arc
 ├── diff.rs             Structured BFLYT+BNTX before/after diff (name-keyed)
 ├── audit.rs            Recursive unsupported/suspicious-structure scan → JSON
@@ -225,6 +230,9 @@ src/
 - **Errors**: parse errors carry section-index, material-index, or pane
   context. Add similar context when extending. Look at how
   `read_mat1` / `read_bflyt` wrap inner errors with `map_err(context)`.
+  Per-format modules expose their own typed error enums (`BflytError`,
+  `BntxError`, `SarcError`) that convert into the crate-level `Error` via
+  `#[from]`; new format modules should follow the same pattern.
 - **Verbatim preservation**: When reading a structure we don't fully
   decode, capture it as opaque bytes (`trailing`, `opaque_sections`,
   `parts.raw_property_data`, `text.trailing`) and re-emit verbatim.
@@ -274,8 +282,8 @@ src/
 ## TODO / roadmap
 
 The **live, prioritized backlog lives in `todo.md`** — read it first for
-current work. Status snapshot (last committed `origin/main` @ c6159ec;
-the compression batch below is staged, pending commit approval):
+current work. Status snapshot (compression committed @ `bd454c7`; the SARC
+crate-ready hardening below is staged, pending commit approval):
 
 - ✅ **Prior 7-item handoff** (bntx export-png/all, format-preserving
   replace, DDS export/import/replace, layout-apply-arc, layout-diff,
@@ -286,15 +294,19 @@ the compression batch below is staged, pending commit approval):
 - ✅ **Doc refresh** + **BFLYT cross-game robustness (TotK)** + **TotK
   fixtures & `bflan-roundtrip-test` verb** (commits e19d7bc, c6159ec).
 - ✅ **Compression module (zstd + dict + Yaz0) + recursive archives**
-  (this batch): native SARC reader (dropped the `sarc` crate); `zstd 0.13`;
-  `compression::{mod,zstd,yaz0,dict}`; verbs `decompress`/`compress`/
+  (commit bd454c7): native SARC reader (dropped the `sarc` crate); `zstd
+  0.13`; `compression::{mod,zstd,yaz0,dict}`; verbs `decompress`/`compress`/
   `archive-extract`; compression-aware `layout-audit`. Decode byte-identical
   to Python on real TotK `.blarc.zs`/`.pack.zs`.
-- ▶️ **Next** (see `todo.md`, recommended order): **SARC crate-ready
-  hardening** (module split + `SarcError` + comprehensive tests; small,
-  do first) → BNTX `0x00040100` + ASTC → BYAML → RSTB/RESTBL → MSBT →
-  AAMP → BFLYT advanced mutations → layout-repair → BFRES inspect-only →
-  project workflow.
+- ✅ **SARC crate-ready hardening** (staged): `src/sarc.rs` → `src/sarc/`
+  (`mod`/`read`/`write`/`error`/`fsutil`); typed `SarcError` (wired into the
+  crate `Error` via `#[from]`); std-only codec core with the `walkdir`/`fs`
+  helpers isolated in `fsutil`; 14 original unit tests (LE/BE round-trip,
+  alignment derivation, hash-only ordering, empty/single/large, malformed
+  inputs, pseudo-random property round-trip). Ready to lift into `nx-sarc`.
+- ▶️ **Next** (see `todo.md`, recommended order): BNTX `0x00040100` +
+  ASTC → BYAML → RSTB/RESTBL → MSBT → AAMP → BFLYT advanced mutations →
+  layout-repair → BFRES inspect-only → project workflow.
 
 Standing backlog (no owner):
 
@@ -303,6 +315,30 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-05-30 — SARC crate-ready hardening (module split + SarcError)
+Follow-up to the compression batch (same session). Restructured the native
+SARC code toward a future standalone `nx-sarc` crate, without behavior
+changes (round-trip + real-data CLI output identical to before).
+
+- `src/sarc.rs` → `src/sarc/`: `mod.rs` (public API, `ArcFile`/`ArcEntry`/
+  `UnpackedFile`, format constants), `read.rs` + `write.rs` (the codec core,
+  **pure std**), `error.rs` (typed `SarcError`, `std + thiserror` only — no
+  `walkdir`), `fsutil.rs` (the only `walkdir`/`std::fs` user: directory
+  pack/unpack; a future optional `fs` feature).
+- **Typed errors.** Replaced the stringly `Error::Sarc(String)` with
+  `Error::Sarc(#[from] SarcError)`; `SarcError` has structured parser
+  variants (offsets, node index, byte ranges) matching the
+  `BflytError`/`BntxError` convention. All callers were `?`/`.map_err`/
+  `.expect` and needed no changes beyond the `#[from]` conversion.
+- **Tests (14, original).** Authored from the format spec + our round-trip
+  discipline; malformed-input checklist informed by the MIT `jam1garner/sarc`
+  crate (credited in a comment) — no verbatim copying, no GPL, no committed
+  fixtures. Covers LE/BE round-trip, alignment derivation (BNTX/BNSH→0x1000,
+  nested→0x2000, Yaz0→0x80, exponent clamp), hash-only ordering stability,
+  empty/single/2000-entry archives, bad magic/BOM/missing-SFAT/node-OOB, and
+  a pseudo-random property round-trip. `cargo test` green (34 lib unit tests
+  total); `clippy --all-targets` clean; `--no-default-features` builds.
 
 ### 2026-05-30 — Compression module (zstd+dict, Yaz0) + native SARC reader
 Roadmap item #1. Lets the tool open real TotK/BOTW dumps in-process.

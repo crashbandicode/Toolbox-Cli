@@ -26,21 +26,20 @@ session immediately after this file was written.
   `compression.zstd` on real `Boot.blarc.zs` (id 1) and `…pack.zs` (id 3);
   `decompress(compress(x)) == x` for zstd+dict and Yaz0. Local fixtures:
   `tests/fixtures/totk/compression/` (gitignored).
-- [ ] **Make SARC a crate-ready module** (dedicated follow-up to the native
-  reader added above; do *after* the compression batch is green+committed).
-  Promote `src/sarc.rs` → `src/sarc/` (`mod.rs`/`read.rs`/`write.rs`/
-  `error.rs`); add a typed `SarcError` to match `BflytError`/`BntxError`;
-  keep the codec core **zero-dependency** (std only) and isolate the
-  `walkdir`/`std::fs` helpers behind a clear boundary (future optional `fs`
-  feature) so it can be extracted as a standalone `nx-sarc` crate later.
-  Add comprehensive **original** tests (LE+BE round-trip, hash-only entries,
-  alignment derivation incl. BNTX/BNSH→0x1000 & nested→0x2000, subdir names,
-  4-byte name padding, hash-order stability/collisions, empty/single/large
-  >1000 entries, malformed inputs: bad magic/truncation/OOB ranges/missing
-  SFNT/non-UTF8 name, property round-trip). Tests authored from the public
-  spec + our round-trip discipline; edge-case checklist informed by the MIT
-  `jam1garner/sarc` crate (credit in a comment) — **no** verbatim copying,
-  **no** GPL/Switch-Toolbox, **no** committed game fixtures.
+- [x] **Make SARC a crate-ready module.** Done: `src/sarc.rs` → `src/sarc/`
+  (`mod`/`read`/`write`/`error`/`fsutil`); typed `SarcError` matching
+  `BflytError`/`BntxError`, wired into the crate `Error` via `#[from]`;
+  std-only codec core with the `walkdir`/`std::fs` helpers isolated in
+  `fsutil` (future optional `fs` feature) so it can be lifted into a
+  standalone `nx-sarc` crate. 14 original unit tests (LE/BE round-trip,
+  alignment derivation incl. BNTX/BNSH→0x1000 & nested→0x2000, hash-only
+  ordering stability, empty/single/2000-entry, malformed inputs: bad
+  magic/BOM/missing-SFAT/node-OOB, pseudo-random property round-trip);
+  edge-case checklist informed by the MIT `jam1garner/sarc` crate (credited
+  in a comment) — no verbatim copying, no GPL, no committed fixtures.
+  *Remaining for the actual crate split (deferred):* move to its own
+  `Cargo.toml`/repo, gate `fsutil` behind an `fs` feature, and consider a
+  hand-rolled (thiserror-free) `Display` for a truly std-only core.
 - [x] **Adopt TotK fixtures** (bflyt/bflan) + `bflan-roundtrip-test` verb.
   Local gates now cover Smash + TotK: 881 BFLYT, 7616 BFLAN — all
   byte-identical. (Fixtures gitignored under `tests/fixtures/totk/`.)

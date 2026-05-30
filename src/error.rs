@@ -28,9 +28,9 @@ pub enum Error {
     #[error("texture pipeline error: {0}")]
     Texpipe(String),
 
-    /// A SARC archive pack/unpack failure.
+    /// A SARC archive parse, write, or pack/unpack failure.
     #[error("SARC error: {0}")]
-    Sarc(String),
+    Sarc(#[from] crate::sarc::SarcError),
 
     /// A compression/decompression failure (zstd, Yaz0/Yaz1, or a missing
     /// dictionary).

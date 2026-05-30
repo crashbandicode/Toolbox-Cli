@@ -216,7 +216,11 @@ src/
 │   └── dict_builder.rs  Patricia-trie builder for the _DIC section
 ├── texpipe.rs         PNG -> RGBA8 -> BC1/BC3/BC4/BC5/BC7 -> Tegra swizzle
 ├── dds.rs             DDS (DX10) read/write; DXGI <-> TextureFormat
-├── sarc.rs            SARC native reader + custom per-file-alignment writer
+├── sarc/              Native SARC read+write (crate-extractable; typed SarcError)
+│   ├── mod.rs         Public API + ArcFile/ArcEntry types + format constants
+│   ├── read.rs        Reader (header/SFAT/SFNT) + write.rs writer (pure std)
+│   ├── error.rs       SarcError (std + thiserror)
+│   └── fsutil.rs      Directory pack/unpack (walkdir/std::fs)
 ├── compression/       zstd (+ TotK dict) and Yaz0/Yaz1 codecs + detection
 │   ├── mod.rs         Codec detect + decompress / compress entry points
 │   ├── zstd.rs        libzstd wrapper + pure-Rust frame-header dict-id parser
