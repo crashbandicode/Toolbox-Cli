@@ -51,16 +51,24 @@ src/
 └── verbs/              One file per CLI verb
 ```
 
-## Round-trip status (commit 0208194)
+## Round-trip status (as of commit d958a13)
 
-- **BFLYT**: 508/508 byte-identical (4 game UI archives + 28 HDR mod
-  archives + training-modpack + installed_sgpo_layout).
+- **BFLYT**: 508/508 Smash byte-identical, **plus 373/373 TotK** (Boot +
+  Common + Title `.blarc`) after the cross-game robustness pass
+  (unknown sections → opaque; `scr1/ali1/spi1`/unknown in-tree → opaque
+  *pane nodes* so `pas1`/`pae1` nesting round-trips; post-tree `usd1`
+  after `cnt1` → trailing section).
+- **BFLAN**: 5838/5838 byte-identical (Smash corpus).
 - **BNTX**: 5/6 byte-identical. The 6th
   (`sgpo_one_pane_png_proof__Combined.bntx`) is a C# Switch-Toolbox
   output with a 1040-entry verbose RLT vs Nintendo's 8-entry compact
-  RLT — both are functionally valid; the test tolerates this.
-- **SGPO end-to-end**: layout-apply-manifest + layout-validate-manifest
-  pass 4/4 elements on a fresh `info_melee` archive.
+  RLT — both are functionally valid; the test tolerates this. (TotK BNTX
+  are version 0x00040100 + ASTC — not yet supported; see todo.md.)
+- **SARC**: custom writer re-packs `info_melee.layout.arc` at ~2.16 MB
+  (was 4.7 MB via the crate writer), all 344 entries byte-identical,
+  per-file alignment correct.
+- **SGPO end-to-end**: layout-apply-manifest / -arc + validate pass 4/4
+  elements on a fresh `info_melee` archive.
 
 ## Tests
 
@@ -255,6 +263,35 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-05-30 — Doc refresh + BFLYT cross-game robustness (TotK)
+Two batches toward "general Switch modding tool":
+
+**Doc scan/fix.** README was stale (pre-handoff): refreshed the status
+table, verb list (export/DDS/replace/remove/bflan/diff/audit/apply-arc),
+architecture tree, dependencies (texture2ddecoder; custom SARC writer),
+limitations (multi-mip/cube, RLT hardened, alignment fixed), and the
+test-corpus counts. Fixed `lib.rs` rustdoc module list (added
+bflan/dds/diff/audit) and the stale `(commit 0208194)` round-trip-status
+header.
+
+**BFLYT robustness (TotK).** The parser hard-failed on TotK's `ctl1`
+section and several TotK pane-nesting shapes. Fixes:
+- Unknown sections are no longer fatal. File-level ones (before the pane
+  tree, e.g. `ctl1` between `mat1` and the first pane) → file-level
+  `OpaqueSection` re-emitted before the root pane.
+- In-tree unknown/`scr1`/`ali1`/`spi1` sections → new `PaneKind::Opaque`
+  **pane nodes** carrying verbatim bytes. They were previously flattened
+  to anchored sections, which unbalanced `pas1`/`pae1` and dropped
+  sections when a real pane nested under them (`pan1 pas1 ali1 pas1 …`).
+- A `usd1` after the pane/group tree + `cnt1` (TotK `Pa*` layouts end
+  `… gre1 cnt1 usd1`) → `BFLYT.trailing_sections`, re-emitted last.
+
+Result: **0 → 373/373 TotK Boot/Common/Title BFLYT byte-identical**, and
+Smash stays **508/508** (the changes are byte-identical for Smash too —
+opaque panes emit the same magic sequence). All tests pass; clippy clean.
+Decompressed TotK assets live in `%TEMP%\totk_probe` (Python 3.14's
+stdlib `compression.zstd` + the extracted `zs.zsdic`).
 
 ### 2026-05-29 — Custom SARC writer (per-file alignment)
 Replaced the `sarc` crate's writer (we still use its reader) with a

@@ -65,7 +65,12 @@ pub fn read_bflyt(data: &[u8]) -> Result<BFLYT, BflytError> {
         user_data: None,
         control_data: None,
         opaque_sections: Vec::new(),
+        trailing_sections: Vec::new(),
     };
+
+    // Set once the pane tree is done (first grp1 or cnt1). After this,
+    // `usd1` / unknown sections are trailing, not pane-attached.
+    let mut past_panes = false;
 
     // Pane parsing uses a flat arena keyed by index, mirroring the C#
     // `currentPane` + `parentPane` scalar pair. This avoids fighting the
@@ -155,6 +160,7 @@ pub fn read_bflyt(data: &[u8]) -> Result<BFLYT, BflytError> {
             }
 
             b"grp1" => {
+                past_panes = true;
                 let g = read_group(payload)?;
                 let idx = group_arena.len();
                 group_arena.push((g, parent_group));
@@ -172,10 +178,17 @@ pub fn read_bflyt(data: &[u8]) -> Result<BFLYT, BflytError> {
             }
 
             b"usd1" => {
-                // File-level usd1 (no current pane open) goes into the
-                // BFLYT.user_data slot. Per-pane usd1 is handled by the
-                // pane that was just parsed.
-                if current_idx.is_none() {
+                // A usd1 after the pane/group tree (e.g. trailing after
+                // cnt1) is not a pane's user_data — preserve it as a
+                // trailing section. Otherwise: file-level usd1 (no current
+                // pane) → BFLYT.user_data; per-pane usd1 → current pane.
+                if past_panes {
+                    bflyt.trailing_sections.push(OpaqueSection {
+                        magic: sec_magic,
+                        payload: payload.to_vec(),
+                        after_pane_name: None,
+                    });
+                } else if current_idx.is_none() {
                     bflyt.user_data = Some(UserData {
                         raw: payload.to_vec(),
                     });
@@ -189,32 +202,54 @@ pub fn read_bflyt(data: &[u8]) -> Result<BFLYT, BflytError> {
             b"cnt1" => {
                 // Control data section (Smash Ultimate player layouts).
                 // We don't decode it yet; preserve the bytes verbatim.
+                past_panes = true;
                 bflyt.control_data = Some(UserData {
                     raw: payload.to_vec(),
                 });
             }
 
-            // Round-trip-safe handling for less-common section types we
-            // haven't decoded:
+            // Any section we don't explicitly decode is preserved
+            // verbatim, keeping the parser tolerant rather than
+            // hard-failing (cross-game generality). Two cases:
             //
-            // - `scr1`: scissor pane (clip rect in addition to a regular pane)
-            // - `ali1`: alignment pane (auto-positioning rules)
-            // - `spi1`: shape-info pane (or similar -- 24 bytes in the only
-            //   fixture we've seen)
+            // - Inside the pane tree (a pane has already been seen):
+            //   `scr1`/`ali1`/`spi1` (Smash) and unknown sections are
+            //   real panes that can open their own `pas1`/children/`pae1`
+            //   scope, so we push them as opaque PANE nodes. Flattening
+            //   them to anchored sections would unbalance the nesting and
+            //   drop `pas1`/`pae1` (seen on TotK layouts where
+            //   `pan1 pas1 ali1 pas1 ... ` nests under `ali1`).
+            // - Before the pane tree (file-level): e.g. TotK's `ctl1`
+            //   between `mat1` and the first pane. Captured as a
+            //   file-level `OpaqueSection`, re-emitted right before the
+            //   root pane (byte-identical).
             //
-            // These are emitted in pane-tree order along with the panes
-            // we DO decode, so we capture each as an `OpaqueSection`
-            // and re-emit it in the same position when writing.
-            b"scr1" | b"ali1" | b"spi1" => {
-                let after_pane_name = current_idx.map(|i| arena[i].0.name.clone());
-                bflyt.opaque_sections.push(OpaqueSection {
-                    magic: sec_magic,
-                    payload: payload.to_vec(),
-                    after_pane_name,
-                });
+            // (`lyt1/txl1/fnl1/mat1/pan1/.../grp1/usd1/cnt1` are handled
+            // above; this arm only sees genuinely unmodeled magics.)
+            _ => {
+                if past_panes {
+                    // After the pane/group tree (e.g. alongside cnt1).
+                    bflyt.trailing_sections.push(OpaqueSection {
+                        magic: sec_magic,
+                        payload: payload.to_vec(),
+                        after_pane_name: None,
+                    });
+                } else if current_idx.is_some() {
+                    let pane = BasePane::opaque(sec_magic, payload.to_vec());
+                    let idx = arena.len();
+                    arena.push((pane, parent_idx));
+                    if root_idx.is_none() {
+                        root_idx = Some(idx);
+                    }
+                    current_idx = Some(idx);
+                } else {
+                    bflyt.opaque_sections.push(OpaqueSection {
+                        magic: sec_magic,
+                        payload: payload.to_vec(),
+                        after_pane_name: None,
+                    });
+                }
             }
-
-            other => return Err(BflytError::UnknownSection(*other)),
         }
 
         offset += sec_size;
@@ -268,6 +303,7 @@ fn materialize_tree(mut arena: Vec<(BasePane, Option<usize>)>, root: usize) -> B
                 user_data: None,
                 children: Vec::new(),
                 trailing: Vec::new(),
+                opaque: None,
             },
         );
         for ci in children_indices {
@@ -715,6 +751,7 @@ fn read_pane_base<R: Read>(r: &mut R, kind: PaneKind) -> Result<BasePane, BflytE
         user_data: None,
         children: Vec::new(),
         trailing: Vec::new(),
+        opaque: None,
     })
 }
 

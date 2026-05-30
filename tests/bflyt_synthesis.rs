@@ -91,6 +91,7 @@ fn synthetic_minimal_layout_round_trips() {
             user_data: None,
             children: vec![],
             trailing: vec![],
+            opaque: None,
         }),
         root_group: Some(Group {
             name: "RootGroup".into(),
@@ -100,6 +101,7 @@ fn synthetic_minimal_layout_round_trips() {
         user_data: None,
         control_data: None,
         opaque_sections: vec![],
+        trailing_sections: vec![],
     };
 
     let written = write_bflyt(&bflyt).expect("write");
@@ -155,11 +157,13 @@ fn synthetic_layout_writes_then_re_reads_byte_identical_on_second_pass() {
             user_data: None,
             children: vec![],
             trailing: vec![],
+            opaque: None,
         }),
         root_group: None,
         user_data: None,
         control_data: None,
         opaque_sections: vec![],
+        trailing_sections: vec![],
     };
 
     let pass_1 = write_bflyt(&bflyt).unwrap();

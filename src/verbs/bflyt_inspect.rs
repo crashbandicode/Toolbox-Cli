@@ -128,6 +128,7 @@ fn collect_panes(
         PaneKind::Window => "wnd1",
         PaneKind::Parts => "prt1",
         PaneKind::Bounding => "bnd1",
+        PaneKind::Opaque => "opaque",
     };
 
     let (mat_idx, mat_name) = match (&p.picture, &p.text) {

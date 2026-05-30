@@ -118,6 +118,7 @@ fn build_synthetic_bflyt(mat: Material) -> BFLYT {
             user_data: None,
             children: vec![],
             trailing: vec![],
+            opaque: None,
         }),
         root_group: Some(Group {
             name: "RootGroup".into(),
@@ -127,6 +128,7 @@ fn build_synthetic_bflyt(mat: Material) -> BFLYT {
         user_data: None,
         control_data: None,
         opaque_sections: vec![],
+        trailing_sections: vec![],
     }
 }
 

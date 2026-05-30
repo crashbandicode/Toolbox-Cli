@@ -6,6 +6,21 @@ session immediately after this file was written.
 
 ## In progress / next
 
+- [x] **Doc scan/refresh** — README, `lib.rs` rustdoc, AGENTSSUMMARY
+  brought up to date with the current verb/format/test set.
+- [x] **BFLYT cross-game robustness** — unknown sections no longer fatal;
+  in-tree unknown/`scr1`/`ali1`/`spi1` → `PaneKind::Opaque` pane nodes;
+  post-tree `usd1`→trailing. TotK Boot/Common/Title BFLYT now 373/373
+  byte-identical; Smash still 508/508.
+- [ ] **BNTX version `0x00040100` + ASTC/low-bpp formats** (TotK). The
+  other half of the robustness pass; gated behind whether TotK *texture*
+  editing matters. ASTC4x4 + R8/R8G8 + the `0x0c01` family seen in the
+  audit.
+- [ ] **Compression module (zstd+dict, yaz0)** + recursive archive
+  (`.blarc.zs`/`.pack.zs`/`.szs`) so TotK assets open in-tool (today they
+  need external decompression — Python 3.14 `compression.zstd` works).
+- [ ] **Adopt TotK fixtures** (bflyt/bflan) + `bflan-roundtrip-test` verb;
+  extend the roundtrip/audit gates to Smash + TotK.
 - [x] **Custom SARC writer with per-file alignment.** Replace the `sarc`
   crate's writer (which pads every entry to `0x2000`, bloating
   `info_melee` 2.1 MB → 4.7 MB). Derive each file's alignment from

@@ -88,6 +88,13 @@ pub fn write_bflyt(b: &BFLYT) -> Result<Vec<u8>, BflytError> {
         section_count += 1;
     }
 
+    // Sections that trailed the pane/group tree + cnt1 on disk (e.g. a
+    // usd1 attached to the control data).
+    for s in &b.trailing_sections {
+        write_section(&mut out, &s.magic, &s.payload)?;
+        section_count += 1;
+    }
+
     // Back-patch file_size and section_count.
     let total_size = out.len() as u32;
     out[0x0C..0x10].copy_from_slice(&total_size.to_le_bytes());
@@ -334,6 +341,21 @@ fn write_pane_tree(
 }
 
 fn write_pane_section(out: &mut Vec<u8>, p: &BasePane) -> Result<(), BflytError> {
+    // Opaque pane nodes (scr1/ali1/spi1/unknown) are re-emitted from their
+    // captured magic + payload verbatim; they still nest via pas1/pae1.
+    if let Some(op) = &p.opaque {
+        let start = out.len();
+        out.extend_from_slice(&op.magic);
+        out.write_u32::<LittleEndian>(0)?; // size placeholder
+        out.extend_from_slice(&op.payload);
+        while !(out.len() - start).is_multiple_of(4) {
+            out.push(0);
+        }
+        let size = (out.len() - start) as u32;
+        out[start + 4..start + 8].copy_from_slice(&size.to_le_bytes());
+        return Ok(());
+    }
+
     let magic: &[u8; 4] = match p.kind {
         PaneKind::Pane => b"pan1",
         PaneKind::Picture => b"pic1",
@@ -341,6 +363,7 @@ fn write_pane_section(out: &mut Vec<u8>, p: &BasePane) -> Result<(), BflytError>
         PaneKind::Window => b"wnd1",
         PaneKind::Parts => b"prt1",
         PaneKind::Bounding => b"bnd1",
+        PaneKind::Opaque => unreachable!("opaque panes are written above"),
     };
 
     let start = out.len();

@@ -120,6 +120,7 @@ fn kind_str(k: PaneKind) -> &'static str {
         PaneKind::Window => "wnd1",
         PaneKind::Parts => "prt1",
         PaneKind::Bounding => "bnd1",
+        PaneKind::Opaque => "opaque",
     }
 }
 

@@ -109,10 +109,15 @@ pub struct BFLYT {
     /// layouts. We don't decode the structure yet; the bytes are
     /// preserved verbatim for round-trip.
     pub control_data: Option<UserData>,
-    /// Pane-tree-adjacent sections we don't decode (`scr1` scissor, `ali1`
-    /// alignment, `spi1` shape-info, …). Re-emitted in the same position
-    /// they appeared on disk so round-trip is byte-identical.
+    /// File-level sections we don't decode that appear *before* the pane
+    /// tree (between `mat1` and the first pane), e.g. TotK's `ctl1`.
+    /// Re-emitted right before the root pane. (Pane-tree sections like
+    /// `scr1`/`ali1`/`spi1` are kept as [`PaneKind::Opaque`] pane nodes
+    /// instead, so their `pas1`/`pae1` nesting round-trips.)
     pub opaque_sections: Vec<OpaqueSection>,
+    /// Sections appearing *after* the pane/group tree and `cnt1` (e.g. a
+    /// trailing `usd1` attached to the control data). Re-emitted last.
+    pub trailing_sections: Vec<OpaqueSection>,
 }
 
 /// A pane-tree-adjacent section we preserve verbatim. `after_pane_name`
@@ -149,6 +154,19 @@ pub enum PaneKind {
     Window,   // wnd1
     Parts,    // prt1
     Bounding, // bnd1
+    /// A pane-tree section we don't decode (e.g. `scr1`/`ali1`/`spi1`, or
+    /// a section from another game like TotK). Its raw bytes are captured
+    /// in [`BasePane::opaque`] and re-emitted verbatim, but the node still
+    /// participates in `pas1`/`pae1` nesting so the tree round-trips.
+    Opaque,
+}
+
+/// Raw bytes of an opaque pane-tree section ([`PaneKind::Opaque`]).
+#[derive(Debug, Clone)]
+pub struct OpaquePane {
+    pub magic: [u8; 4],
+    /// Section payload (the bytes after the 8-byte `magic + size` header).
+    pub payload: Vec<u8>,
 }
 
 /// A pane tree node. Holds the common ResPane fields, an optional kind-
@@ -178,6 +196,39 @@ pub struct BasePane {
     /// append 8 extra zero bytes per pane; we preserve them verbatim
     /// for byte-identical round-trip.
     pub trailing: Vec<u8>,
+    /// Set when `kind == PaneKind::Opaque`: the verbatim section bytes
+    /// for a pane-tree section we don't decode. `None` for decoded panes.
+    pub opaque: Option<OpaquePane>,
+}
+
+impl BasePane {
+    /// Build an opaque pane node from an undecoded pane-tree section's
+    /// magic + payload. It carries no decoded fields but occupies a slot
+    /// in the pane tree so `pas1`/`pae1` nesting round-trips.
+    pub fn opaque(magic: [u8; 4], payload: Vec<u8>) -> Self {
+        BasePane {
+            kind: PaneKind::Opaque,
+            flag: 0,
+            base_position: 0,
+            alpha: 0,
+            flag_ex: 0,
+            name: String::new(),
+            user_data_field: [0; PANE_USER_DATA_LEN],
+            translate: Vec3::default(),
+            rotate: Vec3::default(),
+            scale: Vec2::default(),
+            width: 0.0,
+            height: 0.0,
+            picture: None,
+            text: None,
+            window: None,
+            parts: None,
+            user_data: None,
+            children: Vec::new(),
+            trailing: Vec::new(),
+            opaque: Some(OpaquePane { magic, payload }),
+        }
+    }
 }
 
 impl BasePane {

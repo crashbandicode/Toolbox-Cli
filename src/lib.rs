@@ -23,13 +23,21 @@
 //! ## Modules
 //!
 //! - [`bflyt`] — BFLYT parse/write plus mutation ops on [`bflyt::BFLYT`].
+//! - [`bflan`] — BFLAN (layout animation) parse/write (byte-identical) +
+//!   `pat1`/`pai1` inspect.
 //! - [`bntx`] — BNTX parse/write and texture append/remove;
-//!   [`bntx::pipeline`] adds PNG import/replace.
-//! - [`texpipe`] — PNG → BC7 → Tegra block-linear swizzle.
-//! - [`sarc`] — SARC archive pack/unpack.
+//!   [`bntx::pipeline`] adds PNG/DDS import/replace and
+//!   [`bntx::decode`] does deswizzle + decode to RGBA.
+//! - [`texpipe`] — PNG → BC1/BC3/BC4/BC5/BC7 (intel_tex_2) → Tegra
+//!   block-linear swizzle.
+//! - [`dds`] — DDS (DX10) read/write for texture interchange.
+//! - [`sarc`] — SARC archive read (via the `sarc` crate) + a custom
+//!   per-file-alignment writer.
 //! - [`manifest`] — SGPO skin-manifest schema.
 //! - [`layout`] — high-level [`layout::apply_manifest`] /
-//!   [`layout::validate_manifest`].
+//!   [`layout::validate_manifest`] / [`layout::apply_manifest_to_arc`].
+//! - [`diff`] — structured BFLYT+BNTX before/after diff.
+//! - [`audit`] — recursive scan for unsupported/suspicious structures.
 //!
 //! Most names you need are re-exported from [`prelude`].
 //!

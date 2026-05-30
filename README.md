@@ -16,20 +16,23 @@ licensed independently under the [MIT License](LICENSE).
 
 ## Status
 
-Read **and write** for both formats are working and validated against
-real Smash Ultimate assets.
+Read **and write** for the supported formats are working and validated
+against real Smash Ultimate assets (byte-identical round-trip corpus).
 
 | Area | Status |
 |---|---|
-| BFLYT v8 / v9 read+write | **Byte-identical round-trip** on every BFLYT in a real `layout.arc` (25/25 files, up to 30 KB / 287 sections / 68 materials, including v9-specific material extensions) |
-| BNTX read+write | **Byte-identical round-trip** on a real 1.7 MB / 206-texture `__Combined.bntx` |
-| BNTX `_DIC` Patricia-trie builder | **Validated** — rebuilds the existing 207-entry trie and routes 206/206 lookups; survives appending new entries |
-| PNG → BC7 → Tegra swizzle | **Working** — uses [`intel_tex_2`](https://crates.io/crates/intel_tex_2) (Intel ISPC) and [`tegra_swizzle`](https://crates.io/crates/tegra_swizzle); auto-pads non-4-aligned dimensions |
+| BFLYT v8 / v9 read+write | **Byte-identical round-trip** on 508/508 BFLYT across game UIs + HDR/training-modpack community mods (up to 30 KB / 287 sections / 68 materials, incl. v9 material extensions). Strict on unknown sections (TotK `ctl1` not yet handled). |
+| BFLAN read+write | **Byte-identical round-trip** on 5838/5838 BFLAN; `pat1`/`pai1` decoded for inspect |
+| BNTX read+write | **Byte-identical round-trip** (5/6 fixtures; the 6th is a C#-tool verbose-RLT output, tolerated). Version `0x00040000` only |
+| BNTX `_DIC` Patricia-trie builder | **Validated** — rebuilds the trie in texture (BRTI) order; routes all lookups; survives append/remove |
+| BNTX → PNG / DDS export | **Working** — deswizzle + decode (BC1–BC7, R8G8B8A8) honoring the channel-swizzle; DDS (DX10) interchange |
+| PNG → BC1/BC3/BC4/BC5/BC7 → Tegra swizzle | **Working** — [`intel_tex_2`](https://crates.io/crates/intel_tex_2) (Intel ISPC) + [`tegra_swizzle`](https://crates.io/crates/tegra_swizzle); multi-mip + cube; auto-pads non-4-aligned dims |
+| BNTX texture append / remove / replace | **Working** — append (2D/cube/multi-mip), remove, format-preserving in-place replace from PNG or DDS |
 | BFLYT mutation (add texture ref / material / pane / set transform / clone pane) | **Working** |
-| BNTX texture append | **Working** — appends new textures to existing files with proper string pool, dict trie, BRTI block, BRTD data, and relocation-table updates |
-| SARC unpack / pack | **Working** — uses [`sarc`](https://crates.io/crates/sarc) by jam1garner |
-| `layout-apply-manifest` orchestrator | **Working** — full SGPO 4-button face-skin workflow runs end-to-end against real `info_melee.arc` (4/4 manifest checks pass, including BNTX texture presence) |
-| `layout-validate-manifest` | **Working** — read-only verifier; cross-validated against layouts produced by both this CLI and the upstream C# Switch-Toolbox |
+| SARC unpack / pack | **Working** — reads via [`sarc`](https://crates.io/crates/sarc); **custom writer** assigns per-file alignment (no `0x2000`-everywhere bloat) and preserves hash-only entries |
+| `layout-apply-manifest` / `layout-apply-arc` | **Working** — full SGPO face-skin workflow end-to-end on an unpacked dir or directly on a packed `layout.arc` |
+| `layout-diff` / `layout-audit` | **Working** — structured BFLYT+BNTX diff; recursive unsupported/suspicious-structure scan to JSON |
+| `layout-validate-manifest` | **Working** — read-only verifier; cross-validated against this CLI and the upstream C# Switch-Toolbox |
 
 ## Build
 
@@ -65,9 +68,10 @@ std::fs::write("__Combined.bntx", write_bntx(&bntx)?)?;
 
 The default `cli` feature builds the `nx-layout-toolbox` binary; library
 consumers use `default-features = false`. High-level building blocks live in
-`bflyt` (mutation ops on `BFLYT`), `bntx` (+ `bntx::pipeline` for PNG
-import/replace), `sarc`, `texpipe`, `manifest`, and `layout`
-(`apply_manifest` / `validate_manifest`).
+`bflyt` (mutation ops on `BFLYT`), `bflan`, `bntx` (+ `bntx::pipeline` for
+PNG/DDS import/replace and `bntx::decode` for export), `texpipe`, `dds`,
+`sarc` (incl. the custom writer), `manifest`, `layout` (`apply_manifest` /
+`validate_manifest` / `apply_manifest_to_arc`), `diff`, and `audit`.
 
 ## End-to-end SGPO workflow
 
@@ -94,11 +98,17 @@ nx-layout-toolbox sarc-pack -i unpacked/ -o info_melee_modded.arc
 
 ## Verbs
 
-Read-only:
+Read-only / inspect:
 
 ```text
-bflyt-inspect             Print a JSON or human-readable snapshot of a BFLYT
-bntx-inspect              Print a JSON or human-readable snapshot of a BNTX
+bflyt-inspect             JSON or human-readable snapshot of a BFLYT
+bflan-inspect             JSON snapshot of a BFLAN (sections + pat1/pai1)
+bntx-inspect              JSON or human-readable snapshot of a BNTX
+bntx-export-png           Deswizzle + decode one texture to a PNG
+bntx-export-all           Export every texture in a BNTX to PNGs
+bntx-export-dds           Export one texture to a DDS (DX10) file
+layout-diff               Structured before/after diff of two layout.arc
+layout-audit              Recursive scan for unsupported/suspicious structures (JSON)
 layout-validate-manifest  Verify an unpacked layout matches an SGPO skin manifest
 sarc-unpack               Extract a SARC archive to a directory
 ```
@@ -111,13 +121,18 @@ bflyt-add-material        Clone a template material; optionally bind a texture
 mat-rename                Rename an existing material in mat1
 pane-clone                Clone a template pane (e.g. SGPO marker) under a new name
 pane-set                  Edit a pane's transform / alpha / visibility / material binding
-bntx-import-png           Encode a PNG to BC7 + Tegra swizzle, append to BNTX
-layout-apply-manifest     End-to-end: PNGs + manifest -> modified BFLYT + BNTX
+bntx-import-png           Encode a PNG to BC7 + swizzle, append to BNTX
+bntx-replace-png          Re-encode a PNG over an existing texture (format-preserving)
+bntx-remove-texture       Remove a named texture (shrinks string pool / dict / BRTD)
+bntx-import-dds           Swizzle a DDS surface and append as a new texture
+bntx-replace-dds          Splice a DDS surface over an existing texture in place
+layout-apply-manifest     End-to-end on an unpacked dir: PNGs + manifest -> BFLYT + BNTX
+layout-apply-arc          Same, directly on a packed layout.arc (unpack/apply/validate/repack)
 sarc-pack                 Pack a directory into a SARC archive
 ```
 
 Internal/debug (used to develop and validate the writers; preserved
-because they're useful when extending the format support):
+because they're useful when extending format support):
 
 ```text
 bflyt-roundtrip-test      Read a BFLYT, write it back, byte-diff
@@ -180,17 +195,26 @@ Run `nx-layout-toolbox <verb> --help` for the per-verb option list.
 src/
 ├── lib.rs             Library entry point
 ├── main.rs            Binary entry; thin wrapper over verbs::dispatch
-├── bflyt/             BFLYT v8/v9 parser/writer
+├── error.rs           Unified high-level Error / Result
+├── bflyt/             BFLYT v8/v9 parser/writer + mutation ops (ops.rs)
 │   ├── sections.rs    Type definitions
 │   ├── read.rs        Parser
 │   └── write.rs       Writer (byte-identical round-trip)
+├── bflan.rs           BFLAN parser/writer (verbatim sections) + pat1/pai1 inspect
 ├── bntx/              BNTX parser/writer
-│   ├── mod.rs         BntxFile + Texture types; append_texture
+│   ├── mod.rs         BntxFile + Texture types; append/remove
 │   ├── read.rs        Full-fidelity parser
 │   ├── write.rs       Writer (byte-identical round-trip)
+│   ├── decode.rs      Deswizzle + decode (texture2ddecoder) -> RGBA
+│   ├── pipeline.rs    PNG/DDS import + format-preserving replace + DDS export
 │   └── dict_builder.rs  Patricia-trie builder for the _DIC section
-├── texpipe.rs         PNG -> RGBA8 -> BC7 (intel_tex_2) -> Tegra swizzle (tegra_swizzle)
+├── texpipe.rs         PNG -> RGBA8 -> BC1/BC3/BC4/BC5/BC7 -> Tegra swizzle
+├── dds.rs             DDS (DX10) read/write; DXGI <-> TextureFormat
+├── sarc.rs            SARC read (sarc crate) + custom per-file-alignment writer
 ├── manifest.rs        SGPO skin manifest schema (serde)
+├── layout.rs          apply_manifest / validate_manifest / apply_manifest_to_arc
+├── diff.rs            Structured BFLYT+BNTX before/after diff
+├── audit.rs           Recursive unsupported/suspicious-structure scan -> JSON
 └── verbs/             One module per CLI verb
 ```
 
@@ -202,11 +226,12 @@ All MIT or MIT/Apache-2.0:
 - [`binrw`](https://crates.io/crates/binrw), [`byteorder`](https://crates.io/crates/byteorder) — binary IO helpers
 - [`serde`](https://crates.io/crates/serde), [`serde_json`](https://crates.io/crates/serde_json) — JSON
 - [`image`](https://crates.io/crates/image) — PNG/JPG/BMP decoding
-- [`intel_tex_2`](https://crates.io/crates/intel_tex_2) — BC7 encoder via Intel ISPC
+- [`intel_tex_2`](https://crates.io/crates/intel_tex_2) — BCn encoder via Intel ISPC
+- [`texture2ddecoder`](https://crates.io/crates/texture2ddecoder) — BCn decoder (for PNG/DDS export)
 - [`tegra_swizzle`](https://crates.io/crates/tegra_swizzle) — Tegra X1 block-linear swizzle
-- [`sarc`](https://crates.io/crates/sarc) — SARC archive read/write
+- [`sarc`](https://crates.io/crates/sarc) — SARC archive **reading** (writing uses a custom per-file-alignment writer in `sarc.rs`)
 - [`anyhow`](https://crates.io/crates/anyhow), [`thiserror`](https://crates.io/crates/thiserror) — errors
-- [`walkdir`](https://crates.io/crates/walkdir) — directory traversal for `sarc-pack`
+- [`walkdir`](https://crates.io/crates/walkdir) — directory traversal
 
 ## Format references
 
@@ -232,26 +257,30 @@ structure), but the Rust code is original.
 - v9 BFLYTs include an undocumented 60-byte material extension on some
   materials (gated by flag bit 19). We capture it verbatim for round-trip
   preservation; cloning a template material reproduces it.
-- BNTX texture data alignment defaults to 0x200 in `bntx-import-png` and
-  `layout-apply-manifest` (sufficient for textures up to ~256x256). Use
-  `--align 0x1000` for 512x512+ textures.
-- BNTX append currently only supports 2D BC7 textures with a single mip
-  level. Multi-mip and other formats can be added by extending
-  `AppendTextureSpec`.
-- The `_RLT` per-entry struct-count update on append is a heuristic
-  matching against `textures.len() ± 1`. The current logic round-trips
-  cleanly through the manifest workflow we exercised; structural
-  invariants could be formalized further.
-- SARC packing doesn't deduplicate identical files (the upstream `sarc`
-  crate doesn't surface dedup), so output sizes are larger than what
-  Switch Toolbox produces. The packed file is still valid.
+- BNTX support targets version `0x00040000` (Smash-era). TotK BNTX
+  (`0x00040100`) and ASTC formats are not yet handled.
+- BNTX append supports 2D, cube, and multi-mip; PNG import re-encodes to
+  BC7, while in-place replace preserves the existing format
+  (BC1/BC3/BC4/BC5/BC7). BC2 and BC6 have no encoder.
+- BNTX texture data alignment defaults to 0x200 in `bntx-import-png` /
+  `layout-apply-manifest` (good to ~256x256). Use `--align 0x1000` for
+  512x512+ textures.
+- The custom SARC writer derives per-file alignment from content (BNTX/
+  BNSH on 0x1000, layout files at the 8-byte minimum), so repacked
+  archives are close to the original size rather than padded to 0x2000.
+  It does not deduplicate identical files.
+- v9 BFLYTs include an undocumented material extension on some materials;
+  it's captured verbatim for round-trip and reproduced when cloning.
 
 ## Round-trip test corpus
 
-The BFLYT writer is validated against every BFLYT in a real Smash
-Ultimate `layout.arc` (25 files, 9 KB to 30 KB, 68 to 287 sections each).
-The BNTX writer is validated against the 1.7 MB `__Combined.bntx`. To
-reproduce on your own copy:
+The BFLYT writer is validated against 508 BFLYT across real Smash
+Ultimate UI archives plus HDR / training-modpack community mods; the
+BFLAN writer against 5838 BFLAN; the BNTX writer against the game
+`__Combined.bntx` files; and the custom SARC writer against a full
+`layout.arc` repack. Tests live in `tests/` and are skipped when the
+(gitignored) `tests/fixtures/` corpus is absent. To reproduce on your
+own copy:
 
 ```bash
 nx-layout-toolbox sarc-unpack -i layout.arc -o unpacked/
