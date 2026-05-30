@@ -9,6 +9,7 @@
 //! - 2 = invocation error (bad flags) — handled by clap
 //! - 64 = unhandled internal case
 
+mod bflan_inspect;
 mod bflyt_add_material;
 mod bflyt_add_texture_ref;
 mod bflyt_helpers;
@@ -17,14 +18,22 @@ mod bflyt_mat1_diff;
 mod bflyt_roundtrip_test;
 mod bflyt_section_diff;
 mod bntx_dict_test;
+mod bntx_export_all;
+mod bntx_export_dds;
+mod bntx_export_png;
+mod bntx_import_dds;
 mod bntx_import_png;
+mod bntx_replace_dds;
 mod bntx_inspect;
 mod bntx_layout_dump;
 mod bntx_remove_texture;
 mod bntx_replace_png;
 mod bntx_rlt_dump;
 mod bntx_roundtrip_test;
+mod layout_apply_arc;
 mod layout_apply_manifest;
+mod layout_audit;
+mod layout_diff;
 mod layout_validate_manifest;
 mod mat_rename;
 mod pane_clone;
@@ -65,6 +74,10 @@ pub(crate) fn first_diff(a: &[u8], b: &[u8]) -> usize {
 
 #[derive(Subcommand, Debug)]
 pub enum Verb {
+    /// Print a structured snapshot of a BFLAN (Cafe Layout Animation):
+    /// header, sections, and decoded pat1/pai1. Use --json.
+    BflanInspect(bflan_inspect::Args),
+
     /// Print a structured snapshot of a BFLYT (v8/v9). Use --json for tool
     /// consumption.
     BflytInspect(bflyt_inspect::Args),
@@ -101,6 +114,25 @@ pub enum Verb {
     /// Print a structured snapshot of a BNTX. Use --json for tool consumption.
     BntxInspect(bntx_inspect::Args),
 
+    /// Deswizzle + decode one named texture to a PNG (honors the
+    /// texture's channel-swizzle; `--raw` shows the natural channels).
+    BntxExportPng(bntx_export_png::Args),
+
+    /// Deswizzle + decode every texture in a BNTX to PNGs in a directory.
+    BntxExportAll(bntx_export_all::Args),
+
+    /// Deswizzle one named texture and write it as a DDS file (DX10
+    /// header) for lossless compressed-texture interchange.
+    BntxExportDds(bntx_export_dds::Args),
+
+    /// Swizzle a DDS surface and append it as a new named texture
+    /// (format/dimensions/mips preserved from the DDS).
+    BntxImportDds(bntx_import_dds::Args),
+
+    /// Splice a DDS surface over an existing texture in place (must match
+    /// the texture's format/dimensions/mips/layout).
+    BntxReplaceDds(bntx_replace_dds::Args),
+
     /// Encode a PNG to BC7 + Tegra swizzle, then append it as a new
     /// named texture in the BNTX. Writes the modified file back.
     BntxImportPng(bntx_import_png::Args),
@@ -131,6 +163,11 @@ pub enum Verb {
     /// the BRTD block.
     BntxLayoutDump(bntx_layout_dump::Args),
 
+    /// Apply an SGPO skin manifest to a packed `layout.arc` end-to-end:
+    /// unpack in memory, apply to the BFLYT+BNTX, validate, and re-pack
+    /// every entry into a new archive.
+    LayoutApplyArc(layout_apply_arc::Args),
+
     /// Apply an SGPO skin manifest to an unpacked layout: encode each
     /// element's PNG to BC7 + append to BNTX, then add the matching
     /// txl1/material/pane in BFLYT. Modifies files in place.
@@ -139,6 +176,14 @@ pub enum Verb {
     /// Validate that an unpacked layout directory matches an SGPO skin
     /// manifest. Exits 0 on full match, 1 on any element mismatch.
     LayoutValidateManifest(layout_validate_manifest::Args),
+
+    /// Structured before/after diff of two `layout.arc` files (BFLYT +
+    /// BNTX). Use --json for tooling.
+    LayoutDiff(layout_diff::Args),
+
+    /// Recursively scan a directory/archive for unsupported or suspicious
+    /// BFLYT/BNTX structures and emit a JSON report.
+    LayoutAudit(layout_audit::Args),
 
     /// Extract a SARC archive to a directory tree.
     SarcUnpack(sarc_unpack::Args),
@@ -149,6 +194,7 @@ pub enum Verb {
 
 pub fn dispatch(verb: Verb) -> Result<ExitCode> {
     match verb {
+        Verb::BflanInspect(args) => Ok(bflan_inspect::run(args)?),
         Verb::BflytInspect(args) => Ok(bflyt_inspect::run(args)?),
         Verb::BflytRoundtripTest(args) => Ok(bflyt_roundtrip_test::run(args)?),
         Verb::BflytSectionDiff(args) => Ok(bflyt_section_diff::run(args)?),
@@ -159,6 +205,11 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::PaneSet(args) => Ok(pane_set::run(args)?),
         Verb::PaneClone(args) => Ok(pane_clone::run(args)?),
         Verb::BntxInspect(args) => Ok(bntx_inspect::run(args)?),
+        Verb::BntxExportPng(args) => Ok(bntx_export_png::run(args)?),
+        Verb::BntxExportAll(args) => Ok(bntx_export_all::run(args)?),
+        Verb::BntxExportDds(args) => Ok(bntx_export_dds::run(args)?),
+        Verb::BntxImportDds(args) => Ok(bntx_import_dds::run(args)?),
+        Verb::BntxReplaceDds(args) => Ok(bntx_replace_dds::run(args)?),
         Verb::BntxImportPng(args) => Ok(bntx_import_png::run(args)?),
         Verb::BntxReplacePng(args) => Ok(bntx_replace_png::run(args)?),
         Verb::BntxRemoveTexture(args) => Ok(bntx_remove_texture::run(args)?),
@@ -166,8 +217,11 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::BntxDictTest(args) => Ok(bntx_dict_test::run(args)?),
         Verb::BntxRltDump(args) => Ok(bntx_rlt_dump::run(args)?),
         Verb::BntxLayoutDump(args) => Ok(bntx_layout_dump::run(args)?),
+        Verb::LayoutApplyArc(args) => Ok(layout_apply_arc::run(args)?),
         Verb::LayoutApplyManifest(args) => Ok(layout_apply_manifest::run(args)?),
         Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),
+        Verb::LayoutDiff(args) => Ok(layout_diff::run(args)?),
+        Verb::LayoutAudit(args) => Ok(layout_audit::run(args)?),
         Verb::SarcUnpack(args) => Ok(sarc_unpack::run(args)?),
         Verb::SarcPack(args) => Ok(sarc_pack::run(args)?),
     }

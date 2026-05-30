@@ -27,6 +27,7 @@
 //! supported by edit operations on the parsed state followed by a full
 //! re-serialize.
 
+pub mod decode;
 pub mod dict_builder;
 pub mod error;
 pub mod pipeline;

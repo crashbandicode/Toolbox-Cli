@@ -40,8 +40,13 @@ src/
 │   ├── mod.rs          BntxFile, Texture, AppendTextureSpec, append_texture
 │   ├── read.rs         Full-fidelity parser (str pool, dict, RLT, BRTD)
 │   ├── write.rs        Writer with canonical/preserved RLT modes
+│   ├── decode.rs       Deswizzle + decode (texture2ddecoder) → RGBA, applies channel-swizzle
 │   └── dict_builder.rs Patricia-trie builder for _DIC
-├── texpipe.rs          PNG → BC7 (intel_tex_2) → Tegra swizzle (tegra_swizzle)
+├── bflan.rs            BFLAN parse/write (verbatim sections, byte-identical) + pat1/pai1 inspect
+├── texpipe.rs          PNG → BC7/BC1/BC3/BC4/BC5 (intel_tex_2) → Tegra swizzle
+├── dds.rs              DDS (DX10) read/write; DXGI↔TextureFormat; interchange
+├── diff.rs             Structured BFLYT+BNTX before/after diff (name-keyed)
+├── audit.rs            Recursive unsupported/suspicious-structure scan → JSON
 ├── manifest.rs         SGPO skin manifest schema (serde)
 └── verbs/              One file per CLI verb
 ```
@@ -59,6 +64,61 @@ src/
 
 ## Tests
 
+- `tests/sarc_writer.rs` — round-trips `info_melee.layout.arc` through
+  `read_arc` → `write_arc` (custom writer): all 344 files byte-identical,
+  re-readable, output stays ~2.16 MB (not the old 4.7 MB), and every
+  entry sits on its required alignment with BNTX/BNSH on 0x1000.
+- `tests/bntx_cube_mip_decode.rs` — appends a 3-mip 2D texture and a
+  6-face / 3-mip cube to a real BNTX, then verifies mip 0/1/2 dims halve,
+  cube layer 0/5 + a deep middle-face mip decode, out-of-range mip/layer
+  error cleanly, and both round-trip through DDS (export→serialize→parse→
+  replace→re-export preserves the linear payload + metadata). Covers the
+  `mip>0` / `layer>0` paths the single-mip-2D fixtures don't reach.
+- `tests/bflan_roundtrip.rs` — walks `tests/fixtures/` recursively and
+  round-trips every `.bflan` (5838 in our setup) byte-identically, and
+  asserts the pat1 + pai1 inspect decoders run across the corpus
+  (decoded on all 5838). Caught + handled the HDR stage-select files
+  whose final `pai1` section is truncated below its declared size.
+- `tests/layout_audit.rs` — pins the `training-modpack` unpacked archive
+  audit exactly (19 BFLYT all v9, 2 with v9-extension mats / 8 mats, 1
+  BNTX, 157 BFLAN, 0 failures) and asserts the full `unpacked/` tree
+  audit (451 BFLYT all parse + all v9; 2 BFLYT / 42 materials flagged
+  `flags_untrusted`; 32 BFLYT / 174 materials with v9 extension bytes; 31
+  BNTX with exactly 1 unsupported-surface-format failure — HDR's
+  recolored info_melee, code `0x00000c01`; 5838 BFLAN, 0 failed, 12 with
+  a truncated final section). A third case audits `archives/` (6 packed
+  `layout.arc`) to cover the in-memory unpack→recurse path (95 bflyt / 6
+  bntx / 1306 bflan reached inside, all parse).
+- `tests/layout_diff.rs` — diffs original `info_melee` vs the generated
+  SGPO fixture: pins 25 BFLYT panes added (1 `sgpo_root` pan1 under
+  RootPane + 24 pic1 markers under sgpo_root), nothing removed/changed,
+  BNTX unchanged. Checks reverse-diff (25 removed) and that a self-diff
+  is empty.
+- `tests/layout_apply_arc.rs` — applies a 2-element in-code manifest
+  (panes cloned from stock `set_rep_stock_01` under `RootPane`) to
+  `info_melee_original.layout.arc` via `apply_manifest_to_arc`; asserts
+  both elements validate, the 344-entry count is preserved, the
+  repacked archive re-opens + re-validates, only the BFLYT/BNTX entries
+  changed (all others byte-identical), and a `skip_existing` re-run is a
+  no-op.
+- `tests/bntx_dds_roundtrip.rs` — per surface format in the corpus,
+  exports a texture to DDS (DX10), asserts payload == a fresh deswizzle,
+  asserts `Dds::write`/`read` round-trips, then `replace_with_dds`
+  (preserves format/dims/mips/image_size, file size, other textures, and
+  re-exports the identical linear payload) and `import_dds` (new texture
+  re-exports the identical payload). Covers BC1/BC4/BC5/BC7.
+- `tests/bntx_replace_format_preserving.rs` — walks `tests/fixtures/bntx/`
+  and, for each surface format present, replaces one 2D single-mip
+  texture of that format with a procedural image, asserting format /
+  dims / mip / image_size / data_offset are preserved, other textures
+  are byte-identical, file size is unchanged, and the target bytes
+  actually changed. Requires BC1/BC4/BC5/BC7 coverage (BC7 both UNORM +
+  SRGB seen).
+- `tests/bntx_export_png.rs` — decodes every texture (mip 0) in every
+  `tests/fixtures/bntx/` file, asserts decoded dims == BNTX metadata +
+  RGBA byte count, asserts the corpus covers BC1/BC4/BC5/BC7, and pins
+  channel-swizzle application (textures with `One,One,One,*` RGB swizzle
+  must decode to white RGB). 764 textures / 6 fixtures in our setup.
 - `tests/bflyt_synthesis.rs` — 2 synthetic-layout round-trip tests.
 - `tests/bflyt_real_fixtures.rs` — walks every `*.bflyt` under
   `tests/fixtures/` recursively (508 files in our setup).
@@ -152,28 +212,182 @@ src/
    community-mod file exposes a parser bug, add a focused test with
    that file's signature so future regressions fail loudly.
 
-## TODO (live, ordered)
+## TODO (live, ordered) — 2026-05-29 handoff batch
 
-All seven handoff items resolved this session. Next-up candidates if
-new work is requested:
+New 7-item handoff (export/interchange/orchestration/audit). Implement
+in order; tests must be unattended + fixture-driven. Reference
+Switch-Toolbox (`Switch-Toolbox/`) for format understanding only — keep
+everything MIT, no GPL code copied.
 
-- v9 BFLYT 60-byte material extension decode (currently captured
-  verbatim in `Material::trailing`).
-- GitHub Actions CI workflow for `cargo build` + `cargo test --release`
-  (gated on whether fixtures should ship to CI).
+1. ~~`bntx-export-png` + `bntx-export-all`~~ — done (commit pending).
+   Deswizzle + decode every parsed format → PNG, honoring channel-swizzle.
+2. ~~format-preserving `bntx-replace-png`~~ — done (commit pending).
+   `replace_texture` now re-encodes to the texture's *existing* format
+   (BC1/BC3/BC4/BC5/BC7/RGBA) and inverts the channel-swizzle.
+3. ~~`bntx-export-dds` / `bntx-import-dds` / `bntx-replace-dds`~~ — done
+   (commit pending). DDS (DX10 header) interchange; export→import/replace
+   invariants proven for BC1/BC4/BC5/BC7.
+4. ~~`layout-apply-arc`~~ — done (commit pending). In-memory
+   unpack→apply→validate→repack against `info_melee_original.layout.arc`.
+5. ~~`layout-diff`~~ — done (commit pending). Structured BFLYT+BNTX
+   before/after diff; original vs generated SGPO = 25 panes added.
+6. ~~`layout-audit`~~ — done (commit pending). Recursive scan → JSON
+   report; pins training-modpack + full-unpacked counts (incl. 1
+   unsupported BNTX format + 42 untrusted mats detected).
+7. ~~BFLAN inspect + byte-identical roundtrip~~ — done (commit pending).
+   All 5838 `.bflan` fixtures round-trip byte-identically.
+
+**All 7 handoff items complete this session.** Build + 55 integration
+tests + 1 doctest pass; clippy clean. Not committed (awaiting user OK).
+
+Post-review hardening: added `tests/bntx_cube_mip_decode.rs` (synthesizes
+a 3-mip 2D + 6-face/3-mip cube on a real BNTX to exercise the `mip>0` /
+`layer>0` decode + DDS paths the all-single-mip-2D fixtures never reach)
+and a `layout-audit` archive-recursion test (audits the 6 `archives/*.arc`
+to cover the in-memory unpack→recurse path). Verified the multi-mip/
+multi-layer offset math against tegra's `deswizzled_mip_size`
+(= w·h·d·bpp in block units, no inter-mip/layer padding).
+
+Standing backlog (no owner):
+
+- v9 BFLYT 60-byte material extension decode (captured verbatim today).
+- GitHub Actions CI workflow (gated on shipping fixtures to CI).
 - In-game runtime validation on Switch hardware (requires hardware).
 
-Resolved this session:
-
-1. ~~`bntx-replace-png` verb~~ — done (commit pending).
-2. ~~`bntx-remove-texture` verb~~ — done (commit pending).
-3. ~~`tests/texpipe_round_trip.rs`~~ — done (commit pending).
-4. ~~`flags_untrusted` guardrail~~ — done (commit pending).
-5. ~~Exhaustive `prt1`/`wnd1` round-trip tests~~ — done (commit pending).
-6. ~~BNTX dict 10k-name stress test~~ — done (commit pending).
-7. ~~`tests/texpipe_cube_and_mip.rs`~~ — done (commit pending).
-
 ## Session log
+
+### 2026-05-29 — Custom SARC writer (per-file alignment)
+Replaced the `sarc` crate's writer (we still use its reader) with a
+native `sarc::write_sarc` that gives each file the alignment it actually
+needs instead of padding everything to 0x2000. Alignment is derived from
+content via the `nn::util::BinaryFileHeader` convention — BOM at 0x0C →
+`1 << byte[0x0E]` — verified against the fixtures (BNTX & BNSH report
+0x1000; FLYT/FLAN/`info` have no BOM there → 8-byte minimum); nested
+SARC → 0x2000, Yaz0 → 0x80; clamped to [0x8, 0x2000]. `write_arc` and
+`pack_directory` now route through it. Result: repacking
+`info_melee.layout.arc` is **2.16 MB again (2166040 → 2161600)** instead
+of 4.7 MB, and `layout-apply-arc` grows the file by ~4 KB (the two new
+textures) rather than doubling it. Bonus: the native writer preserves
+multiple hash-only (unnamed) entries that the crate writer collapsed via
+a hash-keyed map. `tests/sarc_writer.rs` round-trips the arc (all 344
+files byte-identical, re-readable), asserts every entry sits on its
+required alignment, and that BNTX/BNSH land on 0x1000. Follow-up backlog
+captured in `todo.md`. All tests pass; clippy clean.
+
+### 2026-05-29 — BFLAN roundtrip + inspect (handoff #7)
+New `src/bflan.rs`: BFLAN shares BFLYT's container shape (0x14 `FLAN`
+header + `magic + u32 size` sections). We capture each section's bytes
+verbatim (with its on-disk `declared_size`) so `write_bflan` reproduces
+a **byte-identical** file, and decode `pat1` (animation name, frame
+range, child-binding, group bindings) and `pai1` (frame size, loop,
+texture list, entry name/target/tag-count) read-only for inspect. Verb
+`bflan-inspect` (text + `--json`). `tests/bflan_roundtrip.rs` round-
+trips all 5838 fixtures byte-identically and exercises both decoders.
+Real-world quirk handled: 12 HDR stage-select animations declare a
+`pai1` size a few bytes past EOF — we clamp the captured payload to the
+bytes present while preserving the declared size field, so the file
+re-emits exactly (the writer would otherwise shrink the size field).
+Also extended `layout-audit` to scan `.bflan` (counts + a
+"truncated final section" finding); audit test updated accordingly.
+All tests pass; clippy clean.
+
+### 2026-05-29 — layout-audit (handoff #6)
+New `src/audit.rs` recursively walks a directory (or single file /
+archive — SARC entries are unpacked + audited too) and reports
+unsupported/suspicious structures: BFLYT parse failures, v9 layouts,
+materials flagged `flags_untrusted` (malformed-mat1 recovery), materials
+carrying undocumented v9 extension bytes, and BNTX parse failures
+(incl. unsupported surface formats). Aggregate `AuditTotals` + per-file
+findings serialize to JSON. The walker checks extensions *before*
+reading so the thousands of non-layout files in an unpacked archive are
+skipped (full `unpacked/` scan dropped 34s → <1s). Verb `layout-audit
+-p <path> [--json] [--fail-on-error]`. `tests/layout_audit.rs` pins the
+counts (training-modpack exact + full-unpacked detection of HDR's
+unsupported BNTX format `0x00000c01` and 42 untrusted materials). All
+tests pass; clippy clean.
+
+### 2026-05-29 — layout-diff (handoff #5)
+New `src/diff.rs` produces a structured before/after diff of a layout's
+BFLYT + BNTX, matching panes/materials/textures by **name** (stable
+across index shifts): txl1 refs, materials (colors + bound texture
+names), and panes (kind/parent/transform/size/alpha/visible/material)
+added/removed/changed; BNTX textures (dims/format/mips/array + a pixel-
+data-changed flag) added/removed/changed. Serializes to JSON. Verb
+`layout-diff --old --new [--json]` diffs two `layout.arc` files.
+`tests/layout_diff.rs` pins the original-info_melee → generated-SGPO
+diff at exactly 25 added panes (sgpo_root + 24 markers, BNTX unchanged),
+verifies the reverse diff flips them to removals, and that self-diffs
+are empty. All tests pass; clippy clean.
+
+### 2026-05-29 — layout-apply-arc end-to-end (handoff #4)
+Added `layout::apply_manifest_to_arc`: unpack a packed `layout.arc` in
+memory, apply an SGPO manifest to the contained BFLYT+BNTX, validate,
+and re-pack **every** entry into a new archive. To do this losslessly,
+extracted in-memory cores `apply_manifest_in_memory` /
+`validate_manifest_in_memory` (the on-disk `apply_manifest` /
+`validate_manifest` now wrap them) and added `sarc::read_arc` /
+`write_arc` + `ArcFile`/`ArcEntry` that preserve **all** entries
+(named and hash-only) through a round-trip — so editing two files never
+drops the other 342. Verb `layout-apply-arc` wraps it (reports
+applied/skipped + validation, exits non-zero on validation failure
+unless `--allow-invalid`). `tests/layout_apply_arc.rs` proves the full
+pipeline on `info_melee_original.layout.arc` (2 elements, 344 entries
+preserved, only BFLYT/BNTX changed, re-open re-validates, idempotent
+re-run). NOTE (superseded by the custom-SARC-writer entry below): at
+first this used the `sarc` crate writer, which padded every entry to
+0x2000 and bloated the repack 2.1MB → 4.7MB. All tests pass; clippy
+clean.
+
+### 2026-05-29 — DDS interchange (handoff #3)
+New `src/dds.rs`: a focused DDS reader/writer. We always **write** the
+DX10 extended header (exact DXGI format incl. sRGB round-trips) and
+**read** both DX10 and the common legacy FourCCs (DXT1/3/5, ATI1/BC4U,
+ATI2/BC5U, 32-bit RGBA) for interop with texconv/GIMP/Switch-Toolbox.
+The DDS payload is the tightly-packed linear surface (layer-major, then
+mip) — exactly what `tegra_swizzle` deswizzle emits / swizzle consumes,
+so BNTX↔DDS is just (de)swizzle + header. Added BNTX glue in
+`bntx::pipeline`: `export_texture_dds` (deswizzle → Dds),
+`import_dds` (swizzle → append new texture, canonical block height
+inferred), `replace_with_dds` (re-tile with the texture's stored block
+height → in-place splice, structural-change-free). Three thin verbs
+wrap them. `tests/bntx_dds_roundtrip.rs` proves the export→serialize→
+parse→replace/import→re-export invariants per format (the linear
+payload survives swizzle∘deswizzle identically; metadata + file size +
+other textures are preserved). All tests pass; clippy clean.
+
+### 2026-05-29 — Format-preserving bntx-replace-png (handoff #2)
+`bntx::pipeline::replace_texture` no longer hard-codes BC7. It now
+re-encodes the source over an existing texture **in the texture's own
+surface format**: added `texpipe::compress_image_to_format` (a
+format-parameterized encoder over `intel_tex_2` bc1/bc3/bc4/bc5/bc7 +
+raw RGBA, with `format_is_encodable` gating BC2/BC6 out) and a
+channel-swizzle *inverter* (`invert_channel_swizzle` /
+`remap_image_for_format`) so the source's channels are routed into the
+right block channels (a BC4 alpha mask `One,One,One,Red` takes the PNG
+alpha; BC5 `Red,Red,Red,Green` takes R + alpha). The re-encode is tiled
+with the texture's stored block height (`size_range`) so the swizzled
+length matches the slot and the splice stays structural-change-free.
+Source dims are validated against the texture's *logical* size up front
+(the encoder pads to the block grid internally, e.g. a 5x5 BC1 → 2x2
+blocks). `tests/bntx_replace_format_preserving.rs` exercises one replace
+per format across the corpus (BC1/BC4/BC5/BC7). All 43 tests pass;
+clippy clean.
+
+### 2026-05-29 — BNTX→PNG export (handoff #1)
+Added the decode counterpart to `texpipe`: `src/bntx/decode.rs`
+deswizzles a texture's block-linear data (driven by the stored
+`size_range` block height so it exactly inverts the on-disk tiling),
+decodes via the pure-Rust MIT/Apache `texture2ddecoder` (BC1-BC7 +
+R8G8B8A8), and applies the texture's `channel_swizzle` so exported
+pixels match what the GPU samples (BC4 alpha masks `One,One,One,Red`
+→ white-with-alpha; BC5 `Red,Red,Red,Green` → grayscale-with-alpha).
+`texture2ddecoder` moved from dev- to regular dependency. Two verbs:
+`bntx-export-png` (one named texture, `--mip`/`--layer`/`--raw`) and
+`bntx-export-all` (every texture → `<name>.png` in a dir, `--keep-going`).
+`tests/bntx_export_png.rs` decodes all 764 textures across 6 fixtures,
+asserts dims/byte-count vs metadata, format coverage (BC1/BC4/BC5/BC7),
+and channel-swizzle correctness (148 white-mask textures verified). All
+green.
 
 ### 2026-05-29 — Library-ify + crates.io prep + RLT >255 hardening
 Renamed the crate to `nx-layout-toolbox` (lib `nx_layout_toolbox`, bin

@@ -4,9 +4,10 @@
 //! source image into the swizzled BC7 layout that BNTX texture data
 //! blocks expect.
 
+use crate::bntx::TextureFormat;
 use crate::error::{Error, Result};
 use image::{DynamicImage, GenericImageView};
-use intel_tex_2::{bc7, RgbaSurface};
+use intel_tex_2::{bc1, bc3, bc4, bc5, bc7, RSurface, RgSurface, RgbaSurface};
 use tegra_swizzle::surface::{swizzle_surface, BlockDim};
 use tegra_swizzle::{block_height_mip0, BlockHeight};
 
@@ -58,7 +59,7 @@ impl std::str::FromStr for Bc7Quality {
 
 /// Convert tegra_swizzle's `BlockHeight` into the log2 value BNTX records
 /// in the BRTI `size_range` field.
-fn block_height_to_log2(bh: BlockHeight) -> u32 {
+pub(crate) fn block_height_to_log2(bh: BlockHeight) -> u32 {
     match bh {
         BlockHeight::One => 0,
         BlockHeight::Two => 1,
@@ -380,6 +381,197 @@ pub fn compress_cube_bc7(
         array_count: 6,
         swizzled_data: swizzled,
         block_height_log2,
+        image_size: linear_blocks.len() as u32,
+    })
+}
+
+/// Whether `format` can be encoded by [`compress_image_to_format`].
+/// `BC2` has no encoder in `intel_tex_2`, and `BC6` (HDR) cannot be
+/// produced faithfully from an 8-bit source image.
+pub fn format_is_encodable(format: TextureFormat) -> bool {
+    matches!(
+        format,
+        TextureFormat::Bc1Unorm
+            | TextureFormat::Bc1UnormSrgb
+            | TextureFormat::Bc3Unorm
+            | TextureFormat::Bc3UnormSrgb
+            | TextureFormat::Bc4Unorm
+            | TextureFormat::Bc4Snorm
+            | TextureFormat::Bc5Unorm
+            | TextureFormat::Bc5Snorm
+            | TextureFormat::Bc7Unorm
+            | TextureFormat::Bc7UnormSrgb
+            | TextureFormat::R8G8B8A8Unorm
+            | TextureFormat::R8G8B8A8UnormSrgb
+    )
+}
+
+fn round_up(value: u32, multiple: u32) -> u32 {
+    let m = multiple.max(1);
+    value.div_ceil(m) * m
+}
+
+/// Encode one already-padded RGBA mip level to the linear block bytes for
+/// `format`. The input `rgba` is `width * height * 4` bytes whose R,G,B,A
+/// are the *block* channels (the caller is responsible for any
+/// channel remapping). `width`/`height` must be multiples of the format's
+/// block dimensions.
+fn encode_mip_blocks(
+    format: TextureFormat,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    quality: Bc7Quality,
+    has_alpha: bool,
+) -> Result<Vec<u8>> {
+    let rgba_surface = RgbaSurface {
+        width,
+        height,
+        stride: width * 4,
+        data: rgba,
+    };
+    Ok(match format {
+        TextureFormat::Bc1Unorm | TextureFormat::Bc1UnormSrgb => {
+            bc1::compress_blocks(&rgba_surface)
+        }
+        TextureFormat::Bc3Unorm | TextureFormat::Bc3UnormSrgb => {
+            bc3::compress_blocks(&rgba_surface)
+        }
+        TextureFormat::Bc7Unorm | TextureFormat::Bc7UnormSrgb => {
+            let mut out = vec![0u8; bc7::calc_output_size(width, height)];
+            bc7::compress_blocks_into(&quality.settings(has_alpha), &rgba_surface, &mut out);
+            out
+        }
+        TextureFormat::Bc4Unorm | TextureFormat::Bc4Snorm => {
+            // BC4 is a single (red) channel.
+            let r: Vec<u8> = rgba.iter().step_by(4).copied().collect();
+            bc4::compress_blocks(&RSurface {
+                width,
+                height,
+                stride: width,
+                data: &r,
+            })
+        }
+        TextureFormat::Bc5Unorm | TextureFormat::Bc5Snorm => {
+            // BC5 is two (red, green) channels.
+            let rg: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1]]).collect();
+            bc5::compress_blocks(&RgSurface {
+                width,
+                height,
+                stride: width * 2,
+                data: &rg,
+            })
+        }
+        TextureFormat::R8G8B8A8Unorm | TextureFormat::R8G8B8A8UnormSrgb => rgba.to_vec(),
+        TextureFormat::Bc2Unorm | TextureFormat::Bc2UnormSrgb => {
+            return Err(Error::Texpipe(
+                "BC2 has no encoder in intel_tex_2; use remove + import or the DDS path".into(),
+            ))
+        }
+        TextureFormat::Bc6UFloat | TextureFormat::Bc6Float => {
+            return Err(Error::Texpipe(
+                "BC6 (HDR) cannot be encoded from an 8-bit source; use the DDS path".into(),
+            ))
+        }
+    })
+}
+
+/// Encode `image` to swizzled bytes for an arbitrary BNTX surface format,
+/// generating `mip_count` mip levels. The image's channels are taken to
+/// be the block channels already (callers re-encoding over an existing
+/// texture should remap through the texture's channel-swizzle first).
+///
+/// When `block_height_log2` is `Some`, the surface is tiled with exactly
+/// that Tegra block height (used by in-place replacement so the swizzled
+/// layout matches the texture being overwritten); `None` infers it.
+pub fn compress_image_to_format(
+    image: &DynamicImage,
+    format: TextureFormat,
+    quality: Bc7Quality,
+    mip_count: u32,
+    block_height_log2: Option<u32>,
+) -> Result<CompressedTexture> {
+    if mip_count == 0 {
+        return Err(Error::Texpipe("mip_count must be >= 1".into()));
+    }
+    if !format_is_encodable(format) {
+        return Err(Error::Texpipe(format!(
+            "format {} is not encodable by compress_image_to_format",
+            format.name()
+        )));
+    }
+
+    let (bw, bh) = format.block_dim();
+    let (src_w, src_h) = image.dimensions();
+    let width = round_up(src_w, bw);
+    let height = round_up(src_h, bh);
+
+    let base_rgba = image.to_rgba8();
+    let has_alpha = base_rgba.as_raw().chunks_exact(4).any(|p| p[3] != 0xFF);
+
+    let mut linear_blocks: Vec<u8> = Vec::new();
+    for level in 0..mip_count {
+        let lvl_w = round_up((width >> level).max(bw), bw);
+        let lvl_h = round_up((height >> level).max(bh), bh);
+
+        let resized: Vec<u8> = if level == 0 && (src_w, src_h) == (width, height) {
+            base_rgba.as_raw().clone()
+        } else if level == 0 {
+            // Pad the source up to the block-aligned base dimensions.
+            let mut buf = vec![0u8; (width * height * 4) as usize];
+            let src = base_rgba.as_raw();
+            for y in 0..src_h {
+                let s = (y * src_w * 4) as usize;
+                let d = (y * width * 4) as usize;
+                buf[d..d + (src_w * 4) as usize].copy_from_slice(&src[s..s + (src_w * 4) as usize]);
+            }
+            buf
+        } else {
+            image
+                .resize_exact(lvl_w, lvl_h, image::imageops::FilterType::Lanczos3)
+                .to_rgba8()
+                .into_raw()
+        };
+
+        linear_blocks.extend_from_slice(&encode_mip_blocks(
+            format, &resized, lvl_w, lvl_h, quality, has_alpha,
+        )?);
+    }
+
+    let block_dim = if matches!(
+        format,
+        TextureFormat::R8G8B8A8Unorm | TextureFormat::R8G8B8A8UnormSrgb
+    ) {
+        BlockDim::uncompressed()
+    } else {
+        BlockDim::block_4x4()
+    };
+    let bytes_per_block = format.block_size();
+    let block_height = block_height_log2.and_then(|l| crate::bntx::decode::block_height_from_log2(l as i32));
+
+    let swizzled = swizzle_surface(
+        width,
+        height,
+        1,
+        &linear_blocks,
+        block_dim,
+        block_height,
+        bytes_per_block,
+        mip_count,
+        1,
+    )
+    .map_err(|e| Error::Texpipe(format!("Tegra swizzle failed ({}): {e:?}", format.name())))?;
+
+    let used_log2 = block_height_log2
+        .unwrap_or_else(|| block_height_to_log2(block_height_mip0(height / bh)));
+
+    Ok(CompressedTexture {
+        width,
+        height,
+        mip_count,
+        array_count: 1,
+        swizzled_data: swizzled,
+        block_height_log2: used_log2,
         image_size: linear_blocks.len() as u32,
     })
 }

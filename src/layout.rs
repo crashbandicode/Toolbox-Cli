@@ -16,6 +16,7 @@ use crate::bflyt::{read_bflyt, write_bflyt, ClonePaneSpec, BFLYT};
 use crate::bntx::{pipeline, pipeline::ImportOptions, read_bntx, write_bntx, BntxFile};
 use crate::error::{Error, Result};
 use crate::manifest::{SkinElement, SkinManifest};
+use crate::sarc::{read_arc, write_arc};
 use crate::texpipe::Bc7Quality;
 
 /// Options for [`apply_manifest`]. [`Default`] matches the CLI defaults
@@ -95,6 +96,33 @@ pub fn apply_manifest(
     let mut bflyt = read_bflyt(&std::fs::read(&bflyt_path)?)?;
     let mut bntx = read_bntx(&std::fs::read(&bntx_path)?)?;
 
+    let (applied, skipped) =
+        apply_manifest_in_memory(&mut bflyt, &mut bntx, manifest, skin_dir, opts)?;
+
+    let bflyt_bytes = write_bflyt(&bflyt)?;
+    let bntx_bytes = write_bntx(&bntx)?;
+    std::fs::write(&bflyt_path, &bflyt_bytes)?;
+    std::fs::write(&bntx_path, &bntx_bytes)?;
+
+    Ok(ApplyReport {
+        applied,
+        skipped,
+        bflyt_bytes: bflyt_bytes.len(),
+        bntx_bytes: bntx_bytes.len(),
+    })
+}
+
+/// Core of [`apply_manifest`] operating on already-parsed `bflyt` + `bntx`
+/// in memory (no file I/O beyond reading each element's source PNG from
+/// `skin_dir`). Returns `(applied, skipped)`. Used by both the on-disk
+/// [`apply_manifest`] and the archive-level [`apply_manifest_to_arc`].
+pub fn apply_manifest_in_memory(
+    bflyt: &mut BFLYT,
+    bntx: &mut BntxFile,
+    manifest: &SkinManifest,
+    skin_dir: &Path,
+    opts: &ApplyOptions,
+) -> Result<(usize, usize)> {
     let mut applied = 0usize;
     let mut skipped = 0usize;
 
@@ -131,7 +159,7 @@ pub fn apply_manifest(
                 align: opts.align,
                 mip_count: 1,
             };
-            pipeline::import_png_file(&mut bntx, &texture_name, &image_path, &import_opts)?;
+            pipeline::import_png_file(bntx, &texture_name, &image_path, &import_opts)?;
         }
 
         // 2. txl1 texture reference (idempotent).
@@ -166,17 +194,7 @@ pub fn apply_manifest(
         applied += 1;
     }
 
-    let bflyt_bytes = write_bflyt(&bflyt)?;
-    let bntx_bytes = write_bntx(&bntx)?;
-    std::fs::write(&bflyt_path, &bflyt_bytes)?;
-    std::fs::write(&bntx_path, &bntx_bytes)?;
-
-    Ok(ApplyReport {
-        applied,
-        skipped,
-        bflyt_bytes: bflyt_bytes.len(),
-        bntx_bytes: bntx_bytes.len(),
-    })
+    Ok((applied, skipped))
 }
 
 /// Options for [`validate_manifest`].
@@ -250,20 +268,37 @@ pub fn validate_manifest(
     let bflyt = read_bflyt(&std::fs::read(&bflyt_path)?)?;
     let bntx = read_bntx(&std::fs::read(&bntx_path)?)?;
 
+    Ok(validate_manifest_in_memory(
+        &bflyt,
+        &bntx,
+        manifest,
+        opts.strict_dimensions,
+    ))
+}
+
+/// Core of [`validate_manifest`] operating on already-parsed `bflyt` +
+/// `bntx`. Used by both the on-disk [`validate_manifest`] and
+/// [`apply_manifest_to_arc`].
+pub fn validate_manifest_in_memory(
+    bflyt: &BFLYT,
+    bntx: &BntxFile,
+    manifest: &SkinManifest,
+    strict_dimensions: bool,
+) -> ValidateReport {
     let results: Vec<ElementValidation> = manifest
         .elements
         .iter()
-        .map(|el| validate_element(el, manifest, &bflyt, &bntx, opts.strict_dimensions))
+        .map(|el| validate_element(el, manifest, bflyt, bntx, strict_dimensions))
         .collect();
     let passed = results.iter().filter(|r| r.ok).count();
     let failed = results.len() - passed;
 
-    Ok(ValidateReport {
+    ValidateReport {
         element_count: manifest.elements.len(),
         passed,
         failed,
         results,
-    })
+    }
 }
 
 fn validate_element(
@@ -370,4 +405,74 @@ fn validate_element(
     }
 
     finish(failures)
+}
+
+// ============================================================
+// Archive-level: unpack -> apply -> validate -> repack
+// ============================================================
+
+/// Outcome of [`apply_manifest_to_arc`].
+#[derive(Debug, Clone)]
+pub struct ArcApplyReport {
+    /// Elements newly applied.
+    pub applied: usize,
+    /// Elements skipped (already present, with `skip_existing`).
+    pub skipped: usize,
+    /// Validation of the modified layout (always run).
+    pub validation: ValidateReport,
+    /// Length in bytes of the produced archive.
+    pub out_arc_len: usize,
+    /// Number of entries in the produced archive (preserved from input).
+    pub file_count: usize,
+}
+
+/// Apply a skin manifest to a packed `layout.arc` end-to-end, entirely in
+/// memory: unpack the archive, locate the BFLYT (`opts.bflyt_rel`) and
+/// BNTX (`opts.bntx_rel`) entries, apply the manifest, validate the
+/// result, then re-pack **every** entry (the edited BFLYT/BNTX plus all
+/// other files, including any hash-only entries) into a new archive.
+///
+/// Returns the new archive bytes and an [`ArcApplyReport`]. Validation is
+/// always performed and surfaced in the report; the caller decides
+/// whether a validation failure is fatal.
+pub fn apply_manifest_to_arc(
+    arc_bytes: &[u8],
+    manifest: &SkinManifest,
+    skin_dir: &Path,
+    opts: &ApplyOptions,
+    strict_dimensions: bool,
+) -> Result<(Vec<u8>, ArcApplyReport)> {
+    let mut arc = read_arc(arc_bytes)?;
+
+    let bflyt_idx = arc.position(&opts.bflyt_rel).ok_or_else(|| {
+        Error::Manifest(format!("BFLYT entry '{}' not found in archive", opts.bflyt_rel))
+    })?;
+    let bntx_idx = arc.position(&opts.bntx_rel).ok_or_else(|| {
+        Error::Manifest(format!("BNTX entry '{}' not found in archive", opts.bntx_rel))
+    })?;
+
+    let mut bflyt = read_bflyt(&arc.files[bflyt_idx].data)?;
+    let mut bntx = read_bntx(&arc.files[bntx_idx].data)?;
+
+    let (applied, skipped) =
+        apply_manifest_in_memory(&mut bflyt, &mut bntx, manifest, skin_dir, opts)?;
+    let validation = validate_manifest_in_memory(&bflyt, &bntx, manifest, strict_dimensions);
+
+    arc.files[bflyt_idx].data = write_bflyt(&bflyt)?;
+    arc.files[bntx_idx].data = write_bntx(&bntx)?;
+
+    let file_count = arc.files.len();
+    let out = write_arc(&arc)?;
+    let out_arc_len = out.len();
+
+    Ok((
+        out,
+        ArcApplyReport {
+            applied,
+            skipped,
+            validation,
+            out_arc_len,
+            file_count,
+        },
+    ))
 }

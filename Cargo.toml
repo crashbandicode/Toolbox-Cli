@@ -47,6 +47,9 @@ serde_json = "1.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 intel_tex_2 = "0.5"
 tegra_swizzle = "0.4"
+# Pure-Rust BCn decoder (MIT/Apache, no GPL). Backs the BNTX -> PNG/DDS
+# export path (deswizzle + decode every BC format the parser accepts).
+texture2ddecoder = "0.1"
 
 # SARC archive
 sarc = "1.2"
@@ -60,10 +63,8 @@ anyhow = { version = "1.0", optional = true }
 thiserror = "1.0"
 
 [dev-dependencies]
-# Pure-Rust BC7 decoder (MIT/Apache, no GPL). Used by
-# `tests/texpipe_round_trip.rs` to verify the PNG → BC7 → swizzle path
-# survives a full deswizzle + decode comparison against the source.
-texture2ddecoder = "0.1"
+# Temp directories for layout-apply-arc / DDS round-trip integration tests.
+tempfile = "3"
 # (test fixtures live in tests/fixtures/, gitignored)
 
 [profile.release]

@@ -55,8 +55,12 @@
 mod error;
 pub use error::{Error, Result};
 
+pub mod audit;
+pub mod bflan;
 pub mod bflyt;
 pub mod bntx;
+pub mod dds;
+pub mod diff;
 pub mod layout;
 pub mod manifest;
 pub mod sarc;
