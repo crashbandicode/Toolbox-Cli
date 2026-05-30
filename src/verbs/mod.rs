@@ -9,6 +9,7 @@
 //! - 2 = invocation error (bad flags) — handled by clap
 //! - 64 = unhandled internal case
 
+mod archive_extract;
 mod bflan_inspect;
 mod bflan_roundtrip_test;
 mod bflyt_add_material;
@@ -31,6 +32,8 @@ mod bntx_remove_texture;
 mod bntx_replace_png;
 mod bntx_rlt_dump;
 mod bntx_roundtrip_test;
+mod compress;
+mod decompress;
 mod layout_apply_arc;
 mod layout_apply_manifest;
 mod layout_audit;
@@ -46,6 +49,36 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use std::path::Path;
 use std::process::ExitCode;
+
+use crate::compression::DictRegistry;
+
+/// Load the zstd dictionary registry the compression verbs need.
+///
+/// `--dict` may be either TotK's `ZsDic.pack.zs` (a plain zstd frame
+/// wrapping a SARC of `*.zsdic`) or a directory of extracted `*.zsdic`
+/// files. `--romfs` points at a RomFS root and auto-finds
+/// `Pack/ZsDic.pack.zs`. With neither, an empty registry is returned —
+/// fine for plain zstd / Yaz0 / dictionary-less data.
+pub(crate) fn load_dict_registry(
+    dict: Option<&Path>,
+    romfs: Option<&Path>,
+) -> Result<DictRegistry> {
+    if let Some(p) = dict {
+        if p.is_dir() {
+            return DictRegistry::from_dir(p).map_err(|e| anyhow::anyhow!("{e}"));
+        }
+        let bytes = std::fs::read(p).with_context(|| format!("reading dictionary {}", p.display()))?;
+        return DictRegistry::from_zsdic_pack(&bytes)
+            .map_err(|e| anyhow::anyhow!("loading {}: {e}", p.display()));
+    }
+    if let Some(root) = romfs {
+        let p = root.join("Pack").join("ZsDic.pack.zs");
+        let bytes = std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?;
+        return DictRegistry::from_zsdic_pack(&bytes)
+            .map_err(|e| anyhow::anyhow!("loading {}: {e}", p.display()));
+    }
+    Ok(DictRegistry::new())
+}
 
 /// Write `bytes` to `target`, creating parent directories as needed.
 /// Shared by the mutating verbs so the "make parent dir, then write"
@@ -195,6 +228,19 @@ pub enum Verb {
 
     /// Pack a directory tree into a SARC archive.
     SarcPack(sarc_pack::Args),
+
+    /// Decompress a zstd (`.zs`/`.pack.zs`/`.blarc.zs`) or Yaz0 (`.szs`)
+    /// file. zstd dictionaries (TotK) are selected by frame id from
+    /// `--dict`/`--romfs`.
+    Decompress(decompress::Args),
+
+    /// Compress a file as zstd (optionally with a TotK dictionary) or Yaz0.
+    /// Lossless, but not byte-identical to the game's original encoder.
+    Compress(compress::Args),
+
+    /// Decompress + unpack an archive (`.arc`/`.pack.zs`/`.blarc.zs`/`.szs`)
+    /// to a directory tree, inflating any compressed entries inside.
+    ArchiveExtract(archive_extract::Args),
 }
 
 pub fn dispatch(verb: Verb) -> Result<ExitCode> {
@@ -230,5 +276,8 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::LayoutAudit(args) => Ok(layout_audit::run(args)?),
         Verb::SarcUnpack(args) => Ok(sarc_unpack::run(args)?),
         Verb::SarcPack(args) => Ok(sarc_pack::run(args)?),
+        Verb::Decompress(args) => Ok(decompress::run(args)?),
+        Verb::Compress(args) => Ok(compress::run(args)?),
+        Verb::ArchiveExtract(args) => Ok(archive_extract::run(args)?),
     }
 }

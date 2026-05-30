@@ -29,9 +29,10 @@ against real Smash Ultimate assets (byte-identical round-trip corpus).
 | PNG → BC1/BC3/BC4/BC5/BC7 → Tegra swizzle | **Working** — [`intel_tex_2`](https://crates.io/crates/intel_tex_2) (Intel ISPC) + [`tegra_swizzle`](https://crates.io/crates/tegra_swizzle); multi-mip + cube; auto-pads non-4-aligned dims |
 | BNTX texture append / remove / replace | **Working** — append (2D/cube/multi-mip), remove, format-preserving in-place replace from PNG or DDS |
 | BFLYT mutation (add texture ref / material / pane / set transform / clone pane) | **Working** |
-| SARC unpack / pack | **Working** — reads via [`sarc`](https://crates.io/crates/sarc); **custom writer** assigns per-file alignment (no `0x2000`-everywhere bloat) and preserves hash-only entries |
+| SARC unpack / pack | **Working** — **native reader + writer** (no third-party SARC crate); the writer assigns per-file alignment (no `0x2000`-everywhere bloat) and preserves hash-only entries |
+| Compression: zstd (+ TotK dictionaries) / Yaz0 (`.szs`) | **Working** — transparent decompress (dictionary auto-selected by zstd frame id), recursive `archive-extract`, dict-aware re-compress; decode is **byte-identical** to Python 3.14's `compression.zstd` reference on real TotK `.blarc.zs`/`.pack.zs` |
 | `layout-apply-manifest` / `layout-apply-arc` | **Working** — full SGPO face-skin workflow end-to-end on an unpacked dir or directly on a packed `layout.arc` |
-| `layout-diff` / `layout-audit` | **Working** — structured BFLYT+BNTX diff; recursive unsupported/suspicious-structure scan to JSON |
+| `layout-diff` / `layout-audit` | **Working** — structured BFLYT+BNTX diff; recursive unsupported/suspicious-structure scan to JSON (transparently inflates `.zs`/`.szs` with `--dict`/`--romfs`) |
 | `layout-validate-manifest` | **Working** — read-only verifier; cross-validated against this CLI and the upstream C# Switch-Toolbox |
 
 ## Build
@@ -70,7 +71,8 @@ The default `cli` feature builds the `nx-layout-toolbox` binary; library
 consumers use `default-features = false`. High-level building blocks live in
 `bflyt` (mutation ops on `BFLYT`), `bflan`, `bntx` (+ `bntx::pipeline` for
 PNG/DDS import/replace and `bntx::decode` for export), `texpipe`, `dds`,
-`sarc` (incl. the custom writer), `manifest`, `layout` (`apply_manifest` /
+`sarc` (native reader + custom writer), `compression` (zstd + TotK
+dictionaries, Yaz0), `manifest`, `layout` (`apply_manifest` /
 `validate_manifest` / `apply_manifest_to_arc`), `diff`, and `audit`.
 
 ## End-to-end SGPO workflow
@@ -111,6 +113,8 @@ layout-diff               Structured before/after diff of two layout.arc
 layout-audit              Recursive scan for unsupported/suspicious structures (JSON)
 layout-validate-manifest  Verify an unpacked layout matches an SGPO skin manifest
 sarc-unpack               Extract a SARC archive to a directory
+decompress                Inflate a zstd (.zs/.pack.zs/.blarc.zs) or Yaz0 (.szs) file
+archive-extract           Decompress + unpack an archive to a directory tree
 ```
 
 Mutating:
@@ -129,6 +133,7 @@ bntx-replace-dds          Splice a DDS surface over an existing texture in place
 layout-apply-manifest     End-to-end on an unpacked dir: PNGs + manifest -> BFLYT + BNTX
 layout-apply-arc          Same, directly on a packed layout.arc (unpack/apply/validate/repack)
 sarc-pack                 Pack a directory into a SARC archive
+compress                  Compress a file as zstd (+ optional TotK dict) or Yaz0
 ```
 
 Internal/debug (used to develop and validate the writers; preserved
@@ -211,7 +216,12 @@ src/
 │   └── dict_builder.rs  Patricia-trie builder for the _DIC section
 ├── texpipe.rs         PNG -> RGBA8 -> BC1/BC3/BC4/BC5/BC7 -> Tegra swizzle
 ├── dds.rs             DDS (DX10) read/write; DXGI <-> TextureFormat
-├── sarc.rs            SARC read (sarc crate) + custom per-file-alignment writer
+├── sarc.rs            SARC native reader + custom per-file-alignment writer
+├── compression/       zstd (+ TotK dict) and Yaz0/Yaz1 codecs + detection
+│   ├── mod.rs         Codec detect + decompress / compress entry points
+│   ├── zstd.rs        libzstd wrapper + pure-Rust frame-header dict-id parser
+│   ├── yaz0.rs        Pure-Rust Yaz0/Yaz1 decode + encode
+│   └── dict.rs        DictRegistry (ZsDic.pack loader, id-keyed)
 ├── manifest.rs        SGPO skin manifest schema (serde)
 ├── layout.rs          apply_manifest / validate_manifest / apply_manifest_to_arc
 ├── diff.rs            Structured BFLYT+BNTX before/after diff
@@ -230,7 +240,7 @@ All MIT or MIT/Apache-2.0:
 - [`intel_tex_2`](https://crates.io/crates/intel_tex_2) — BCn encoder via Intel ISPC
 - [`texture2ddecoder`](https://crates.io/crates/texture2ddecoder) — BCn decoder (for PNG/DDS export)
 - [`tegra_swizzle`](https://crates.io/crates/tegra_swizzle) — Tegra X1 block-linear swizzle
-- [`sarc`](https://crates.io/crates/sarc) — SARC archive **reading** (writing uses a custom per-file-alignment writer in `sarc.rs`)
+- [`zstd`](https://crates.io/crates/zstd) — zstd (de)compression via vendored libzstd (the Rust wrapper is MIT; libzstd is used under its BSD-3 license — its optional GPLv2 grant is **not** taken). SARC read **and** write are native (no third-party SARC crate); Yaz0/Yaz1 is implemented in `compression::yaz0`.
 - [`anyhow`](https://crates.io/crates/anyhow), [`thiserror`](https://crates.io/crates/thiserror) — errors
 - [`walkdir`](https://crates.io/crates/walkdir) — directory traversal
 
@@ -270,6 +280,13 @@ structure), but the Rust code is original.
   BNSH on 0x1000, layout files at the 8-byte minimum), so repacked
   archives are close to the original size rather than padded to 0x2000.
   It does not deduplicate identical files.
+- Compression round-trips are **lossless but not byte-identical** to the
+  game's original encoder (re-compressing won't reproduce the exact zstd/
+  Yaz0 bytes). Decode is byte-exact (verified against Python 3.14's
+  `compression.zstd`); the invariant is `decompress(compress(x)) == x`,
+  and unchanged files should keep their original `.zs`/`.szs` bytes. TotK
+  `.zs` dictionaries are loaded from `Pack/ZsDic.pack.zs` via `--dict`/
+  `--romfs`.
 - v9 BFLYTs include an undocumented material extension on some materials;
   it's captured verbatim for round-trip and reproduced when cloning.
 

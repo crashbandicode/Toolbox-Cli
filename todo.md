@@ -16,9 +16,31 @@ session immediately after this file was written.
   other half of the robustness pass; gated behind whether TotK *texture*
   editing matters. ASTC4x4 + R8/R8G8 + the `0x0c01` family seen in the
   audit.
-- [ ] **Compression module (zstd+dict, yaz0)** + recursive archive
-  (`.blarc.zs`/`.pack.zs`/`.szs`) so TotK assets open in-tool (today they
-  need external decompression — Python 3.14 `compression.zstd` works).
+- [x] **Compression module (zstd+dict, yaz0)** + recursive archive
+  (`.blarc.zs`/`.pack.zs`/`.szs`) so TotK assets open in-tool. Done:
+  native SARC reader (dropped the `sarc` crate, which pinned an ancient C
+  libzstd 1.4.4); `zstd 0.13` (vendored libzstd, BSD); `compression::{mod,
+  zstd,yaz0,dict}` (pure-Rust Yaz0 + frame-header dict-id parser); verbs
+  `decompress`/`compress`/`archive-extract`; compression-aware
+  `layout-audit --dict/--romfs`. Decode is byte-identical to Python 3.14
+  `compression.zstd` on real `Boot.blarc.zs` (id 1) and `…pack.zs` (id 3);
+  `decompress(compress(x)) == x` for zstd+dict and Yaz0. Local fixtures:
+  `tests/fixtures/totk/compression/` (gitignored).
+- [ ] **Make SARC a crate-ready module** (dedicated follow-up to the native
+  reader added above; do *after* the compression batch is green+committed).
+  Promote `src/sarc.rs` → `src/sarc/` (`mod.rs`/`read.rs`/`write.rs`/
+  `error.rs`); add a typed `SarcError` to match `BflytError`/`BntxError`;
+  keep the codec core **zero-dependency** (std only) and isolate the
+  `walkdir`/`std::fs` helpers behind a clear boundary (future optional `fs`
+  feature) so it can be extracted as a standalone `nx-sarc` crate later.
+  Add comprehensive **original** tests (LE+BE round-trip, hash-only entries,
+  alignment derivation incl. BNTX/BNSH→0x1000 & nested→0x2000, subdir names,
+  4-byte name padding, hash-order stability/collisions, empty/single/large
+  >1000 entries, malformed inputs: bad magic/truncation/OOB ranges/missing
+  SFNT/non-UTF8 name, property round-trip). Tests authored from the public
+  spec + our round-trip discipline; edge-case checklist informed by the MIT
+  `jam1garner/sarc` crate (credit in a comment) — **no** verbatim copying,
+  **no** GPL/Switch-Toolbox, **no** committed game fixtures.
 - [x] **Adopt TotK fixtures** (bflyt/bflan) + `bflan-roundtrip-test` verb.
   Local gates now cover Smash + TotK: 881 BFLYT, 7616 BFLAN — all
   byte-identical. (Fixtures gitignored under `tests/fixtures/totk/`.)

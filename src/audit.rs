@@ -17,6 +17,7 @@ use walkdir::WalkDir;
 use crate::bflan::read_bflan;
 use crate::bflyt::read_bflyt;
 use crate::bntx::read_bntx;
+use crate::compression::{self, DictRegistry};
 use crate::error::{Error, Result};
 
 /// Aggregate counts across an audited tree.
@@ -37,6 +38,12 @@ pub struct AuditTotals {
     pub bflan_truncated_section: usize,
     pub arc_scanned: usize,
     pub arc_failed: usize,
+    /// Compressed containers (zstd `.zs` / Yaz0 `.szs`) transparently
+    /// inflated before auditing their contents.
+    pub compressed_scanned: usize,
+    /// Compressed containers we couldn't inflate (e.g. a `.zs` whose
+    /// dictionary wasn't supplied).
+    pub compressed_failed: usize,
     pub other_files: usize,
 }
 
@@ -61,14 +68,24 @@ pub struct AuditReport {
 }
 
 /// Audit a path: a single file, or a directory walked recursively. SARC
-/// archives encountered are unpacked and their entries audited too.
+/// archives encountered are unpacked and their entries audited too;
+/// compressed containers (zstd/Yaz0) are not inflated (use
+/// [`audit_path_with_dicts`] with a [`DictRegistry`] for that).
 pub fn audit_path(root: &Path) -> Result<AuditReport> {
+    audit_path_with_dicts(root, &DictRegistry::new())
+}
+
+/// Like [`audit_path`], but transparently decompresses zstd `.zs` (selecting
+/// the dictionary by frame id from `dicts`) and Yaz0 `.szs` containers, then
+/// recurses into their contents. Pass an empty registry to audit only
+/// plain/Yaz0/dictionary-less data.
+pub fn audit_path_with_dicts(root: &Path, dicts: &DictRegistry) -> Result<AuditReport> {
     let mut totals = AuditTotals::default();
     let mut files = Vec::new();
 
     if root.is_file() {
         let bytes = std::fs::read(root)?;
-        audit_entry(&root.display().to_string(), &bytes, &mut totals, &mut files);
+        audit_entry(&root.display().to_string(), &bytes, dicts, &mut totals, &mut files);
     } else if root.is_dir() {
         for entry in WalkDir::new(root).sort_by_file_name() {
             let entry =
@@ -89,7 +106,7 @@ pub fn audit_path(root: &Path) -> Result<AuditReport> {
                 .unwrap_or(entry.path())
                 .to_string_lossy()
                 .replace('\\', "/");
-            audit_entry(&rel, &bytes, &mut totals, &mut files);
+            audit_entry(&rel, &bytes, dicts, &mut totals, &mut files);
         }
     } else {
         return Err(Error::Other(format!("path not found: {}", root.display())));
@@ -103,19 +120,48 @@ pub fn audit_path(root: &Path) -> Result<AuditReport> {
 }
 
 /// True if a path's extension is one the auditor parses (so the walker
-/// can skip reading everything else).
+/// can skip reading everything else). `zs` covers the compressed forms
+/// (`.pack.zs`, `.blarc.zs`, generic `.zs`); `szs` is Yaz0-compressed.
 fn is_auditable(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => {
             let ext = ext.to_ascii_lowercase();
-            matches!(ext.as_str(), "bflyt" | "bntx" | "bflan" | "arc" | "szs")
+            matches!(ext.as_str(), "bflyt" | "bntx" | "bflan" | "arc" | "szs" | "zs")
         }
         None => false,
     }
 }
 
-/// Dispatch one in-memory file by extension.
-fn audit_entry(path: &str, bytes: &[u8], totals: &mut AuditTotals, files: &mut Vec<FileAudit>) {
+/// Dispatch one in-memory file. Compressed containers are inflated first
+/// (then re-dispatched on their contents); otherwise we route by file
+/// extension, falling back to the leading magic for inputs whose name
+/// carries a compression suffix rather than a layout extension (e.g. the
+/// decompressed body of a `foo.bntx.zs`).
+fn audit_entry(
+    path: &str,
+    bytes: &[u8],
+    dicts: &DictRegistry,
+    totals: &mut AuditTotals,
+    files: &mut Vec<FileAudit>,
+) {
+    if compression::detect(bytes).is_compressed() {
+        totals.compressed_scanned += 1;
+        match compression::decompress(bytes, dicts) {
+            Ok(inner) => audit_entry(path, &inner, dicts, totals, files),
+            Err(e) => {
+                totals.compressed_failed += 1;
+                files.push(FileAudit {
+                    path: path.to_string(),
+                    kind: "compressed".into(),
+                    ok: false,
+                    findings: Vec::new(),
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+        return;
+    }
+
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".bflyt") {
         audit_bflyt(path, bytes, totals, files);
@@ -124,9 +170,15 @@ fn audit_entry(path: &str, bytes: &[u8], totals: &mut AuditTotals, files: &mut V
     } else if lower.ends_with(".bflan") {
         audit_bflan(path, bytes, totals, files);
     } else if lower.ends_with(".arc") || lower.ends_with(".szs") {
-        audit_arc(path, bytes, totals, files);
+        audit_arc(path, bytes, dicts, totals, files);
     } else {
-        totals.other_files += 1;
+        match bytes.get(0..4) {
+            Some(b"SARC") => audit_arc(path, bytes, dicts, totals, files),
+            Some(b"FLYT") => audit_bflyt(path, bytes, totals, files),
+            Some(b"FLAN") => audit_bflan(path, bytes, totals, files),
+            Some(b"BNTX") => audit_bntx(path, bytes, totals, files),
+            _ => totals.other_files += 1,
+        }
     }
 }
 
@@ -235,13 +287,19 @@ fn audit_bflan(path: &str, bytes: &[u8], totals: &mut AuditTotals, files: &mut V
     }
 }
 
-fn audit_arc(path: &str, bytes: &[u8], totals: &mut AuditTotals, files: &mut Vec<FileAudit>) {
+fn audit_arc(
+    path: &str,
+    bytes: &[u8],
+    dicts: &DictRegistry,
+    totals: &mut AuditTotals,
+    files: &mut Vec<FileAudit>,
+) {
     totals.arc_scanned += 1;
     match crate::sarc::unpack(bytes) {
         Ok(entries) => {
             for f in entries {
                 let nested = format!("{path}!/{}", f.name);
-                audit_entry(&nested, &f.data, totals, files);
+                audit_entry(&nested, &f.data, dicts, totals, files);
             }
         }
         Err(e) => {

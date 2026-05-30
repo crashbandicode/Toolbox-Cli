@@ -51,8 +51,12 @@ tegra_swizzle = "0.4"
 # export path (deswizzle + decode every BC format the parser accepts).
 texture2ddecoder = "0.1"
 
-# SARC archive
-sarc = "1.2"
+# Compression: zstd (with dictionary + frame APIs) for TotK/BOTW `.zs`
+# assets. The Rust wrapper is MIT; the vendored libzstd is available under
+# BSD-3-Clause (we do not take its optional GPLv2 grant), so this stays a
+# GPL-free dependency. Yaz0/Yaz1 (`.szs`) is implemented natively in
+# `compression::yaz0`. SARC read + write are native (see `sarc.rs`).
+zstd = "0.13"
 
 # Walk directories for SARC packing
 walkdir = "2.5"

@@ -8,11 +8,18 @@ long output.
 ## Project
 
 Pure-Rust **library + CLI** (crate `nx-layout-toolbox`, lib
-`nx_layout_toolbox`) for editing Nintendo Switch UI assets used by Smash
-Ultimate (and other Switch games). Produces byte-identical round-trips
-of BFLYT v8/v9, BNTX, and SARC files. Used by the SGPO project to apply
-custom face-button skins. The CLI is behind a default `cli` feature;
+`nx_layout_toolbox`) for editing Nintendo Switch layout/texture assets.
+Produces byte-identical round-trips of BFLYT v8/v9, BFLAN, BNTX, and
+SARC (plus DDS texture interchange), and opens compressed TotK/BOTW
+assets in-tool (**zstd + the TotK dictionaries, Yaz0/Yaz1**). Validated on
+Smash Ultimate **and** Tears of the Kingdom. Used by the SGPO project to
+apply custom face-button skins. The CLI is behind a default `cli` feature;
 `default-features = false` gives just the format library (no clap/anyhow).
+NB: SARC read **and** write are now native (the third-party `sarc` crate was
+dropped — it pinned an ancient C libzstd that conflicted with modern zstd).
+
+**Direction:** evolving from a Smash-specific layout tool into a
+general-purpose Switch-modding toolkit (live roadmap in `todo.md`).
 
 - Repo: https://github.com/crashbandicode/Toolbox-Cli
 - License: MIT (no GPL deps)
@@ -21,9 +28,11 @@ custom face-button skins. The CLI is behind a default `cli` feature;
 ## Build & test
 
 ```bash
-cargo build           # dev
+cargo build           # dev (also compiles vendored libzstd via zstd-sys)
 cargo build --release # release (static-links Intel ISPC, ~3 min from clean)
-cargo test            # all 38+ tests across 11 binaries (debug; one test is debug-only)
+cargo test            # ~80 tests across 23 integration binaries + lib unit
+                      # tests (compression + sarc) + 1 doctest
+                      # (many skip cleanly when tests/fixtures/ is absent)
 ```
 
 ## Architecture
@@ -32,26 +41,37 @@ cargo test            # all 38+ tests across 11 binaries (debug; one test is deb
 src/
 ├── lib.rs              Library entry point (modules below)
 ├── main.rs             CLI binary; thin wrapper over verbs::dispatch
+├── error.rs            Unified high-level Error / Result (thiserror)
 ├── bflyt/
-│   ├── sections.rs     Type definitions
-│   ├── read.rs         Parser (handles malformed mat1 via flags_untrusted)
-│   └── write.rs        Writer (byte-identical round-trip)
+│   ├── sections.rs     Type definitions (incl. PaneKind::Opaque, trailing_sections)
+│   ├── read.rs         Parser (malformed mat1 via flags_untrusted; opaque/unknown sections)
+│   ├── write.rs        Writer (byte-identical round-trip)
+│   └── ops.rs          Mutation ops (clone_pane, add_material_from_template, set_pane…)
 ├── bntx/
-│   ├── mod.rs          BntxFile, Texture, AppendTextureSpec, append_texture
+│   ├── mod.rs          BntxFile, Texture, AppendTextureSpec, append/remove
 │   ├── read.rs         Full-fidelity parser (str pool, dict, RLT, BRTD)
 │   ├── write.rs        Writer with canonical/preserved RLT modes
 │   ├── decode.rs       Deswizzle + decode (texture2ddecoder) → RGBA, applies channel-swizzle
+│   ├── pipeline.rs     PNG/DDS import, format-preserving replace, DDS export
 │   └── dict_builder.rs Patricia-trie builder for _DIC
 ├── bflan.rs            BFLAN parse/write (verbatim sections, byte-identical) + pat1/pai1 inspect
+├── compression/
+│   ├── mod.rs          Codec detect + decompress/compress entry points (Cow passthrough)
+│   ├── zstd.rs         libzstd wrapper + pure-Rust frame-header dict-id parser
+│   ├── yaz0.rs         Pure-Rust Yaz0/Yaz1 decode + encode (hash-chain LZ)
+│   └── dict.rs         DictRegistry: ZsDic.pack loader, id-keyed (zs=1, bcett=2, pack=3)
 ├── texpipe.rs          PNG → BC7/BC1/BC3/BC4/BC5 (intel_tex_2) → Tegra swizzle
 ├── dds.rs              DDS (DX10) read/write; DXGI↔TextureFormat; interchange
+├── sarc.rs             SARC native reader + custom per-file-alignment writer (no `sarc` crate)
+├── layout.rs           apply_manifest / validate_manifest / apply_manifest_to_arc
 ├── diff.rs             Structured BFLYT+BNTX before/after diff (name-keyed)
 ├── audit.rs            Recursive unsupported/suspicious-structure scan → JSON
+│                       (compression-aware: inflates .zs/.szs, then recurses)
 ├── manifest.rs         SGPO skin manifest schema (serde)
-└── verbs/              One file per CLI verb
+└── verbs/              One file per CLI verb (~35 verbs)
 ```
 
-## Round-trip status (as of commit d958a13)
+## Round-trip status (as of commit c6159ec)
 
 - **BFLYT**: 508/508 Smash byte-identical, **plus 373/373 TotK** (Boot +
   Common + Title `.blarc`) after the cross-game robustness pass
@@ -65,18 +85,40 @@ src/
   output with a 1040-entry verbose RLT vs Nintendo's 8-entry compact
   RLT — both are functionally valid; the test tolerates this. (TotK BNTX
   are version 0x00040100 + ASTC — not yet supported; see todo.md.)
-- **SARC**: custom writer re-packs `info_melee.layout.arc` at ~2.16 MB
-  (was 4.7 MB via the crate writer), all 344 entries byte-identical,
-  per-file alignment correct.
+- **SARC**: native reader + custom writer re-pack `info_melee.layout.arc`
+  at ~2.16 MB (was 4.7 MB via a naive 0x2000 writer), all 344 entries
+  byte-identical, per-file alignment correct.
+- **Compression**: zstd decode is **byte-identical to Python 3.14's
+  `compression.zstd`** on real TotK `Boot.blarc.zs` (id-1 dict) and
+  `AI.Global…pack.zs` (id-3 dict, 3.9 MB → 25 MB). Containers can't be
+  re-encoded byte-identically (different encoder), so the discipline here
+  is `decompress(compress(x)) == x` (verified for zstd+dict and Yaz0) plus
+  byte-identical **inner-format** round-trips after inflation.
 - **SGPO end-to-end**: layout-apply-manifest / -arc + validate pass 4/4
   elements on a fresh `info_melee` archive.
 
 ## Tests
 
+- **Library unit tests** (`cargo test --lib`, 23): `compression::yaz0`
+  (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
+  magic + truncation rejection), `compression::zstd` (plain + raw-dict
+  round-trip + frame-header dict-id parsing on hand-built headers matching
+  the real ZsDic/blarc/pack descriptors), `compression::dict` (embedded-id
+  parse + registry keying), `compression` (codec detect, Cow passthrough,
+  high-level zstd/Yaz0 round-trips, missing-dict error), and `sarc` (native
+  reader↔writer round-trip incl. hash-only entries, big-endian, garbage
+  rejection). These run with no fixtures.
+- `tests/compression_fixtures.rs` — fixture-gated (skips without
+  `tests/fixtures/totk/compression/ZsDic.pack.zs`): loads the 3 TotK
+  dictionaries (ids {1,2,3}), decompresses each local `.blarc.zs` to a SARC
+  and round-trips every inner BFLYT/BFLAN **byte-identically**, and proves
+  `decompress(compress(x)) == x` for zstd-with-dict (frame advertises id 1)
+  and Yaz0.
 - `tests/sarc_writer.rs` — round-trips `info_melee.layout.arc` through
-  `read_arc` → `write_arc` (custom writer): all 344 files byte-identical,
-  re-readable, output stays ~2.16 MB (not the old 4.7 MB), and every
-  entry sits on its required alignment with BNTX/BNSH on 0x1000.
+  `read_arc` → `write_arc` (now exercising the **native reader** too): all
+  344 files byte-identical, re-readable, output stays ~2.16 MB (not the old
+  4.7 MB), and every entry sits on its required alignment with BNTX/BNSH on
+  0x1000.
 - `tests/bntx_cube_mip_decode.rs` — appends a 3-mip 2D texture and a
   6-face / 3-mip cube to a real BNTX, then verifies mip 0/1/2 dims halve,
   cube layer 0/5 + a deep middle-face mip decode, out-of-range mip/layer
@@ -84,10 +126,10 @@ src/
   replace→re-export preserves the linear payload + metadata). Covers the
   `mip>0` / `layer>0` paths the single-mip-2D fixtures don't reach.
 - `tests/bflan_roundtrip.rs` — walks `tests/fixtures/` recursively and
-  round-trips every `.bflan` (5838 in our setup) byte-identically, and
-  asserts the pat1 + pai1 inspect decoders run across the corpus
-  (decoded on all 5838). Caught + handled the HDR stage-select files
-  whose final `pai1` section is truncated below its declared size.
+  round-trips every `.bflan` (**7616** in our setup: 5838 Smash + 1778
+  TotK) byte-identically, and asserts the pat1 + pai1 inspect decoders
+  run across the whole corpus. Caught + handled the HDR stage-select
+  files whose final `pai1` section is truncated below its declared size.
 - `tests/layout_audit.rs` — pins the `training-modpack` unpacked archive
   audit exactly (19 BFLYT all v9, 2 with v9-extension mats / 8 mats, 1
   BNTX, 157 BFLAN, 0 failures) and asserts the full `unpacked/` tree
@@ -130,7 +172,8 @@ src/
   must decode to white RGB). 764 textures / 6 fixtures in our setup.
 - `tests/bflyt_synthesis.rs` — 2 synthetic-layout round-trip tests.
 - `tests/bflyt_real_fixtures.rs` — walks every `*.bflyt` under
-  `tests/fixtures/` recursively (508 files in our setup).
+  `tests/fixtures/` recursively (**881** in our setup: 508 Smash +
+  373 TotK Boot/Common/Title), all byte-identical.
 - `tests/bntx_real_fixtures.rs` — walks `tests/fixtures/bntx/`,
   tolerates the known sgpo_one_pane_png_proof RLT diff.
 - `tests/bntx_dict_edge.rs` — 10 Patricia-trie edge cases (empty,
@@ -171,6 +214,11 @@ src/
   size accounting matches `bc7_mip_size_bytes`'s per-level math, then
   decodes mip 0 / face 0 mip 0 / face 5 mip 0 and asserts within the
   same per-channel error budget as the single-mip test.
+- `tests/bntx_dict_parallel_order.rs` — 1 test pinning the invariant that
+  the rebuilt `_DIC` trie node order matches the BRTI/texture order
+  (regression guard for the in-game `_DIC` ordering bug).
+- `tests/bntx_rlt_large.rs` — 2 tests for the canonical RLT builder at
+  >255 textures (one-pointer-per-struct path).
 
 ## Conventions
 
@@ -199,6 +247,8 @@ src/
 | Item | Severity | Notes |
 |---|---|---|
 | `sgpo_one_pane_png_proof.bntx` 8KB RLT diff | Low | C# tool's verbose RLT. Both layouts valid. |
+| TotK BNTX (v`0x00040100`) + ASTC / low-bpp formats | Medium | Version-gated + new surface formats; not yet supported. See `todo.md`. |
+| In-tool ZSTD+dict / Yaz0 decompression | Resolved | `compression` module: zstd (+ TotK dicts via `ZsDic.pack.zs`) decode **byte-identical to Python 3.14 `compression.zstd`**; native Yaz0/Yaz1; verbs `decompress`/`compress`/`archive-extract`; compression-aware `layout-audit --dict/--romfs`. Re-compression is lossless, not container-identical (expected). |
 | In-game runtime validation on Switch hardware | High value | Untestable without hardware. |
 | v9 BFLYT 60-byte material extension (flag bit 19) | Low | Captured verbatim; can't construct from scratch (unspec'd). User accepted this gap. |
 | `flags_untrusted` materials can't safely re-encode after sub-section count changes | Resolved in TODO #4 | `Material::assert_flags_trusted()` + `clear_untrusted_flag()` API; writer `debug_assert!` catches misuse via `original_section_size` snapshot. |
@@ -221,41 +271,30 @@ src/
    community-mod file exposes a parser bug, add a focused test with
    that file's signature so future regressions fail loudly.
 
-## TODO (live, ordered) — 2026-05-29 handoff batch
+## TODO / roadmap
 
-New 7-item handoff (export/interchange/orchestration/audit). Implement
-in order; tests must be unattended + fixture-driven. Reference
-Switch-Toolbox (`Switch-Toolbox/`) for format understanding only — keep
-everything MIT, no GPL code copied.
+The **live, prioritized backlog lives in `todo.md`** — read it first for
+current work. Status snapshot (last committed `origin/main` @ c6159ec;
+the compression batch below is staged, pending commit approval):
 
-1. ~~`bntx-export-png` + `bntx-export-all`~~ — done (commit pending).
-   Deswizzle + decode every parsed format → PNG, honoring channel-swizzle.
-2. ~~format-preserving `bntx-replace-png`~~ — done (commit pending).
-   `replace_texture` now re-encodes to the texture's *existing* format
-   (BC1/BC3/BC4/BC5/BC7/RGBA) and inverts the channel-swizzle.
-3. ~~`bntx-export-dds` / `bntx-import-dds` / `bntx-replace-dds`~~ — done
-   (commit pending). DDS (DX10 header) interchange; export→import/replace
-   invariants proven for BC1/BC4/BC5/BC7.
-4. ~~`layout-apply-arc`~~ — done (commit pending). In-memory
-   unpack→apply→validate→repack against `info_melee_original.layout.arc`.
-5. ~~`layout-diff`~~ — done (commit pending). Structured BFLYT+BNTX
-   before/after diff; original vs generated SGPO = 25 panes added.
-6. ~~`layout-audit`~~ — done (commit pending). Recursive scan → JSON
-   report; pins training-modpack + full-unpacked counts (incl. 1
-   unsupported BNTX format + 42 untrusted mats detected).
-7. ~~BFLAN inspect + byte-identical roundtrip~~ — done (commit pending).
-   All 5838 `.bflan` fixtures round-trip byte-identically.
-
-**All 7 handoff items complete this session.** Build + 55 integration
-tests + 1 doctest pass; clippy clean. Not committed (awaiting user OK).
-
-Post-review hardening: added `tests/bntx_cube_mip_decode.rs` (synthesizes
-a 3-mip 2D + 6-face/3-mip cube on a real BNTX to exercise the `mip>0` /
-`layer>0` decode + DDS paths the all-single-mip-2D fixtures never reach)
-and a `layout-audit` archive-recursion test (audits the 6 `archives/*.arc`
-to cover the in-memory unpack→recurse path). Verified the multi-mip/
-multi-layer offset math against tegra's `deswizzled_mip_size`
-(= w·h·d·bpp in block units, no inter-mip/layer padding).
+- ✅ **Prior 7-item handoff** (bntx export-png/all, format-preserving
+  replace, DDS export/import/replace, layout-apply-arc, layout-diff,
+  layout-audit, BFLAN inspect + roundtrip) — done (commit d958a13),
+  plus post-review hardening (`bntx_cube_mip_decode` for mip>0/layer>0 +
+  DDS; archive-recursion audit test).
+- ✅ **Custom SARC writer** (per-file alignment, no 0x2000 bloat).
+- ✅ **Doc refresh** + **BFLYT cross-game robustness (TotK)** + **TotK
+  fixtures & `bflan-roundtrip-test` verb** (commits e19d7bc, c6159ec).
+- ✅ **Compression module (zstd + dict + Yaz0) + recursive archives**
+  (this batch): native SARC reader (dropped the `sarc` crate); `zstd 0.13`;
+  `compression::{mod,zstd,yaz0,dict}`; verbs `decompress`/`compress`/
+  `archive-extract`; compression-aware `layout-audit`. Decode byte-identical
+  to Python on real TotK `.blarc.zs`/`.pack.zs`.
+- ▶️ **Next** (see `todo.md`, recommended order): **SARC crate-ready
+  hardening** (module split + `SarcError` + comprehensive tests; small,
+  do first) → BNTX `0x00040100` + ASTC → BYAML → RSTB/RESTBL → MSBT →
+  AAMP → BFLYT advanced mutations → layout-repair → BFRES inspect-only →
+  project workflow.
 
 Standing backlog (no owner):
 
@@ -265,8 +304,56 @@ Standing backlog (no owner):
 
 ## Session log
 
-### 2026-05-30 — Doc refresh + BFLYT cross-game robustness (TotK)
-Two batches toward "general Switch modding tool":
+### 2026-05-30 — Compression module (zstd+dict, Yaz0) + native SARC reader
+Roadmap item #1. Lets the tool open real TotK/BOTW dumps in-process.
+
+**Dependency surgery.** Adding modern `zstd 0.13` collided with the
+third-party `sarc` crate, which transitively pinned an ancient C libzstd
+1.4.4 (`zstd 0.5` → `zstd-sys 1.4.x`; Cargo forbids two `links = "zstd"`).
+Resolved by writing a **native SARC reader** (`sarc::parse_sarc`: header +
+SFAT + SFNT, bounds-checked, LE/BE, hash-only entries) so the `sarc` crate
+could be dropped entirely — we already owned the writer. `read_arc`/`unpack`
+now route through it; `tests/sarc_writer.rs` exercises the reader on a real
+`layout.arc`, plus 3 new lib unit tests. (This also removed a stale C libzstd
+from the tree. A dedicated "SARC crate-ready" follow-up is queued in
+`todo.md`: module split + `SarcError` + comprehensive tests, toward a future
+standalone `nx-sarc` crate.)
+
+**`compression` module.** `zstd 0.13` (vendored libzstd; MIT wrapper, libzstd
+under BSD-3 — GPLv2 grant not taken, so GPL-free). New module:
+- `zstd.rs` — wrapper over libzstd plus a **pure-Rust frame-header parser**
+  (`frame_dictionary_id`) that reads the referenced `Dictionary_ID` without
+  decompressing (handles the single-segment / window-descriptor / 1–4-byte
+  id cases; matches the real `0xA0`/`0x61`/`0x81` TotK descriptors).
+- `yaz0.rs` — **pure-Rust** Yaz0/Yaz1 decode (byte-exact) + encode
+  (hash-chained greedy LZ, 0x1000 window, lengths to 0x111). From the public
+  spec; no GPL consulted.
+- `dict.rs` — `DictRegistry` keyed by each dictionary's embedded id;
+  `from_zsdic_pack` decompresses TotK's `ZsDic.pack.zs` (plain zstd) → SARC →
+  registers `zs`(1)/`bcett`(2)/`pack`(3).
+- `mod.rs` — `Codec` detect + `decompress` (Cow; picks the dict by frame id,
+  passes uncompressed input through borrowed) + `compress_zstd`/`compress_yaz0`.
+
+**Verbs + audit.** `decompress`, `compress` (`--format zstd|yaz0`, `--level`,
+`--dict-id`), and `archive-extract` (recursively inflate + unpack, path-
+traversal-guarded). `layout-audit` is now compression-aware (`--dict`/
+`--romfs`): it transparently inflates `.zs`/`.szs` and recurses, with a
+content-magic dispatch fallback for inflated bodies; added `compressed_*`
+counters. A shared `verbs::load_dict_registry` backs all four.
+
+**Validation (real ROMFS, gold standard).** Our zstd decode is
+**SHA-256-identical to Python 3.14 `compression.zstd`** on `Boot.blarc.zs`
+(id-1 dict, 6179→20608) and `AI.Global…pack.zs` (id-3 dict, 3.9 MB→25 MB).
+`archive-extract` of `ZsDic.pack.zs` yields the 3 dicts (131072 B each).
+`layout-audit --romfs` on a `.blarc.zs` inflates → unpacks → audits 2 BFLYT
++ 1 BFLAN (parse OK) and flags the inner BNTX as `0x00040100` (the TotK
+texture gap, todo #2). Lossless round-trips: zstd+dict (20608→6171→20608)
+and Yaz0 (→7241→) both byte-exact. `cargo test` green (incl. fixture-gated
+`tests/compression_fixtures.rs`); `cargo clippy --all-targets` clean.
+
+### 2026-05-30 — Doc refresh + BFLYT cross-game robustness + TotK gates
+Three batches toward "general Switch modding tool" (commits e19d7bc,
+c6159ec):
 
 **Doc scan/fix.** README was stale (pre-handoff): refreshed the status
 table, verb list (export/DDS/replace/remove/bflan/diff/audit/apply-arc),
@@ -290,9 +377,18 @@ section and several TotK pane-nesting shapes. Fixes:
 
 Result: **0 → 373/373 TotK Boot/Common/Title BFLYT byte-identical**, and
 Smash stays **508/508** (the changes are byte-identical for Smash too —
-opaque panes emit the same magic sequence). All tests pass; clippy clean.
-Decompressed TotK assets live in `%TEMP%\totk_probe` (Python 3.14's
-stdlib `compression.zstd` + the extracted `zs.zsdic`).
+opaque panes emit the same magic sequence).
+
+**TotK fixtures + `bflan-roundtrip-test` verb.** Added the
+`bflan-roundtrip-test` verb (mirrors bflyt/bntx). Verified BFLAN is
+already cross-game: all 1778 TotK BFLAN round-trip byte-identical.
+Adopted the TotK Boot/Common/Title bflyt+bflan as local (gitignored)
+fixtures under `tests/fixtures/totk/`, so the recursive round-trip gates
+now cover both games: **881 BFLYT** and **7616 BFLAN**, all
+byte-identical. All tests pass; clippy clean. Decompressed TotK assets
+live in `%TEMP%\totk_probe` (Python 3.14 stdlib `compression.zstd` + the
+`zs.zsdic` extracted from `Pack/ZsDic.pack.zs` via our own `sarc-unpack`);
+the source dump is at the Eden RomFS path.
 
 ### 2026-05-29 — Custom SARC writer (per-file alignment)
 Replaced the `sarc` crate's writer (we still use its reader) with a

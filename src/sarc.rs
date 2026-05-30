@@ -1,14 +1,15 @@
 //! SARC (Sead ARChive) pack/unpack helpers.
 //!
-//! Reading uses the [`sarc`](https://crates.io/crates/sarc) crate.
-//! **Writing uses our own [`write_sarc`]** so we can give each file the
-//! alignment it actually needs (the `sarc` crate pads every entry to
-//! `0x2000`, which roughly doubles a real `layout.arc`). Switch titles
-//! use little-endian SARC; pass `big_endian = true` for Wii U / 3DS.
+//! Both the reader ([`parse_sarc`], via [`read_arc`] / [`unpack`]) and the
+//! writer ([`write_sarc`]) are native implementations — no third-party
+//! SARC crate. The writer gives each file the alignment it actually needs
+//! (a generic writer pads every entry to `0x2000`, which roughly doubles a
+//! real `layout.arc`). Switch titles use little-endian SARC; pass
+//! `big_endian = true` for Wii U / 3DS (the reader auto-detects via the
+//! header BOM).
 
 use std::path::Path;
 
-use sarc::{Endian, SarcFile};
 use walkdir::WalkDir;
 
 use crate::error::{Error, Result};
@@ -55,17 +56,7 @@ impl ArcFile {
 /// Parse a SARC archive into an [`ArcFile`], preserving all entries
 /// (named and hash-only) and the byte order.
 pub fn read_arc(bytes: &[u8]) -> Result<ArcFile> {
-    let sarc = SarcFile::read(bytes).map_err(|e| Error::Sarc(format!("parsing SARC: {e:?}")))?;
-    let big_endian = matches!(sarc.byte_order, Endian::Big);
-    let files = sarc
-        .files
-        .into_iter()
-        .map(|e| ArcEntry {
-            name: e.name,
-            data: e.data,
-        })
-        .collect();
-    Ok(ArcFile { big_endian, files })
+    parse_sarc(bytes)
 }
 
 /// Serialize an [`ArcFile`] back to SARC bytes via [`write_sarc`]. Named
@@ -122,9 +113,9 @@ pub fn pack_directory_with_endian(dir: &Path, big_endian: bool) -> Result<Vec<u8
 /// Parse a SARC archive into its named files. Hash-only entries (without a
 /// stored name) are skipped.
 pub fn unpack(bytes: &[u8]) -> Result<Vec<UnpackedFile>> {
-    let sarc = SarcFile::read(bytes).map_err(|e| Error::Sarc(format!("parsing SARC: {e:?}")))?;
-    let mut out = Vec::with_capacity(sarc.files.len());
-    for entry in sarc.files {
+    let arc = parse_sarc(bytes)?;
+    let mut out = Vec::with_capacity(arc.files.len());
+    for entry in arc.files {
         if let Some(name) = entry.name {
             out.push(UnpackedFile {
                 name,
@@ -152,6 +143,129 @@ pub fn unpack_to_dir(bytes: &[u8], out_dir: &Path) -> Result<usize> {
         count += 1;
     }
     Ok(count)
+}
+
+// ============================================================
+// Native SARC reader
+// ============================================================
+
+fn read_u16(bytes: &[u8], off: usize, big_endian: bool) -> Result<u16> {
+    let b = bytes
+        .get(off..off + 2)
+        .ok_or_else(|| Error::Sarc(format!("truncated SARC: need u16 at 0x{off:x}")))?;
+    Ok(if big_endian {
+        u16::from_be_bytes([b[0], b[1]])
+    } else {
+        u16::from_le_bytes([b[0], b[1]])
+    })
+}
+
+fn read_u32(bytes: &[u8], off: usize, big_endian: bool) -> Result<u32> {
+    let b = bytes
+        .get(off..off + 4)
+        .ok_or_else(|| Error::Sarc(format!("truncated SARC: need u32 at 0x{off:x}")))?;
+    Ok(if big_endian {
+        u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+    } else {
+        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+    })
+}
+
+/// Read a NUL-terminated UTF-8 string starting at `off`. SARC entry names
+/// are always ASCII paths, so strict UTF-8 both succeeds in practice and
+/// guarantees the name re-encodes to identical bytes.
+fn read_c_string(bytes: &[u8], off: usize) -> Result<String> {
+    let slice = bytes
+        .get(off..)
+        .ok_or_else(|| Error::Sarc(format!("SARC name offset 0x{off:x} out of bounds")))?;
+    let end = slice
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or_else(|| Error::Sarc(format!("unterminated SARC name at 0x{off:x}")))?;
+    std::str::from_utf8(&slice[..end])
+        .map(|s| s.to_owned())
+        .map_err(|e| Error::Sarc(format!("non-UTF8 SARC name at 0x{off:x}: {e}")))
+}
+
+/// Parse a SARC archive into an [`ArcFile`], preserving every entry (named
+/// and hash-only) and the byte order.
+///
+/// Layout: a `0x14` header (`SARC` magic, header size, BOM, file size,
+/// data offset, version), then an `SFAT` table of fixed `0x10` nodes
+/// (hash, attrs, data start/end relative to `data_offset`), then an `SFNT`
+/// name blob. A node owns a name when `attrs & SFAT_HAS_NAME` is set; the
+/// low 24 bits are the name's offset in 4-byte units. Every access is
+/// bounds-checked so a malformed/truncated archive errors cleanly rather
+/// than panicking.
+fn parse_sarc(bytes: &[u8]) -> Result<ArcFile> {
+    if bytes.len() < SARC_HEADER_SIZE {
+        return Err(Error::Sarc(format!(
+            "too small to be a SARC ({} bytes)",
+            bytes.len()
+        )));
+    }
+    if &bytes[0..4] != b"SARC" {
+        return Err(Error::Sarc(format!("bad SARC magic: {:02x?}", &bytes[0..4])));
+    }
+    // BOM at 0x06 selects endianness: written as 0xFEFF in the file's own
+    // byte order, so the bytes are FE FF for big-endian and FF FE for
+    // little-endian (Switch).
+    let big_endian = match (bytes[0x06], bytes[0x07]) {
+        (0xFE, 0xFF) => true,
+        (0xFF, 0xFE) => false,
+        other => return Err(Error::Sarc(format!("bad SARC BOM: {other:02x?}"))),
+    };
+    let data_offset = read_u32(bytes, 0x0C, big_endian)? as usize;
+
+    // ---- SFAT ----
+    let sfat_off = SARC_HEADER_SIZE;
+    if bytes.get(sfat_off..sfat_off + 4) != Some(b"SFAT".as_slice()) {
+        return Err(Error::Sarc("missing SFAT header".into()));
+    }
+    let node_count = read_u16(bytes, sfat_off + 0x06, big_endian)? as usize;
+    let nodes_off = sfat_off + SFAT_HEADER_SIZE;
+    let nodes_end = nodes_off + node_count * SFAT_NODE_SIZE;
+
+    // ---- SFNT (name blob follows the node table) ----
+    if bytes.get(nodes_end..nodes_end + 4) != Some(b"SFNT".as_slice()) {
+        return Err(Error::Sarc(
+            "missing SFNT header (SFAT node count past end?)".into(),
+        ));
+    }
+    let names_off = nodes_end + SFNT_HEADER_SIZE;
+
+    let mut files = Vec::with_capacity(node_count);
+    for i in 0..node_count {
+        let node = nodes_off + i * SFAT_NODE_SIZE;
+        let attrs = read_u32(bytes, node + 0x04, big_endian)?;
+        let start = read_u32(bytes, node + 0x08, big_endian)? as usize;
+        let end = read_u32(bytes, node + 0x0C, big_endian)? as usize;
+        if end < start {
+            return Err(Error::Sarc(format!(
+                "SARC node {i}: data end 0x{end:x} precedes start 0x{start:x}"
+            )));
+        }
+        let abs_start = data_offset + start;
+        let abs_end = data_offset + end;
+        let data = bytes
+            .get(abs_start..abs_end)
+            .ok_or_else(|| {
+                Error::Sarc(format!(
+                    "SARC node {i}: data 0x{abs_start:x}..0x{abs_end:x} out of bounds (len 0x{:x})",
+                    bytes.len()
+                ))
+            })?
+            .to_vec();
+        let name = if attrs & SFAT_HAS_NAME != 0 {
+            let name_off = names_off + (attrs & 0x00FF_FFFF) as usize * 4;
+            Some(read_c_string(bytes, name_off)?)
+        } else {
+            None
+        };
+        files.push(ArcEntry { name, data });
+    }
+
+    Ok(ArcFile { big_endian, files })
 }
 
 // ============================================================
@@ -333,4 +447,77 @@ pub fn write_sarc(entries: &[ArcEntry], big_endian: bool) -> Result<Vec<u8>> {
     debug_assert_eq!(out.len(), file_size);
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: Option<&str>, data: &[u8]) -> ArcEntry {
+        ArcEntry {
+            name: name.map(str::to_owned),
+            data: data.to_vec(),
+        }
+    }
+
+    #[test]
+    fn writer_reader_round_trip_named_and_hash_only() {
+        // Mix named entries with a hash-only one and a fake BNTX (which the
+        // writer forces onto 0x1000) to exercise per-file alignment + the
+        // name/hash-only branches of the reader.
+        let mut bntx = b"BNTX".to_vec();
+        bntx.extend_from_slice(&[0u8; 0x40]);
+        let entries = vec![
+            entry(Some("a/first.bin"), b"hello world"),
+            entry(Some("b/second.txt"), &[0xAB; 37]),
+            entry(None, b"\x01\x02\x03\x04unnamed payload"),
+            entry(Some("timg/__Combined.bntx"), &bntx),
+        ];
+
+        let packed = write_sarc(&entries, false).expect("write");
+        let arc = parse_sarc(&packed).expect("parse");
+
+        assert!(!arc.big_endian);
+        assert_eq!(arc.files.len(), entries.len(), "entry count preserved");
+
+        // Every input entry (matched by name, or the single hash-only one)
+        // round-trips its exact bytes.
+        for src in &entries {
+            match &src.name {
+                Some(name) => {
+                    let got = arc
+                        .files
+                        .iter()
+                        .find(|f| f.name.as_deref() == Some(name.as_str()))
+                        .unwrap_or_else(|| panic!("missing {name}"));
+                    assert_eq!(got.data, src.data, "data for {name}");
+                }
+                None => {
+                    assert!(
+                        arc.files.iter().any(|f| f.name.is_none() && f.data == src.data),
+                        "hash-only entry not preserved"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn round_trip_big_endian() {
+        let entries = vec![entry(Some("x"), b"wii-u-style"), entry(Some("y"), b"BE")];
+        let packed = write_sarc(&entries, true).expect("write BE");
+        // BOM bytes are FE FF for big-endian.
+        assert_eq!((packed[0x06], packed[0x07]), (0xFE, 0xFF));
+        let arc = parse_sarc(&packed).expect("parse BE");
+        assert!(arc.big_endian);
+        assert_eq!(arc.files.len(), 2);
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_sarc(b"not a sarc at all").is_err());
+        assert!(parse_sarc(&[]).is_err());
+        // Right magic, truncated before SFAT.
+        assert!(parse_sarc(b"SARC\x14\x00\xFF\xFE").is_err());
+    }
 }

@@ -32,6 +32,11 @@ pub enum Error {
     #[error("SARC error: {0}")]
     Sarc(String),
 
+    /// A compression/decompression failure (zstd, Yaz0/Yaz1, or a missing
+    /// dictionary).
+    #[error("compression error: {0}")]
+    Compression(String),
+
     /// A manifest parse or application failure.
     #[error("manifest error: {0}")]
     Manifest(String),
