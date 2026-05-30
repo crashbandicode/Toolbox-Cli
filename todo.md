@@ -19,8 +19,9 @@ session immediately after this file was written.
 - [ ] **Compression module (zstd+dict, yaz0)** + recursive archive
   (`.blarc.zs`/`.pack.zs`/`.szs`) so TotK assets open in-tool (today they
   need external decompression — Python 3.14 `compression.zstd` works).
-- [ ] **Adopt TotK fixtures** (bflyt/bflan) + `bflan-roundtrip-test` verb;
-  extend the roundtrip/audit gates to Smash + TotK.
+- [x] **Adopt TotK fixtures** (bflyt/bflan) + `bflan-roundtrip-test` verb.
+  Local gates now cover Smash + TotK: 881 BFLYT, 7616 BFLAN — all
+  byte-identical. (Fixtures gitignored under `tests/fixtures/totk/`.)
 - [x] **Custom SARC writer with per-file alignment.** Replace the `sarc`
   crate's writer (which pads every entry to `0x2000`, bloating
   `info_melee` 2.1 MB → 4.7 MB). Derive each file's alignment from

@@ -10,6 +10,7 @@
 //! - 64 = unhandled internal case
 
 mod bflan_inspect;
+mod bflan_roundtrip_test;
 mod bflyt_add_material;
 mod bflyt_add_texture_ref;
 mod bflyt_helpers;
@@ -77,6 +78,10 @@ pub enum Verb {
     /// Print a structured snapshot of a BFLAN (Cafe Layout Animation):
     /// header, sections, and decoded pat1/pai1. Use --json.
     BflanInspect(bflan_inspect::Args),
+
+    /// Internal: read a BFLAN, write it back, and report whether the
+    /// round-trip is byte-identical.
+    BflanRoundtripTest(bflan_roundtrip_test::Args),
 
     /// Print a structured snapshot of a BFLYT (v8/v9). Use --json for tool
     /// consumption.
@@ -195,6 +200,7 @@ pub enum Verb {
 pub fn dispatch(verb: Verb) -> Result<ExitCode> {
     match verb {
         Verb::BflanInspect(args) => Ok(bflan_inspect::run(args)?),
+        Verb::BflanRoundtripTest(args) => Ok(bflan_roundtrip_test::run(args)?),
         Verb::BflytInspect(args) => Ok(bflyt_inspect::run(args)?),
         Verb::BflytRoundtripTest(args) => Ok(bflyt_roundtrip_test::run(args)?),
         Verb::BflytSectionDiff(args) => Ok(bflyt_section_diff::run(args)?),

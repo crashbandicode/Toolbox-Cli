@@ -58,7 +58,8 @@ src/
   (unknown sections → opaque; `scr1/ali1/spi1`/unknown in-tree → opaque
   *pane nodes* so `pas1`/`pae1` nesting round-trips; post-tree `usd1`
   after `cnt1` → trailing section).
-- **BFLAN**: 5838/5838 byte-identical (Smash corpus).
+- **BFLAN**: 7616/7616 byte-identical (5838 Smash + 1778 TotK). Verb
+  `bflan-roundtrip-test` mirrors the BFLYT/BNTX ones.
 - **BNTX**: 5/6 byte-identical. The 6th
   (`sgpo_one_pane_png_proof__Combined.bntx`) is a C# Switch-Toolbox
   output with a 1040-entry verbose RLT vs Nintendo's 8-entry compact

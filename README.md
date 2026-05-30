@@ -136,6 +136,7 @@ because they're useful when extending format support):
 
 ```text
 bflyt-roundtrip-test      Read a BFLYT, write it back, byte-diff
+bflan-roundtrip-test      Read a BFLAN, write it back, byte-diff
 bflyt-section-diff        Per-section size diff vs. the original
 bflyt-mat1-diff           Per-material size diff vs. the original
 bntx-roundtrip-test       Read a BNTX, write it back, byte-diff
@@ -274,13 +275,13 @@ structure), but the Rust code is original.
 
 ## Round-trip test corpus
 
-The BFLYT writer is validated against 508 BFLYT across real Smash
-Ultimate UI archives plus HDR / training-modpack community mods; the
-BFLAN writer against 5838 BFLAN; the BNTX writer against the game
-`__Combined.bntx` files; and the custom SARC writer against a full
-`layout.arc` repack. Tests live in `tests/` and are skipped when the
-(gitignored) `tests/fixtures/` corpus is absent. To reproduce on your
-own copy:
+The round-trip tests walk `tests/fixtures/` recursively. In our local
+corpus that's **881 BFLYT** (508 Smash UI + HDR/training-modpack, plus
+373 from TotK Boot/Common/Title `.blarc`) and **7616 BFLAN** (5838 Smash
++ 1778 TotK) — all byte-identical — the game `__Combined.bntx` files, and
+a full `layout.arc` repack for the custom SARC writer. Tests are skipped
+when the (gitignored) `tests/fixtures/` corpus is absent. To reproduce on
+your own copy:
 
 ```bash
 nx-layout-toolbox sarc-unpack -i layout.arc -o unpacked/
