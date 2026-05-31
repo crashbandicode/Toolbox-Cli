@@ -145,26 +145,21 @@ session immediately after this file was written.
   info want the minimum). Route `write_arc` + `pack_directory` through
   it. Bonus: correctly preserves multiple hash-only (unnamed) entries
   that the `sarc` crate writer collapsed.
-- [ ] **AAMP (binary parameter archive) — DEFERRED, BLOCKED ON FIXTURES.**
-  (Moved to the bottom: we have no AAMP dump.) **TotK does not use AAMP** —
-  every parameter file is BYML (`.bgyml`); a full recursive romfs scan for ~21
-  AAMP extensions (`.baiprog`/`.bphysics`/`.bgparamlist`/…) found **none**, and
-  cracking a real actor pack (`Pack/Actor/Accessory_Battery.pack.zs`) showed all
-  entries are `YB`/BYML + `.ainb` — zero AAMP. AAMP is a **BOTW-era** format. To
-  implement it to the project's real-bytes round-trip bar, get either a **BOTW**
-  romfs dump (AAMP lives in its `Actor/Pack/*.sbactorpack` Yaz0 SARCs) **or**
-  Python `oead` as a byte oracle (GPL-safe, like the existing Python-zstd
-  oracle). Then the disciplined order: read/inspect + byte-identical verbatim
-  round-trip → from-scratch canonical writer (BYML-style, section-ordered +
-  dedup'd data/strings) → `aamp-set`. Spec captured: v2 header at 0x30
-  (magic/version/flags/sizes + IO type string); parameter **list** (0xC: name
-  CRC32 + lists `{off>>2,count}` + objects `{off>>2,count}`), **object** (0x8:
-  CRC32 + params `{off>>2,count}`), **parameter** (0x8: CRC32 + `{data off>>2
-  (bits0-23), type (bits24-31)}`); 21 `ParameterType`s (bool/f32/int,
-  vec2-4/color/quat, string32/64/256/ref, curve1-4, buffer int/f32/u32/binary —
-  buffer count sits at `data_off-4`); keys are CRC32 hashes (reuse
-  `restbl::crc32`; readable names need an optional `--names` table, no GPL BOTW
-  strings baked in). Drop fixtures into the gitignored `tests/fixtures/aamp/`.
+- [x] **AAMP (binary parameter archive) — DONE.** BOTW was dumped, so AAMP is
+  implemented (committed `ef11b4c` / `6ad1ee6` / `cf9f257`). New `src/aamp/`
+  (`mod`/`read`/`write`/`edit`/`error`, typed `AampError`): offset-driven v2
+  parser (root Parameter IO → list 0xC / object 0x8 / parameter 0x8, all 21
+  `ParameterType`s, CRC-32 keys); `write_aamp` verbatim **byte-identical** (418
+  real BOTW files); from-scratch `write_aamp_canonical` (sections header →
+  lists [BFS] → objects → params → data → dedup'd strings, 4-aligned; semantic
+  round-trip, lossless on all 418); `set_by_path` type-preserving scalar
+  mutation by a `/<lists…>/<object>/<param>` path (CRC-32-matched; `0x…` = raw
+  hash). Verbs `aamp-inspect` (`--json` / `--names`), `aamp-roundtrip-test`
+  (`--canonical`), `aamp-set`. Fixtures (32 files / 18 extensions, from a BOTW
+  dump) under the gitignored `tests/fixtures/aamp/`.
+  *Follow-up (not done):* a default BOTW name table for readable inspect (CRC-32
+  keys shown as hex unless `--names` given); decode curve control points (kept
+  as raw bytes today); AAMP add/remove params (only scalar set so far).
 
 ## Hardening (small, no new fixtures needed)
 
