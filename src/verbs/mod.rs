@@ -17,6 +17,8 @@ mod bflyt_add_texture_ref;
 mod bflyt_helpers;
 mod bflyt_inspect;
 mod bflyt_mat1_diff;
+mod bflyt_prune;
+mod bflyt_repair;
 mod bflyt_roundtrip_test;
 mod bflyt_section_diff;
 mod bntx_dict_test;
@@ -207,6 +209,15 @@ pub enum Verb {
     /// descendant names to keep them unique.
     PaneCopy(pane_copy::Args),
 
+    /// Remove unreferenced materials and/or textures from a BFLYT, remapping
+    /// the surviving indices.
+    BflytPrune(bflyt_prune::Args),
+
+    /// Repair a BFLYT: dedupe duplicate pane names, clamp dangling texture
+    /// refs, prune unused textures (and optionally materials). --dry-run to
+    /// preview.
+    BflytRepair(bflyt_repair::Args),
+
     /// Print a structured snapshot of a BNTX. Use --json for tool consumption.
     BntxInspect(bntx_inspect::Args),
 
@@ -367,6 +378,8 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::PaneMove(args) => Ok(pane_move::run(args)?),
         Verb::PaneRename(args) => Ok(pane_rename::run(args)?),
         Verb::PaneCopy(args) => Ok(pane_copy::run(args)?),
+        Verb::BflytPrune(args) => Ok(bflyt_prune::run(args)?),
+        Verb::BflytRepair(args) => Ok(bflyt_repair::run(args)?),
         Verb::BntxInspect(args) => Ok(bntx_inspect::run(args)?),
         Verb::BntxExportPng(args) => Ok(bntx_export_png::run(args)?),
         Verb::BntxExportAll(args) => Ok(bntx_export_all::run(args)?),

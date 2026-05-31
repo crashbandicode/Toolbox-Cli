@@ -12,10 +12,12 @@
 
 mod ops;
 mod read;
+mod repair;
 mod sections;
 mod write;
 
 pub use ops::{ClonePaneSpec, PaneEdit};
+pub use repair::RepairReport;
 
 // Re-export the types CLI verbs and external callers need. Internal-only
 // types stay private inside `sections` and `read`/`write`.

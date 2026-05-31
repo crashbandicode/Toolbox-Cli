@@ -102,3 +102,40 @@ fn rename_copy_remove_round_trip_on_real_bflyt() {
     let back = read_bflyt(&write_bflyt(&b).unwrap()).unwrap();
     assert!(!back.pane_exists(&target), "removed pane should be gone");
 }
+
+#[test]
+fn repair_round_trips_on_real_bflyt() {
+    let Some(path) = first_bflyt() else {
+        eprintln!("skipping (no *.bflyt fixtures)");
+        return;
+    };
+    let bytes = std::fs::read(&path).unwrap();
+    let mut b = read_bflyt(&bytes).expect("parse fixture");
+    // Repair without material pruning (the safe default for arbitrary files).
+    let _ = b.repair(false);
+
+    // The repaired layout must still serialize + re-parse, with self-consistent
+    // cross-references.
+    let back = read_bflyt(&write_bflyt(&b).unwrap()).expect("re-parse repaired");
+
+    // Every material->texture reference is in range after repair.
+    let n = back.textures.len();
+    if n > 0 {
+        for m in &back.materials {
+            for t in &m.texture_maps {
+                assert!(
+                    t.index >= 0 && (t.index as usize) < n,
+                    "texture ref {} out of range (len {n})",
+                    t.index
+                );
+            }
+        }
+    }
+    // No duplicate pane names remain.
+    let mut names = Vec::new();
+    collect(back.root_pane.as_ref().unwrap(), 0, &mut names);
+    let mut seen = std::collections::HashSet::new();
+    for (name, _, _) in &names {
+        assert!(seen.insert(name.clone()), "duplicate pane name after repair: {name}");
+    }
+}
