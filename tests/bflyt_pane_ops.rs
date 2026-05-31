@@ -139,3 +139,61 @@ fn repair_round_trips_on_real_bflyt() {
         assert!(seen.insert(name.clone()), "duplicate pane name after repair: {name}");
     }
 }
+
+/// Find `(path, pane_name)` for the first simple `txt1` text pane in any
+/// fixture (bounded scan so we don't read the whole corpus).
+fn find_text_pane() -> Option<(PathBuf, String)> {
+    fn walk(dir: &Path, out: &mut Option<(PathBuf, String)>, budget: &mut usize) {
+        if out.is_some() || *budget == 0 {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for p in paths {
+            if out.is_some() || *budget == 0 {
+                return;
+            }
+            if p.is_dir() {
+                walk(&p, out, budget);
+            } else if p.extension().and_then(|e| e.to_str()) == Some("bflyt") {
+                *budget -= 1;
+                let Ok(bytes) = std::fs::read(&p) else { continue };
+                let Ok(b) = read_bflyt(&bytes) else { continue };
+                let Some(root) = b.root_pane.as_ref() else { continue };
+                let mut names = Vec::new();
+                collect(root, 0, &mut names);
+                for (name, _, _) in &names {
+                    if b.pane_text(name).is_some() {
+                        *out = Some((p.clone(), name.clone()));
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    let mut out = None;
+    let mut budget = 400usize;
+    walk(Path::new("tests/fixtures"), &mut out, &mut budget);
+    out
+}
+
+#[test]
+fn set_text_round_trips_on_real_bflyt() {
+    let Some((path, pane)) = find_text_pane() else {
+        eprintln!("skipping (no simple txt1 pane found in fixtures)");
+        return;
+    };
+    let bytes = std::fs::read(&path).unwrap();
+    let mut b = read_bflyt(&bytes).unwrap();
+    b.set_text(&pane, "TestText123").unwrap();
+    let back = read_bflyt(&write_bflyt(&b).unwrap()).expect("re-parse after set_text");
+    assert_eq!(
+        back.pane_text(&pane).as_deref(),
+        Some("TestText123"),
+        "edited text should read back from a real layout ({})",
+        path.display()
+    );
+}

@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use super::sections::PANE_NAME_LEN;
-use super::{BasePane, BflytError, Group, BFLYT, MAT_NAME_LEN_USIZE};
+use super::{BasePane, BflytError, Group, TextBoxPane, BFLYT, MAT_NAME_LEN_USIZE};
 
 /// Parameters for [`BFLYT::clone_pane`]. `None` overrides keep the
 /// template's value; children are never copied.
@@ -47,6 +47,27 @@ pub struct PaneEdit {
     /// Bind the pane to a material by name (pic1/txt1 only).
     pub bind_material: Option<String>,
 }
+
+/// Field edits for [`BFLYT::set_window`]. `None` fields are left unchanged.
+/// Covers the `wnd1` stretch and frame-size borders (the decoded scalar
+/// fields); the content/frame material tables are not edited here.
+#[derive(Debug, Clone, Default)]
+pub struct WindowEdit {
+    pub stretch_l: Option<u16>,
+    pub stretch_r: Option<u16>,
+    pub stretch_t: Option<u16>,
+    pub stretch_b: Option<u16>,
+    pub frame_size_l: Option<u16>,
+    pub frame_size_r: Option<u16>,
+    pub frame_size_t: Option<u16>,
+    pub frame_size_b: Option<u16>,
+}
+
+/// File offset of a `txt1` pane's text string, measured from the section
+/// magic byte: 8 (section header) + 0x4C (pane base) + 0x54 (txt1 header).
+/// A standard single-string text box stores its string right here, at the
+/// start of the captured trailing bytes.
+const TXT1_STRING_OFFSET: u32 = 8 + 0x4C + 0x54;
 
 impl BFLYT {
     /// Add a texture name to txl1 if it isn't already present; return its
@@ -459,6 +480,116 @@ impl BFLYT {
         parent_node.children.push(clone);
         Ok(count)
     }
+
+    /// Edit a `wnd1` window pane's stretch / frame-size borders. `None` fields
+    /// in `edit` are left unchanged. Errors if the pane is missing or isn't a
+    /// window.
+    pub fn set_window(&mut self, pane: &str, edit: &WindowEdit) -> Result<(), BflytError> {
+        let p = self
+            .find_pane_mut(pane)
+            .ok_or_else(|| BflytError::Format(format!("pane '{pane}' not found")))?;
+        let w = p
+            .window
+            .as_mut()
+            .ok_or_else(|| BflytError::Format(format!("pane '{pane}' is not a wnd1 window")))?;
+        if let Some(v) = edit.stretch_l {
+            w.stretch_l = v;
+        }
+        if let Some(v) = edit.stretch_r {
+            w.stretch_r = v;
+        }
+        if let Some(v) = edit.stretch_t {
+            w.stretch_t = v;
+        }
+        if let Some(v) = edit.stretch_b {
+            w.stretch_b = v;
+        }
+        if let Some(v) = edit.frame_size_l {
+            w.frame_size_l = v;
+        }
+        if let Some(v) = edit.frame_size_r {
+            w.frame_size_r = v;
+        }
+        if let Some(v) = edit.frame_size_t {
+            w.frame_size_t = v;
+        }
+        if let Some(v) = edit.frame_size_b {
+            w.frame_size_b = v;
+        }
+        Ok(())
+    }
+
+    /// The decoded string of a `txt1` text-box pane, for the standard
+    /// single-string layout. Returns `None` if the pane isn't a text box or
+    /// carries a layout [`set_text`](Self::set_text) doesn't model (a text id,
+    /// per-character transform, line-width table, or a non-standard string
+    /// offset).
+    pub fn pane_text(&self, pane: &str) -> Option<String> {
+        let t = self.find_pane(pane)?.text.as_ref()?;
+        if !is_simple_text_layout(t) {
+            return None;
+        }
+        let str_len = t.text_str_bytes as usize;
+        if str_len > t.trailing.len() {
+            return None;
+        }
+        Some(decode_utf16le(&t.trailing[..str_len]))
+    }
+
+    /// Replace the string of a `txt1` text-box pane (UTF-16LE + NUL), updating
+    /// `text_str_bytes` / `text_buf_bytes`. Supports only the standard
+    /// single-string layout — a pane that also carries a text id, a
+    /// per-character transform, a line-width table, or extra data after its
+    /// string is rejected (so we never corrupt data we don't fully model).
+    pub fn set_text(&mut self, pane: &str, new_text: &str) -> Result<(), BflytError> {
+        let p = self
+            .find_pane_mut(pane)
+            .ok_or_else(|| BflytError::Format(format!("pane '{pane}' not found")))?;
+        let t = p
+            .text
+            .as_mut()
+            .ok_or_else(|| BflytError::Format(format!("pane '{pane}' is not a txt1 text box")))?;
+
+        if t.text_id_offset != 0
+            || t.per_character_transform_offset != 0
+            || t.line_width_offset_offset != 0
+        {
+            return Err(BflytError::Format(format!(
+                "pane '{pane}' carries extra text data (text id / per-character transform / \
+                 line-width table); set-text is unsupported for it"
+            )));
+        }
+        if t.text_str_offset != TXT1_STRING_OFFSET {
+            return Err(BflytError::Format(format!(
+                "pane '{pane}' has a non-standard text layout (text_str_offset=0x{:x}, \
+                 expected 0x{TXT1_STRING_OFFSET:x}); set-text is unsupported",
+                t.text_str_offset
+            )));
+        }
+        let str_len = t.text_str_bytes as usize;
+        if str_len > t.trailing.len() || t.trailing.len() - str_len >= 4 {
+            // The string must occupy the trailing bytes (modulo <4 bytes of
+            // alignment padding); anything else means data we don't model.
+            return Err(BflytError::Format(format!(
+                "pane '{pane}' has unexpected data around its text string; set-text is unsupported"
+            )));
+        }
+
+        let mut bytes = Vec::with_capacity((new_text.len() + 1) * 2);
+        for u in new_text.encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[0, 0]); // NUL terminator
+        if bytes.len() > u16::MAX as usize {
+            return Err(BflytError::Format(
+                "text is too long (exceeds 65535 bytes when UTF-16-encoded)".into(),
+            ));
+        }
+        t.text_str_bytes = bytes.len() as u16;
+        t.text_buf_bytes = bytes.len() as u16;
+        t.trailing = bytes;
+        Ok(())
+    }
 }
 
 /// Collect this pane's name and all descendant names (depth-first).
@@ -497,10 +628,31 @@ fn rename_in_groups(group: &mut Group, from: &str, to: &str) {
     }
 }
 
+/// True for the standard single-string `txt1` layout that
+/// [`BFLYT::set_text`]/[`BFLYT::pane_text`] understand: the string sits at the
+/// canonical offset with no text id / per-character transform / line-width
+/// table.
+fn is_simple_text_layout(t: &TextBoxPane) -> bool {
+    t.text_id_offset == 0
+        && t.per_character_transform_offset == 0
+        && t.line_width_offset_offset == 0
+        && t.text_str_offset == TXT1_STRING_OFFSET
+}
+
+/// Decode a UTF-16LE byte slice, stopping at the first NUL code unit.
+fn decode_utf16le(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&u| u != 0)
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bflyt::{LayoutInfo, PaneKind};
+    use crate::bflyt::{LayoutInfo, PaneKind, TextBoxPane, WindowPane};
 
     /// A childless `pan1` with all-default fields and the given name.
     fn leaf(name: &str) -> BasePane {
@@ -511,6 +663,87 @@ mod tests {
         p.opaque = None;
         p.name = name.to_string();
         p
+    }
+
+    /// A txt1 text-box pane in the standard single-string layout carrying `s`.
+    fn txt(name: &str, s: &str) -> BasePane {
+        let mut bytes = Vec::new();
+        for u in s.encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[0, 0]);
+        let mut p = leaf(name);
+        p.kind = PaneKind::Text;
+        p.text = Some(TextBoxPane {
+            text_str_offset: TXT1_STRING_OFFSET,
+            text_str_bytes: bytes.len() as u16,
+            text_buf_bytes: bytes.len() as u16,
+            trailing: bytes,
+            ..Default::default()
+        });
+        p
+    }
+
+    /// A wnd1 window pane with all-default borders.
+    fn wnd(name: &str) -> BasePane {
+        let mut p = leaf(name);
+        p.kind = PaneKind::Window;
+        p.window = Some(WindowPane::default());
+        p
+    }
+
+    fn one_pane(child: BasePane) -> BFLYT {
+        let mut b = sample();
+        b.root_pane.as_mut().unwrap().children.push(child);
+        b
+    }
+
+    #[test]
+    fn set_text_round_trips_through_pane_text() {
+        let mut b = one_pane(txt("Label", "Hello"));
+        assert_eq!(b.pane_text("Label").as_deref(), Some("Hello"));
+        b.set_text("Label", "Goodbye!").unwrap();
+        assert_eq!(b.pane_text("Label").as_deref(), Some("Goodbye!"));
+        // The byte length tracked the new string (8 chars + NUL) * 2.
+        let t = b.find_pane("Label").unwrap().text.as_ref().unwrap();
+        assert_eq!(t.text_str_bytes as usize, ("Goodbye!".len() + 1) * 2);
+        assert_eq!(t.text_buf_bytes, t.text_str_bytes);
+    }
+
+    #[test]
+    fn set_text_rejects_non_text_and_complex_layout() {
+        let mut b = one_pane(leaf("NotText"));
+        assert!(b.set_text("NotText", "x").is_err());
+        // A pane with a per-character transform offset is rejected.
+        let mut b = one_pane(txt("Fancy", "hi"));
+        b.find_pane_mut("Fancy").unwrap().text.as_mut().unwrap().per_character_transform_offset = 0x100;
+        assert!(b.set_text("Fancy", "x").is_err());
+        assert!(b.pane_text("Fancy").is_none());
+    }
+
+    #[test]
+    fn set_window_edits_borders() {
+        let mut b = one_pane(wnd("Win"));
+        let edit = WindowEdit {
+            stretch_l: Some(4),
+            frame_size_t: Some(7),
+            ..Default::default()
+        };
+        b.set_window("Win", &edit).unwrap();
+        let w = b.find_pane("Win").unwrap().window.as_ref().unwrap();
+        assert_eq!(w.stretch_l, 4);
+        assert_eq!(w.frame_size_t, 7);
+        assert_eq!(w.stretch_r, 0); // untouched
+        // Non-window pane errors.
+        assert!(b.set_window("RootPane", &edit).is_err());
+    }
+
+    #[test]
+    fn set_text_survives_write_read() {
+        let mut b = one_pane(txt("T", "before"));
+        b.set_text("T", "after-edit").unwrap();
+        let back = crate::bflyt::read_bflyt(&crate::bflyt::write_bflyt(&b).unwrap()).unwrap();
+        assert_eq!(back.pane_text("T").as_deref(), Some("after-edit"));
     }
 
     fn branch(name: &str, children: Vec<BasePane>) -> BasePane {
