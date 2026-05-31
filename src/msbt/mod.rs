@@ -143,6 +143,30 @@ impl Message {
         }
     }
 
+    /// Build a message from text chunks for the given encoding/endianness —
+    /// the inverse of [`Message::chunks`]. UTF-16 is fully tag-aware (re-emits
+    /// `0x000E`/`0x000F` markers + a NUL terminator); for UTF-8 the text chunks
+    /// are concatenated (tag payloads appended raw) with a NUL terminator.
+    pub fn from_chunks(chunks: &[TextChunk], encoding: Encoding, big_endian: bool) -> Message {
+        let raw = match encoding {
+            Encoding::Utf16 => encode_utf16_chunks(chunks, big_endian),
+            Encoding::Utf8 => {
+                let mut v = Vec::new();
+                for c in chunks {
+                    match c {
+                        TextChunk::Text(t) => v.extend_from_slice(t.as_bytes()),
+                        TextChunk::Tag { data, .. } => v.extend_from_slice(data),
+                        TextChunk::TagClose { .. } => {}
+                    }
+                }
+                v.push(0);
+                v
+            }
+            Encoding::Utf32 => Vec::new(),
+        };
+        Message { raw }
+    }
+
     /// A human-readable rendering of the message: literal text with control
     /// tags shown as `[tag g=.. t=.. n=..]` / `[/tag g=.. t=..]`. Lossy — for
     /// display only (a reversible JSON codec is a follow-up).
@@ -234,6 +258,27 @@ impl MsbtDocument {
         })
     }
 
+    /// Replace the message a label points at. Returns `false` if the label is
+    /// unknown or its index is out of range (no change made). Serialize with
+    /// [`write_msbt_canonical`] afterward.
+    pub fn set_message_by_label(&mut self, label: &str, message: Message) -> bool {
+        let Some(index) = self
+            .labels()
+            .and_then(|ls| ls.iter().find(|l| l.name == label).map(|l| l.index as usize))
+        else {
+            return false;
+        };
+        for s in &mut self.sections {
+            if let SectionData::Text(messages) = &mut s.data {
+                if index < messages.len() {
+                    messages[index] = message;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Pair each label with the message it points at, sorted by label name.
     /// Labels whose index is out of range are skipped.
     pub fn entries(&self) -> Vec<(&str, &Message)> {
@@ -319,6 +364,44 @@ fn decode_utf16_chunks(raw: &[u8], big_endian: bool) -> Vec<TextChunk> {
     }
     flush(&mut text, &mut chunks);
     chunks
+}
+
+/// Encode text chunks back into a UTF-16 message body (the inverse of
+/// [`decode_utf16_chunks`]): text runs as code units, `0x000E` open tags
+/// (group/type/size/payload) and `0x000F` close tags (group/type), then a
+/// `0x0000` terminator.
+fn encode_utf16_chunks(chunks: &[TextChunk], big_endian: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    let push = |u: u16, out: &mut Vec<u8>| {
+        out.extend_from_slice(&if big_endian {
+            u.to_be_bytes()
+        } else {
+            u.to_le_bytes()
+        });
+    };
+    for chunk in chunks {
+        match chunk {
+            TextChunk::Text(t) => {
+                for u in t.encode_utf16() {
+                    push(u, &mut out);
+                }
+            }
+            TextChunk::Tag { group, ty, data } => {
+                push(TAG_OPEN, &mut out);
+                push(*group, &mut out);
+                push(*ty, &mut out);
+                push(data.len() as u16, &mut out);
+                out.extend_from_slice(data);
+            }
+            TextChunk::TagClose { group, ty } => {
+                push(TAG_CLOSE, &mut out);
+                push(*group, &mut out);
+                push(*ty, &mut out);
+            }
+        }
+    }
+    push(0, &mut out); // NUL terminator
+    out
 }
 
 /// The LMS label hash: `h = h*0x492 + byte` (wrapping u32) over the label's
