@@ -29,7 +29,7 @@
 //!   [`bntx::pipeline`] adds PNG/DDS import/replace and
 //!   [`bntx::decode`] does deswizzle + decode to RGBA.
 //! - [`byml`] — BYML (binary YAML) read + verbatim round-trip + a decoded
-//!   [`byml::Byml`] value tree (inspect / diff).
+//!   [`byml::Byml`] value tree (inspect / diff / [`byml::set_by_path`] edit).
 //! - [`restbl`] — RESTBL (Resource Size Table) read/write (byte-identical)
 //!   + CRC-32 path lookup / size update.
 //! - [`msbt`] — MSBT (LibMessageStudio message) read + verbatim round-trip +
@@ -97,7 +97,8 @@ pub mod prelude {
     };
     pub use crate::bntx::{read_bntx, write_bntx, AppendTextureSpec, BntxFile, TextureFormat};
     pub use crate::byml::{
-        diff_byml, read_byml, write_byml, write_byml_canonical, Byml, BymlDiff, BymlDocument,
+        diff_byml, read_byml, set_by_path, write_byml, write_byml_canonical, Byml, BymlDiff,
+        BymlDocument, ScalarType, SetReport,
     };
     pub use crate::compression::{compress_yaz0, compress_zstd, decompress, Codec, DictRegistry};
     pub use crate::layout::{

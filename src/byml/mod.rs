@@ -20,14 +20,17 @@
 //! synthesized trees, [`write_byml_canonical`] is a from-scratch writer whose
 //! guarantee is the *semantic* round-trip `read(write(x)) == read(x)` (it does
 //! not chase a specific tool's byte layout). [`diff_byml`] produces a
-//! path-keyed structural diff of two trees.
+//! path-keyed structural diff of two trees, and [`set_by_path`] edits a scalar
+//! leaf in place (then serialize with [`write_byml_canonical`]).
 
 mod diff;
+mod edit;
 mod error;
 mod read;
 mod write;
 
 pub use diff::{diff_byml, BymlDiff, ChangedEntry, DiffEntry};
+pub use edit::{set_by_path, ScalarType, SetReport};
 pub use error::{BymlError, Result};
 pub use read::read_byml;
 pub use write::{write_byml, write_byml_canonical};

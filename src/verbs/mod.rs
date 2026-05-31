@@ -35,6 +35,7 @@ mod bntx_roundtrip_test;
 mod byml_diff;
 mod byml_inspect;
 mod byml_roundtrip_test;
+mod byml_set;
 mod compress;
 mod decompress;
 mod layout_apply_arc;
@@ -254,6 +255,11 @@ pub enum Verb {
     /// key, arrays by index). Inflates `.byml.zs`. Use --json.
     BymlDiff(byml_diff::Args),
 
+    /// Edit a scalar leaf in a BYML document by path (`/SystemData/Hp`),
+    /// preserving the leaf's type unless `--type` overrides it, then
+    /// canonical-write the (uncompressed) result. Inflates `.byml.zs`.
+    BymlSet(byml_set::Args),
+
     /// Print a structured snapshot of an MSBT (LibMessageStudio message) file:
     /// endianness, encoding, sections, and decoded label→message text.
     /// Inflates `.msbt.zs`. Use --json / --limit.
@@ -356,6 +362,7 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::BymlInspect(args) => Ok(byml_inspect::run(args)?),
         Verb::BymlRoundtripTest(args) => Ok(byml_roundtrip_test::run(args)?),
         Verb::BymlDiff(args) => Ok(byml_diff::run(args)?),
+        Verb::BymlSet(args) => Ok(byml_set::run(args)?),
         Verb::MsbtInspect(args) => Ok(msbt_inspect::run(args)?),
         Verb::MsbtRoundtripTest(args) => Ok(msbt_roundtrip_test::run(args)?),
         Verb::MsbtExportJson(args) => Ok(msbt_json::export_run(args)?),

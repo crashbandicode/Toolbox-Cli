@@ -6,6 +6,39 @@ session immediately after this file was written.
 
 ## In progress / next
 
+- [ ] **AAMP (binary parameter archive) — BLOCKED ON FIXTURES.** Roadmap item
+  #2. **TotK does not use AAMP**: every parameter file is BYML (`.bgyml`). A
+  full recursive romfs scan for ~21 AAMP extensions (`.baiprog`/`.bphysics`/
+  `.bgparamlist`/…) found **none**, and cracking a real actor pack
+  (`Pack/Actor/Accessory_Battery.pack.zs`) showed all entries are `YB`/BYML +
+  `.ainb` — zero AAMP. AAMP is a **BOTW-era** format. To implement it to the
+  project's real-bytes round-trip bar, need either a **BOTW** romfs dump (AAMP
+  lives in its `Actor/Pack/*.sbactorpack` Yaz0 SARCs) **or** Python `oead` as a
+  byte oracle (GPL-safe, like the existing Python-zstd oracle). Then do the
+  disciplined order: read/inspect + byte-identical verbatim round-trip → from-
+  scratch canonical writer (BYML-style, section-ordered + dedup'd data/strings)
+  → `aamp-set`. Spec captured: v2 header at 0x30 (magic/version/flags/sizes +
+  IO type string); parameter **list** (0xC: name CRC32 + lists `{off>>2,count}`
+  + objects `{off>>2,count}`), **object** (0x8: CRC32 + params `{off>>2,count}`),
+  **parameter** (0x8: CRC32 + `{data off>>2 (bits0-23), type (bits24-31)}`); 21
+  `ParameterType`s (bool/f32/int, vec2-4/color/quat, string32/64/256/ref,
+  curve1-4, buffer int/f32/u32/binary — buffer count sits at `data_off-4`);
+  keys are CRC32 hashes (reuse `restbl::crc32`; readable names need an optional
+  `--names` table, no GPL BOTW strings baked in). Drop fixtures into the
+  gitignored `tests/fixtures/aamp/`.
+- [x] **BYML `byml-set` (scalar mutation-by-path).** Done (committed). New
+  `src/byml/edit.rs`: `set_by_path(root, path, raw, ty)` edits one scalar leaf
+  by a `byml-diff`-style path (`/RecipeList/0/ResultActorName`), type-preserving
+  by default or `--type` (`bool`/`s32`/`u32`/`f32`/`s64`/`u64`/`f64`/`string`/
+  `null`) override / `null` promotion; refuses to clobber containers/binary or
+  descend through scalars (`u32`/`u64` accept `0x` hex). Then
+  `write_byml_canonical` (semantically lossless). `ScalarType` + `SetReport` +
+  8 `BymlError` edit variants, exported from `byml` + prelude. Verb `byml-set`
+  (`-i`/`-o`/`--path`/`--value`/`--type`, inflates `.byml.zs`, writes
+  uncompressed). Tests: 11 fixture-free unit + `tests/byml_set.rs` (3
+  fixture-gated — a real `CookingTable` edit = exactly one structural diff).
+  *Follow-up (not done):* **add/remove-by-path** (create a new hash key / append
+  an array element / delete a node).
 - [x] **MSBT inspect + round-trip + JSON export/import (Stages A+B).** Roadmap
   item (text/message format), done + committed. New `src/msbt/`
   (`mod`/`read`/`write`/`error`, typed `MsbtError`): `MsgStdBn` header (endian
@@ -44,8 +77,8 @@ session immediately after this file was written.
   structural diff, `--json`). Tests: `tests/byml_roundtrip.rs` (+ canonical
   semantic round-trip), `tests/byml_diff.rs`, 10 fixture-free unit tests.
   Fixtures gitignored under `tests/fixtures/byml/`.
-  *Follow-up (not done):* `byml-set` mutation by path (edit a leaf / add /
-  remove, then `write_byml_canonical`).
+  *Follow-up:* scalar `byml-set` (mutation-by-path → `write_byml_canonical`) is
+  **done** (see the dedicated item above); add/remove-by-path is still pending.
 - [x] **RSTB/RESTBL read + update.** Roadmap item #3 (done, committed). New
   `src/restbl.rs` (typed `RestblError`): TotK `RESTBL` v1 — 22-byte header +
   CRC table (`{hash,size}` sorted by hash) + 160-byte-name collision table

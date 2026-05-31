@@ -76,6 +76,47 @@ pub enum BymlError {
     /// requires a container at the root).
     #[error("BYML root must be a container (array/hash), got {0}")]
     NonContainerRoot(&'static str),
+
+    // ---- mutation (`set_by_path`) ----
+    /// A path segment named a hash key that doesn't exist (or an array index
+    /// past a missing parent).
+    #[error("BYML path {path:?} not found")]
+    PathNotFound { path: String },
+
+    /// A path segment indexing an array wasn't a non-negative integer.
+    #[error("BYML path segment {segment:?} is not a valid array index")]
+    PathIndexNotInteger { segment: String },
+
+    /// An array index ran past the end of the array.
+    #[error("BYML array index {index} out of range ({len} element(s))")]
+    PathIndexOutOfRange { index: usize, len: usize },
+
+    /// The path tried to descend into a scalar leaf (only arrays/hashes have
+    /// children).
+    #[error("BYML path segment {segment:?} descends into a {node_type} (not a container)")]
+    PathThroughScalar {
+        segment: String,
+        node_type: &'static str,
+    },
+
+    /// The target node is a container or binary blob; [`set_by_path`] only
+    /// overwrites scalar leaves.
+    #[error("BYML path {path:?} targets a {node_type}; only scalar leaves can be set")]
+    TargetNotScalar {
+        path: String,
+        node_type: &'static str,
+    },
+
+    /// The `--type` spelling wasn't a known scalar kind.
+    #[error(
+        "unknown BYML scalar type {0:?} (expected one of bool, s32, u32, f32, s64, u64, f64, \
+         string, null)"
+    )]
+    UnknownScalarType(String),
+
+    /// The supplied value couldn't be parsed into the target scalar type.
+    #[error("cannot parse {value:?} as BYML {ty}")]
+    ValueParse { ty: &'static str, value: String },
 }
 
 /// Convenience alias for the BYML module's fallible operations.
