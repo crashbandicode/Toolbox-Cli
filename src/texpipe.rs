@@ -473,6 +473,19 @@ fn encode_mip_blocks(
                 "BC6 (HDR) cannot be encoded from an 8-bit source; use the DDS path".into(),
             ))
         }
+        // ASTC (no encoder wired) and the low-bpp uncompressed formats are
+        // decode/round-trip only for now; `format_is_encodable` gates them
+        // out, so reaching here is a logic error in the caller.
+        TextureFormat::Astc { .. }
+        | TextureFormat::R8Unorm
+        | TextureFormat::R8G8Unorm
+        | TextureFormat::Bgra8Unorm
+        | TextureFormat::Bgra8UnormSrgb => {
+            return Err(Error::Texpipe(format!(
+                "{} cannot be encoded yet (decode/round-trip only)",
+                format.name()
+            )))
+        }
     })
 }
 

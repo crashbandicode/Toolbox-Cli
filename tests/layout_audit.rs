@@ -4,9 +4,10 @@
 //! 1. A rock-stable exact pin against the single `training-modpack`
 //!    unpacked archive.
 //! 2. Suspicious/unsupported-structure detection across the whole
-//!    `tests/fixtures/unpacked` tree: every BFLYT parses, the HDR
-//!    `info_melee` BNTX is flagged as an unsupported surface format, and
-//!    the HDR player layouts' malformed-mat1 materials are flagged.
+//!    `tests/fixtures/unpacked` tree: every BFLYT parses, every BNTX
+//!    parses (including HDR's `info_melee` B8G8R8A8 `0x0c01` pack, now
+//!    supported), and the HDR player layouts' malformed-mat1 materials
+//!    are flagged.
 //!
 //! Skipped when the fixtures are absent.
 
@@ -64,11 +65,12 @@ fn audit_full_unpacked_detects_unsupported_and_suspicious() {
     assert_eq!(t.bflyt_with_v9_mat_extension, 32);
     assert_eq!(t.v9_extension_materials, 174);
 
-    // BNTX: exactly one unsupported-format file (HDR's recolored
-    // info_melee texture pack uses an R5G6B5-family format we don't model).
+    // BNTX: all 31 parse. HDR's recolored info_melee pack uses B8G8R8A8
+    // (0x0c01) — previously the sole unsupported-format failure; now
+    // modeled, so there are zero failures.
     assert_eq!(t.bntx_scanned, 31);
-    assert_eq!(t.bntx_failed, 1);
-    assert_eq!(t.bntx_unsupported_format, 1);
+    assert_eq!(t.bntx_failed, 0);
+    assert_eq!(t.bntx_unsupported_format, 0);
 
     // BFLAN: all 5838 parse; 12 HDR stage-select animations have a final
     // section truncated below its declared size (round-tripped verbatim).
@@ -76,18 +78,17 @@ fn audit_full_unpacked_detects_unsupported_and_suspicious() {
     assert_eq!(t.bflan_failed, 0);
     assert_eq!(t.bflan_truncated_section, 12);
 
-    // The unsupported BNTX is surfaced with its format code.
-    let bad_bntx = report
-        .files
-        .iter()
-        .find(|f| f.kind == "bntx" && !f.ok)
-        .expect("the failing BNTX is listed");
-    let err = bad_bntx.error.as_deref().unwrap_or("");
+    // No BNTX should fail to parse anymore.
     assert!(
-        err.contains("0x00000c01"),
-        "expected the unsupported surface-format code in the error, got: {err}"
+        !report.files.iter().any(|f| f.kind == "bntx" && !f.ok),
+        "expected no BNTX parse failures: {:?}",
+        report
+            .files
+            .iter()
+            .filter(|f| f.kind == "bntx" && !f.ok)
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>()
     );
-    assert!(bad_bntx.path.contains("info_melee"), "unexpected path: {}", bad_bntx.path);
 
     // The untrusted-material findings name the HDR player layouts.
     let untrusted: Vec<&str> = report

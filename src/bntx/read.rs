@@ -163,8 +163,11 @@ fn read_bntx_header(data: &[u8]) -> Result<BntxHeader, Error> {
     let _reloc_off = c.read_u32::<LittleEndian>()?;
     let _file_size = c.read_u32::<LittleEndian>()?;
 
-    if version != 0x00040000 {
-        // Other versions exist but we don't try to support them here.
+    if version != 0x00040000 && version != 0x00040100 {
+        // 0x00040000 (Smash Ultimate etc.) and 0x00040100 (Tears of the
+        // Kingdom) share an identical container layout — only the version
+        // field and the set of surface formats differ. Other versions are
+        // not modeled.
         return Err(Error::UnsupportedVersion(version));
     }
     if target_address_size != 64 {

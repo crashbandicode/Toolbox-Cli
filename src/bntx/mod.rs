@@ -1,7 +1,10 @@
 //! Pure-Rust BNTX (Nintendo Switch texture container) parser/writer.
 //!
-//! Targets BNTX version 0x00040000 as shipped in modern Switch titles
-//! (Smash Ultimate, Mario Kart 8 DX, etc.). The on-disk format is:
+//! Targets BNTX versions 0x00040000 (Smash Ultimate, Mario Kart 8 DX,
+//! etc.) and 0x00040100 (Tears of the Kingdom). The two share an
+//! identical container layout — only the version field and the set of
+//! surface formats differ (TotK adds ASTC + R8/R8G8). The on-disk format
+//! is:
 //!
 //! ```text
 //! 0x0000  BNTX header (32 bytes)
@@ -90,7 +93,7 @@ pub struct BntxFile {
 /// BNTX file header (offsets are within the file).
 #[derive(Debug, Clone)]
 pub struct BntxHeader {
-    /// Always `0x00040000` for the files we target.
+    /// `0x00040000` (Smash etc.) or `0x00040100` (TotK). Emitted verbatim.
     pub version: u32,
     /// `1u8 << alignment_shift` is the texture-data alignment.
     pub alignment_shift: u8,
@@ -212,6 +215,163 @@ impl Texture {
 // Surface format enum
 // ============================================================
 
+/// One of the 14 ASTC LDR 2D block footprints, in the canonical order
+/// shared by Vulkan/DXGI/NVN (4x4 first, 12x12 last). The BNTX
+/// surface-format high byte runs `0x2D` (4x4) through `0x3A` (12x12) in
+/// this same order, and the DXGI ASTC codes increment by 4 per footprint
+/// from `134` (4x4 UNORM) — so both are derived from [`AstcBlock::index`]
+/// rather than hand-written per variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AstcBlock {
+    B4x4,
+    B5x4,
+    B5x5,
+    B6x5,
+    B6x6,
+    B8x5,
+    B8x6,
+    B8x8,
+    B10x5,
+    B10x6,
+    B10x8,
+    B10x10,
+    B12x10,
+    B12x12,
+}
+
+impl AstcBlock {
+    /// All 14 footprints in canonical (index) order.
+    pub(crate) const ALL: [AstcBlock; 14] = [
+        AstcBlock::B4x4,
+        AstcBlock::B5x4,
+        AstcBlock::B5x5,
+        AstcBlock::B6x5,
+        AstcBlock::B6x6,
+        AstcBlock::B8x5,
+        AstcBlock::B8x6,
+        AstcBlock::B8x8,
+        AstcBlock::B10x5,
+        AstcBlock::B10x6,
+        AstcBlock::B10x8,
+        AstcBlock::B10x10,
+        AstcBlock::B12x10,
+        AstcBlock::B12x12,
+    ];
+
+    /// (block_width, block_height) in pixels.
+    pub fn dims(self) -> (u32, u32) {
+        match self {
+            AstcBlock::B4x4 => (4, 4),
+            AstcBlock::B5x4 => (5, 4),
+            AstcBlock::B5x5 => (5, 5),
+            AstcBlock::B6x5 => (6, 5),
+            AstcBlock::B6x6 => (6, 6),
+            AstcBlock::B8x5 => (8, 5),
+            AstcBlock::B8x6 => (8, 6),
+            AstcBlock::B8x8 => (8, 8),
+            AstcBlock::B10x5 => (10, 5),
+            AstcBlock::B10x6 => (10, 6),
+            AstcBlock::B10x8 => (10, 8),
+            AstcBlock::B10x10 => (10, 10),
+            AstcBlock::B12x10 => (12, 10),
+            AstcBlock::B12x12 => (12, 12),
+        }
+    }
+
+    /// Footprint index 0..=13 (0 = 4x4). Single source of ordering truth
+    /// for the surface-format and DXGI code derivations.
+    fn index(self) -> u32 {
+        match self {
+            AstcBlock::B4x4 => 0,
+            AstcBlock::B5x4 => 1,
+            AstcBlock::B5x5 => 2,
+            AstcBlock::B6x5 => 3,
+            AstcBlock::B6x6 => 4,
+            AstcBlock::B8x5 => 5,
+            AstcBlock::B8x6 => 6,
+            AstcBlock::B8x8 => 7,
+            AstcBlock::B10x5 => 8,
+            AstcBlock::B10x6 => 9,
+            AstcBlock::B10x8 => 10,
+            AstcBlock::B10x10 => 11,
+            AstcBlock::B12x10 => 12,
+            AstcBlock::B12x12 => 13,
+        }
+    }
+
+    fn from_index(i: u32) -> Option<Self> {
+        Self::ALL.get(i as usize).copied()
+    }
+
+    /// High byte of the BNTX surface-format code (`0x2D`..=`0x3A`).
+    fn surface_high_byte(self) -> u32 {
+        0x2D + self.index()
+    }
+
+    fn from_surface_high_byte(hi: u32) -> Option<Self> {
+        if (0x2D..=0x3A).contains(&hi) {
+            Self::from_index(hi - 0x2D)
+        } else {
+            None
+        }
+    }
+
+    /// DXGI_FORMAT value for the UNORM form (`134 + index*4`); the
+    /// `_SRGB` form is one higher. Used by [`crate::dds`].
+    pub(crate) fn dxgi_unorm(self) -> u32 {
+        134 + self.index() * 4
+    }
+
+    pub(crate) fn from_dxgi(v: u32) -> Option<(Self, bool)> {
+        // Each footprint occupies 4 consecutive DXGI codes: TYPELESS,
+        // UNORM, UNORM_SRGB, (reserved). UNORM starts at 134 for 4x4.
+        if !(134..=187).contains(&v) {
+            return None;
+        }
+        let rel = v - 134;
+        let idx = rel / 4;
+        match rel % 4 {
+            0 => Self::from_index(idx).map(|b| (b, false)), // UNORM
+            1 => Self::from_index(idx).map(|b| (b, true)),  // UNORM_SRGB
+            _ => None,                                       // TYPELESS / reserved
+        }
+    }
+
+    fn label(self, srgb: bool) -> &'static str {
+        // Indexed by `index()` so a new footprint can't silently borrow
+        // the wrong name. (unorm, srgb) per footprint.
+        const NAMES: [(&str, &str); 14] = [
+            ("ASTC_4x4_UNORM", "ASTC_4x4_SRGB"),
+            ("ASTC_5x4_UNORM", "ASTC_5x4_SRGB"),
+            ("ASTC_5x5_UNORM", "ASTC_5x5_SRGB"),
+            ("ASTC_6x5_UNORM", "ASTC_6x5_SRGB"),
+            ("ASTC_6x6_UNORM", "ASTC_6x6_SRGB"),
+            ("ASTC_8x5_UNORM", "ASTC_8x5_SRGB"),
+            ("ASTC_8x6_UNORM", "ASTC_8x6_SRGB"),
+            ("ASTC_8x8_UNORM", "ASTC_8x8_SRGB"),
+            ("ASTC_10x5_UNORM", "ASTC_10x5_SRGB"),
+            ("ASTC_10x6_UNORM", "ASTC_10x6_SRGB"),
+            ("ASTC_10x8_UNORM", "ASTC_10x8_SRGB"),
+            ("ASTC_10x10_UNORM", "ASTC_10x10_SRGB"),
+            ("ASTC_12x10_UNORM", "ASTC_12x10_SRGB"),
+            ("ASTC_12x12_UNORM", "ASTC_12x12_SRGB"),
+        ];
+        let (u, s) = NAMES[self.index() as usize];
+        if srgb {
+            s
+        } else {
+            u
+        }
+    }
+}
+
+/// Surface (pixel) format of a BNTX texture.
+///
+/// Covers the block-compressed BCn families, the uncompressed
+/// `R8`/`R8G8`/`R8G8B8A8`/`B8G8R8A8` formats, and the full ASTC LDR
+/// family (see [`AstcBlock`]). ASTC and the low-bpp uncompressed formats
+/// appear in Tears of the Kingdom assets (BNTX `0x00040100`); `B8G8R8A8`
+/// also shows up in some Smash Ultimate texture mods (`0x0c01`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextureFormat {
     Bc1Unorm,
@@ -228,8 +388,19 @@ pub enum TextureFormat {
     Bc6Float,
     Bc7Unorm,
     Bc7UnormSrgb,
+    R8Unorm,
+    R8G8Unorm,
     R8G8B8A8Unorm,
     R8G8B8A8UnormSrgb,
+    /// B8G8R8A8 — same 32bpp layout as `R8G8B8A8` with R and B swapped.
+    Bgra8Unorm,
+    Bgra8UnormSrgb,
+    /// ASTC LDR, `srgb` selecting UNORM vs UNORM_SRGB. Decode-only for
+    /// now (no ASTC encoder is wired); see [`crate::texpipe`].
+    Astc {
+        block: AstcBlock,
+        srgb: bool,
+    },
 }
 
 impl TextureFormat {
@@ -249,8 +420,16 @@ impl TextureFormat {
             TextureFormat::Bc6Float => 0x1F0A,
             TextureFormat::Bc7Unorm => 0x2001,
             TextureFormat::Bc7UnormSrgb => 0x2006,
+            TextureFormat::R8Unorm => 0x0201,
+            TextureFormat::R8G8Unorm => 0x0901,
             TextureFormat::R8G8B8A8Unorm => 0x0B01,
             TextureFormat::R8G8B8A8UnormSrgb => 0x0B06,
+            TextureFormat::Bgra8Unorm => 0x0C01,
+            TextureFormat::Bgra8UnormSrgb => 0x0C06,
+            // ASTC: high byte by footprint, low byte 0x01 (UNORM) / 0x06 (SRGB).
+            TextureFormat::Astc { block, srgb } => {
+                (block.surface_high_byte() << 8) | if srgb { 0x06 } else { 0x01 }
+            }
         }
     }
 
@@ -270,27 +449,58 @@ impl TextureFormat {
             0x1F0A => TextureFormat::Bc6Float,
             0x2001 => TextureFormat::Bc7Unorm,
             0x2006 => TextureFormat::Bc7UnormSrgb,
+            0x0201 => TextureFormat::R8Unorm,
+            0x0901 => TextureFormat::R8G8Unorm,
             0x0B01 => TextureFormat::R8G8B8A8Unorm,
             0x0B06 => TextureFormat::R8G8B8A8UnormSrgb,
-            _ => return None,
+            0x0C01 => TextureFormat::Bgra8Unorm,
+            0x0C06 => TextureFormat::Bgra8UnormSrgb,
+            // ASTC family: high byte 0x2D..=0x3A selects the footprint,
+            // low byte 0x01 = UNORM, 0x06 = UNORM_SRGB.
+            _ => {
+                let hi = v >> 8;
+                let lo = v & 0xFF;
+                let block = AstcBlock::from_surface_high_byte(hi)?;
+                let srgb = match lo {
+                    0x01 => false,
+                    0x06 => true,
+                    _ => return None,
+                };
+                TextureFormat::Astc { block, srgb }
+            }
         })
     }
 
+    /// (block_width, block_height) in pixels. `(1, 1)` for the
+    /// uncompressed formats, `(4, 4)` for BCn, and the footprint for ASTC.
     pub fn block_dim(self) -> (u32, u32) {
         match self {
-            TextureFormat::R8G8B8A8Unorm | TextureFormat::R8G8B8A8UnormSrgb => (1, 1),
+            TextureFormat::R8Unorm
+            | TextureFormat::R8G8Unorm
+            | TextureFormat::R8G8B8A8Unorm
+            | TextureFormat::R8G8B8A8UnormSrgb
+            | TextureFormat::Bgra8Unorm
+            | TextureFormat::Bgra8UnormSrgb => (1, 1),
+            TextureFormat::Astc { block, .. } => block.dims(),
             _ => (4, 4),
         }
     }
 
-    /// Bytes per block (compressed) or per pixel (uncompressed).
+    /// Bytes per block (compressed) or per pixel (uncompressed). All ASTC
+    /// footprints compress to a fixed 128-bit (16-byte) block.
     pub fn block_size(self) -> u32 {
         match self {
             TextureFormat::Bc1Unorm
             | TextureFormat::Bc1UnormSrgb
             | TextureFormat::Bc4Unorm
             | TextureFormat::Bc4Snorm => 8,
-            TextureFormat::R8G8B8A8Unorm | TextureFormat::R8G8B8A8UnormSrgb => 4,
+            TextureFormat::R8Unorm => 1,
+            TextureFormat::R8G8Unorm => 2,
+            TextureFormat::R8G8B8A8Unorm
+            | TextureFormat::R8G8B8A8UnormSrgb
+            | TextureFormat::Bgra8Unorm
+            | TextureFormat::Bgra8UnormSrgb => 4,
+            // BC2/BC3/BC5/BC6/BC7 and every ASTC footprint are 16 bytes.
             _ => 16,
         }
     }
@@ -306,6 +516,8 @@ impl TextureFormat {
                 | TextureFormat::Bc5Snorm
                 | TextureFormat::Bc6UFloat
                 | TextureFormat::Bc6Float
+                | TextureFormat::R8Unorm
+                | TextureFormat::R8G8Unorm
         )
     }
 
@@ -325,8 +537,13 @@ impl TextureFormat {
             TextureFormat::Bc6Float => "BC6H_FLOAT",
             TextureFormat::Bc7Unorm => "BC7_UNORM",
             TextureFormat::Bc7UnormSrgb => "BC7_UNORM_SRGB",
+            TextureFormat::R8Unorm => "R8_UNORM",
+            TextureFormat::R8G8Unorm => "R8G8_UNORM",
             TextureFormat::R8G8B8A8Unorm => "R8G8B8A8_UNORM",
             TextureFormat::R8G8B8A8UnormSrgb => "R8G8B8A8_UNORM_SRGB",
+            TextureFormat::Bgra8Unorm => "B8G8R8A8_UNORM",
+            TextureFormat::Bgra8UnormSrgb => "B8G8R8A8_UNORM_SRGB",
+            TextureFormat::Astc { block, srgb } => block.label(srgb),
         }
     }
 }
@@ -628,5 +845,88 @@ impl AppendTextureSpec {
         s.dim = 8; // cube
         s.array_len = 6;
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `TextureFormat` value, for exhaustive round-trip checks.
+    fn all_formats() -> Vec<TextureFormat> {
+        let mut v = vec![
+            TextureFormat::Bc1Unorm,
+            TextureFormat::Bc1UnormSrgb,
+            TextureFormat::Bc2Unorm,
+            TextureFormat::Bc2UnormSrgb,
+            TextureFormat::Bc3Unorm,
+            TextureFormat::Bc3UnormSrgb,
+            TextureFormat::Bc4Unorm,
+            TextureFormat::Bc4Snorm,
+            TextureFormat::Bc5Unorm,
+            TextureFormat::Bc5Snorm,
+            TextureFormat::Bc6UFloat,
+            TextureFormat::Bc6Float,
+            TextureFormat::Bc7Unorm,
+            TextureFormat::Bc7UnormSrgb,
+            TextureFormat::R8Unorm,
+            TextureFormat::R8G8Unorm,
+            TextureFormat::R8G8B8A8Unorm,
+            TextureFormat::R8G8B8A8UnormSrgb,
+            TextureFormat::Bgra8Unorm,
+            TextureFormat::Bgra8UnormSrgb,
+        ];
+        for block in AstcBlock::ALL {
+            v.push(TextureFormat::Astc { block, srgb: false });
+            v.push(TextureFormat::Astc { block, srgb: true });
+        }
+        v
+    }
+
+    #[test]
+    fn surface_format_round_trips_for_every_format() {
+        for f in all_formats() {
+            let code = f.to_surface_format();
+            assert_eq!(
+                TextureFormat::from_surface_format(code),
+                Some(f),
+                "surface-format round-trip failed for {} (code 0x{code:04x})",
+                f.name()
+            );
+        }
+    }
+
+    #[test]
+    fn pins_known_surface_format_codes() {
+        // Verified against real fixtures + public BNTX research.
+        assert_eq!(TextureFormat::R8Unorm.to_surface_format(), 0x0201);
+        assert_eq!(TextureFormat::R8G8Unorm.to_surface_format(), 0x0901);
+        assert_eq!(TextureFormat::Bgra8Unorm.to_surface_format(), 0x0C01);
+        assert_eq!(TextureFormat::Bgra8UnormSrgb.to_surface_format(), 0x0C06);
+        let astc = |block, srgb| TextureFormat::Astc { block, srgb }.to_surface_format();
+        assert_eq!(astc(AstcBlock::B4x4, false), 0x2D01);
+        assert_eq!(astc(AstcBlock::B4x4, true), 0x2D06); // verified on real TotK data
+        assert_eq!(astc(AstcBlock::B8x8, false), 0x3401);
+        assert_eq!(astc(AstcBlock::B12x12, true), 0x3A06);
+    }
+
+    #[test]
+    fn astc_block_geometry_and_size() {
+        // Every ASTC footprint compresses to a 16-byte (128-bit) block,
+        // and its block_dim is the footprint itself.
+        for block in AstcBlock::ALL {
+            let f = TextureFormat::Astc { block, srgb: false };
+            assert_eq!(f.block_size(), 16, "{} block size", f.name());
+            assert_eq!(f.block_dim(), block.dims(), "{} block dim", f.name());
+            assert!(f.has_alpha(), "{} should report alpha", f.name());
+        }
+        // Low-bpp uncompressed sanity.
+        assert_eq!(TextureFormat::R8Unorm.block_size(), 1);
+        assert_eq!(TextureFormat::R8G8Unorm.block_size(), 2);
+        assert_eq!(TextureFormat::Bgra8Unorm.block_size(), 4);
+        assert_eq!(TextureFormat::R8Unorm.block_dim(), (1, 1));
+        assert!(!TextureFormat::R8Unorm.has_alpha());
+        assert!(!TextureFormat::R8G8Unorm.has_alpha());
+        assert!(TextureFormat::Bgra8Unorm.has_alpha());
     }
 }

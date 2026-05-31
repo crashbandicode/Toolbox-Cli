@@ -10,6 +10,8 @@
 //! `R8G8B8A8`) is handled. Decoding uses the pure-Rust, MIT/Apache
 //! `texture2ddecoder` crate; deswizzling uses `tegra_swizzle`.
 
+use std::num::NonZeroU32;
+
 use tegra_swizzle::surface::{deswizzle_surface, BlockDim};
 use tegra_swizzle::BlockHeight;
 
@@ -84,11 +86,14 @@ pub(crate) fn block_height_from_log2(log2: i32) -> Option<BlockHeight> {
 }
 
 /// `BlockDim` for a surface format: 4x4 for the BCn families, 1x1 for the
-/// uncompressed `R8G8B8A8` formats.
+/// uncompressed formats, and the ASTC footprint (e.g. 8x8) for ASTC.
+/// Derived from [`TextureFormat::block_dim`] so it stays in sync.
 pub(crate) fn block_dim_for(format: TextureFormat) -> BlockDim {
-    match format {
-        TextureFormat::R8G8B8A8Unorm | TextureFormat::R8G8B8A8UnormSrgb => BlockDim::uncompressed(),
-        _ => BlockDim::block_4x4(),
+    let (w, h) = format.block_dim();
+    BlockDim {
+        width: NonZeroU32::new(w).expect("block width is non-zero"),
+        height: NonZeroU32::new(h).expect("block height is non-zero"),
+        depth: NonZeroU32::new(1).unwrap(),
     }
 }
 
@@ -250,19 +255,9 @@ pub fn decode_block_to_rgba(
     let h = height as usize;
     let pixel_count = w * h;
 
-    // Uncompressed formats are already RGBA8 in the linear buffer.
-    if matches!(
-        format,
-        TextureFormat::R8G8B8A8Unorm | TextureFormat::R8G8B8A8UnormSrgb
-    ) {
-        let need = pixel_count * 4;
-        if linear.len() < need {
-            return Err(Error::Texpipe(format!(
-                "R8G8B8A8 surface is {} bytes; need {need} for {width}x{height}",
-                linear.len()
-            )));
-        }
-        return Ok(linear[..need].to_vec());
+    // Uncompressed formats: expand the linear bytes straight to RGBA.
+    if let Some(rgba) = decode_uncompressed_to_rgba(format, linear, pixel_count, width, height)? {
+        return Ok(rgba);
     }
 
     // Block-compressed formats: decode via texture2ddecoder into a packed
@@ -279,6 +274,71 @@ pub fn decode_block_to_rgba(
         rgba[i * 4 + 3] = ((*p >> 24) & 0xFF) as u8; // A
     }
     Ok(rgba)
+}
+
+/// Expand an uncompressed surface's linear bytes to RGBA8. Returns
+/// `Ok(None)` for block-compressed formats (decoded elsewhere). `R8`
+/// fills G/B with 0 and A with 255; `R8G8` fills B with 0 and A with 255;
+/// `B8G8R8A8` swaps R and B back to RGBA order. The texture's
+/// channel-swizzle (applied by the caller) then routes these into the
+/// final channels the GPU samples.
+fn decode_uncompressed_to_rgba(
+    format: TextureFormat,
+    linear: &[u8],
+    pixel_count: usize,
+    width: u32,
+    height: u32,
+) -> Result<Option<Vec<u8>>> {
+    let bpp = match format {
+        TextureFormat::R8Unorm => 1usize,
+        TextureFormat::R8G8Unorm => 2,
+        TextureFormat::R8G8B8A8Unorm
+        | TextureFormat::R8G8B8A8UnormSrgb
+        | TextureFormat::Bgra8Unorm
+        | TextureFormat::Bgra8UnormSrgb => 4,
+        // Block-compressed: not handled here.
+        _ => return Ok(None),
+    };
+
+    let need = pixel_count * bpp;
+    if linear.len() < need {
+        return Err(Error::Texpipe(format!(
+            "{} surface is {} bytes; need {need} for {width}x{height}",
+            format.name(),
+            linear.len()
+        )));
+    }
+
+    let mut rgba = vec![0u8; pixel_count * 4];
+    let src = &linear[..need];
+    match format {
+        TextureFormat::R8Unorm => {
+            for (px, out) in src.chunks_exact(1).zip(rgba.chunks_exact_mut(4)) {
+                out[0] = px[0];
+                out[3] = 255;
+            }
+        }
+        TextureFormat::R8G8Unorm => {
+            for (px, out) in src.chunks_exact(2).zip(rgba.chunks_exact_mut(4)) {
+                out[0] = px[0];
+                out[1] = px[1];
+                out[3] = 255;
+            }
+        }
+        TextureFormat::R8G8B8A8Unorm | TextureFormat::R8G8B8A8UnormSrgb => {
+            rgba.copy_from_slice(src);
+        }
+        TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb => {
+            for (px, out) in src.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+                out[0] = px[2]; // R <- stored B
+                out[1] = px[1]; // G
+                out[2] = px[0]; // B <- stored R
+                out[3] = px[3]; // A
+            }
+        }
+        _ => unreachable!("bpp match already excluded compressed formats"),
+    }
+    Ok(Some(rgba))
 }
 
 /// Dispatch to the right `texture2ddecoder` entry point for `format`.
@@ -311,7 +371,16 @@ fn decode_bcn(
         TextureFormat::Bc7Unorm | TextureFormat::Bc7UnormSrgb => {
             t2d::decode_bc7(data, width, height, out)
         }
-        TextureFormat::R8G8B8A8Unorm | TextureFormat::R8G8B8A8UnormSrgb => {
+        TextureFormat::Astc { block, .. } => {
+            let (bw, bh) = block.dims();
+            t2d::decode_astc(data, width, height, bw as usize, bh as usize, out)
+        }
+        TextureFormat::R8Unorm
+        | TextureFormat::R8G8Unorm
+        | TextureFormat::R8G8B8A8Unorm
+        | TextureFormat::R8G8B8A8UnormSrgb
+        | TextureFormat::Bgra8Unorm
+        | TextureFormat::Bgra8UnormSrgb => {
             unreachable!("uncompressed handled by caller")
         }
     };

@@ -64,7 +64,9 @@ pub struct Dds {
     pub data: Vec<u8>,
 }
 
-/// Map a BNTX surface format to its DXGI_FORMAT value.
+/// Map a BNTX surface format to its DXGI_FORMAT value. ASTC uses the
+/// standard DXGI ASTC range (134 = `ASTC_4X4_UNORM`, +1 for `_SRGB`,
+/// +4 per footprint).
 fn dxgi_format(format: TextureFormat) -> u32 {
     match format {
         TextureFormat::Bc1Unorm => 71,
@@ -81,8 +83,13 @@ fn dxgi_format(format: TextureFormat) -> u32 {
         TextureFormat::Bc6Float => 96,
         TextureFormat::Bc7Unorm => 98,
         TextureFormat::Bc7UnormSrgb => 99,
+        TextureFormat::R8Unorm => 61,
+        TextureFormat::R8G8Unorm => 49,
         TextureFormat::R8G8B8A8Unorm => 28,
         TextureFormat::R8G8B8A8UnormSrgb => 29,
+        TextureFormat::Bgra8Unorm => 87,
+        TextureFormat::Bgra8UnormSrgb => 91,
+        TextureFormat::Astc { block, srgb } => block.dxgi_unorm() + u32::from(srgb),
     }
 }
 
@@ -103,9 +110,17 @@ fn format_from_dxgi(v: u32) -> Option<TextureFormat> {
         96 => TextureFormat::Bc6Float,
         98 => TextureFormat::Bc7Unorm,
         99 => TextureFormat::Bc7UnormSrgb,
+        61 => TextureFormat::R8Unorm,
+        49 => TextureFormat::R8G8Unorm,
         28 => TextureFormat::R8G8B8A8Unorm,
         29 => TextureFormat::R8G8B8A8UnormSrgb,
-        _ => return None,
+        87 => TextureFormat::Bgra8Unorm,
+        91 => TextureFormat::Bgra8UnormSrgb,
+        // ASTC DXGI range (134..=187).
+        _ => {
+            let (block, srgb) = crate::bntx::AstcBlock::from_dxgi(v)?;
+            TextureFormat::Astc { block, srgb }
+        }
     })
 }
 
@@ -304,4 +319,37 @@ fn legacy_fourcc_format(fourcc: u32) -> Result<TextureFormat> {
             )))
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bntx::AstcBlock;
+
+    #[test]
+    fn dxgi_round_trips_for_new_formats() {
+        let mut formats = vec![
+            TextureFormat::R8Unorm,
+            TextureFormat::R8G8Unorm,
+            TextureFormat::Bgra8Unorm,
+            TextureFormat::Bgra8UnormSrgb,
+        ];
+        for block in AstcBlock::ALL {
+            formats.push(TextureFormat::Astc { block, srgb: false });
+            formats.push(TextureFormat::Astc { block, srgb: true });
+        }
+        for f in formats {
+            let dxgi = dxgi_format(f);
+            assert_eq!(
+                format_from_dxgi(dxgi),
+                Some(f),
+                "DXGI round-trip failed for {} (dxgi {dxgi})",
+                f.name()
+            );
+        }
+        // Spot-check canonical DXGI ASTC codes (134 = ASTC_4X4_UNORM).
+        assert_eq!(dxgi_format(TextureFormat::Astc { block: AstcBlock::B4x4, srgb: false }), 134);
+        assert_eq!(dxgi_format(TextureFormat::Astc { block: AstcBlock::B4x4, srgb: true }), 135);
+        assert_eq!(dxgi_format(TextureFormat::Astc { block: AstcBlock::B12x12, srgb: true }), 187);
+    }
 }

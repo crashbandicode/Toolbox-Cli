@@ -54,12 +54,17 @@ pub fn write_bntx(b: &BntxFile) -> Result<Vec<u8>, Error> {
     // BNTX header `filename_offset` points to the BODY of the container
     // name string (i.e., past the u16 length field — different from dict
     // and BRTI name pointers, which point to the BntxStr start). The
-    // container name lives at strings[1] in our model.
-    let filename_offset = if b.strings.len() > 1 {
-        (str_layout.string_offsets[1] + 2) as u32
-    } else {
-        0
-    };
+    // container name is usually `strings[1]` (right after the empty
+    // sentinel), but some tools place it elsewhere in the pool (e.g. HDR's
+    // recolored `info_melee`), so we locate it by value rather than
+    // assuming a fixed slot — falling back to the conventional slot 1.
+    let filename_offset = b
+        .strings
+        .iter()
+        .position(|s| s == &b.name)
+        .or(if b.strings.len() > 1 { Some(1) } else { None })
+        .map(|idx| (str_layout.string_offsets[idx] + 2) as u32)
+        .unwrap_or(0);
 
     // Dict size: 4 magic + 4 count + (count+1)*16 entries
     let dict_size = 8 + (b.dict.entries.len() * 16);

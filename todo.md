@@ -12,10 +12,17 @@ session immediately after this file was written.
   in-tree unknown/`scr1`/`ali1`/`spi1` → `PaneKind::Opaque` pane nodes;
   post-tree `usd1`→trailing. TotK Boot/Common/Title BFLYT now 373/373
   byte-identical; Smash still 508/508.
-- [ ] **BNTX version `0x00040100` + ASTC/low-bpp formats** (TotK). The
-  other half of the robustness pass; gated behind whether TotK *texture*
-  editing matters. ASTC4x4 + R8/R8G8 + the `0x0c01` family seen in the
-  audit.
+- [x] **BNTX version `0x00040100` + ASTC/low-bpp formats** (TotK). Done
+  (uncommitted): version gate accepts `0x00040000`+`0x00040100` (identical
+  container layout); added the **full ASTC LDR family** (4x4–12x12,
+  UNORM+SRGB via an `AstcBlock` sub-enum), `R8`/`R8G8`, and `B8G8R8A8`
+  (`0x0c01`). Byte-identical round-trip on a real 225-texture TotK
+  `__Combined.bntx`; decode for ASTC (all footprints) + R8/R8G8/BGRA8
+  (all 225 export to PNG). **Decode/round-trip only — no encoder** (see
+  the ASTC-encode follow-up below). `layout-audit` now reports 0
+  unsupported BNTX (HDR's `0x0c01` parses). Codes verified vs real data +
+  public BNTX research. Fixtures: `tests/fixtures/bntx/totk_title__Combined.bntx`
+  (gitignored).
 - [x] **Compression module (zstd+dict, yaz0)** + recursive archive
   (`.blarc.zs`/`.pack.zs`/`.szs`) so TotK assets open in-tool. Done:
   native SARC reader (dropped the `sarc` crate, which pinned an ancient C
@@ -61,10 +68,20 @@ session immediately after this file was written.
 - [ ] **BGRA mask handling for legacy (non-DX10) DDS read.** Today a
   legacy uncompressed DDS is assumed RGBA; a BGRA-masked file would have
   its channels swapped. Parse `ddspf` R/G/B/A masks and reorder.
-- [ ] **Support BNTX surface format `0x00000C01`.** HDR's recolored
-  `info_melee` texture pack uses it (currently rejected; audit flags
-  it). Identify the format (looks 16bpp, likely R5G6B5 / RGB5A1) and add
-  decode (+ encode if feasible).
+- [x] **Support BNTX surface format `0x00000C01`.** Done (uncommitted):
+  it's **B8G8R8A8** (32bpp, identity channel-swizzle — *not* the 16bpp
+  R5G6B5 guessed here), decoded by swapping R↔B back to RGBA. HDR's
+  recolored `info_melee` now parses + decodes (audit reports it clean).
+- [ ] **ASTC + low-bpp (R8/R8G8/B8G8R8A8) *encode*.** Decode/round-trip
+  landed; editing these textures needs an encoder. ASTC needs a new MIT
+  encoder crate (none wired — `intel_tex_2` is BCn-only); R8/R8G8/BGRA8
+  encode is trivial (channel pack) but currently gated off in
+  `texpipe::format_is_encodable` / `encode_mip_blocks`. Add when TotK
+  *texture editing* (vs inspect/export) is needed.
+- [ ] **Confirm the non-4x4 ASTC footprints on real data.** Only
+  ASTC_4x4 (SRGB) appears in our local TotK fixtures; 5x5/6x6/8x8/etc.
+  decode is generic + unit-tested for codes, but unverified against real
+  pixels. Grab a TotK file that uses a larger footprint and pixel-check.
 - [ ] **`layout-diff`: compare `wnd1`/`prt1` material bindings**, not
   just `pic1`/`txt1`; handle duplicate pane names (current name-keyed map
   collapses them).

@@ -23,9 +23,9 @@ against real Smash Ultimate assets (byte-identical round-trip corpus).
 |---|---|
 | BFLYT v8 / v9 read+write | **Byte-identical round-trip** on 508/508 BFLYT across game UIs + HDR/training-modpack community mods (up to 30 KB / 287 sections / 68 materials, incl. v9 material extensions). Strict on unknown sections (TotK `ctl1` not yet handled). |
 | BFLAN read+write | **Byte-identical round-trip** on 5838/5838 BFLAN; `pat1`/`pai1` decoded for inspect |
-| BNTX read+write | **Byte-identical round-trip** (5/6 fixtures; the 6th is a C#-tool verbose-RLT output, tolerated). Version `0x00040000` only |
+| BNTX read+write | **Byte-identical round-trip** on Smash (`0x00040000`) **and TotK (`0x00040100`, 225-texture `__Combined.bntx`)** fixtures; the one tolerated diff is a C#-tool verbose-RLT output |
 | BNTX `_DIC` Patricia-trie builder | **Validated** — rebuilds the trie in texture (BRTI) order; routes all lookups; survives append/remove |
-| BNTX → PNG / DDS export | **Working** — deswizzle + decode (BC1–BC7, R8G8B8A8) honoring the channel-swizzle; DDS (DX10) interchange |
+| BNTX → PNG / DDS export | **Working** — deswizzle + decode of BC1–BC7, R8/R8G8/R8G8B8A8/B8G8R8A8, and the full **ASTC** LDR family (4x4–12x12), honoring the channel-swizzle; DDS (DX10) interchange |
 | PNG → BC1/BC3/BC4/BC5/BC7 → Tegra swizzle | **Working** — [`intel_tex_2`](https://crates.io/crates/intel_tex_2) (Intel ISPC) + [`tegra_swizzle`](https://crates.io/crates/tegra_swizzle); multi-mip + cube; auto-pads non-4-aligned dims |
 | BNTX texture append / remove / replace | **Working** — append (2D/cube/multi-mip), remove, format-preserving in-place replace from PNG or DDS |
 | BFLYT mutation (add texture ref / material / pane / set transform / clone pane) | **Working** |
@@ -272,8 +272,12 @@ structure), but the Rust code is original.
 - v9 BFLYTs include an undocumented 60-byte material extension on some
   materials (gated by flag bit 19). We capture it verbatim for round-trip
   preservation; cloning a template material reproduces it.
-- BNTX support targets version `0x00040000` (Smash-era). TotK BNTX
-  (`0x00040100`) and ASTC formats are not yet handled.
+- BNTX read/write/decode covers versions `0x00040000` (Smash-era) and
+  `0x00040100` (TotK), including the full ASTC LDR family (4x4–12x12),
+  `R8`/`R8G8`, and `B8G8R8A8` (`0x0c01`). ASTC and the low-bpp formats are
+  **decode/round-trip only** — there is no ASTC encoder, so editing those
+  textures in place is not yet supported (BC1/BC3/BC4/BC5/BC7 + R8G8B8A8
+  remain editable).
 - BNTX append supports 2D, cube, and multi-mip; PNG import re-encodes to
   BC7, while in-place replace preserves the existing format
   (BC1/BC3/BC4/BC5/BC7). BC2 and BC6 have no encoder.

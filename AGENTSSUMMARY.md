@@ -51,7 +51,7 @@ src/
 │   ├── mod.rs          BntxFile, Texture, AppendTextureSpec, append/remove
 │   ├── read.rs         Full-fidelity parser (str pool, dict, RLT, BRTD)
 │   ├── write.rs        Writer with canonical/preserved RLT modes
-│   ├── decode.rs       Deswizzle + decode (texture2ddecoder) → RGBA, applies channel-swizzle
+│   ├── decode.rs       Deswizzle + decode (texture2ddecoder; BCn/ASTC/R8/R8G8/RGBA8/BGRA8) → RGBA, applies channel-swizzle
 │   ├── pipeline.rs     PNG/DDS import, format-preserving replace, DDS export
 │   └── dict_builder.rs Patricia-trie builder for _DIC
 ├── bflan.rs            BFLAN parse/write (verbatim sections, byte-identical) + pat1/pai1 inspect
@@ -85,11 +85,20 @@ src/
   after `cnt1` → trailing section).
 - **BFLAN**: 7616/7616 byte-identical (5838 Smash + 1778 TotK). Verb
   `bflan-roundtrip-test` mirrors the BFLYT/BNTX ones.
-- **BNTX**: 5/6 byte-identical. The 6th
-  (`sgpo_one_pane_png_proof__Combined.bntx`) is a C# Switch-Toolbox
-  output with a 1040-entry verbose RLT vs Nintendo's 8-entry compact
-  RLT — both are functionally valid; the test tolerates this. (TotK BNTX
-  are version 0x00040100 + ASTC — not yet supported; see todo.md.)
+- **BNTX**: Smash (`0x00040000`) **and TotK (`0x00040100`)** now both
+  round-trip byte-identically — the TotK Title `__Combined.bntx` (225
+  textures, ASTC_4x4_SRGB + R8G8 + BC1/BC4/BC5/RGBA8) is byte-identical,
+  joining the Smash fixtures. The one tolerated diff remains the C#
+  Switch-Toolbox `sgpo_one_pane_png_proof__Combined.bntx` (verbose-RLT).
+  Surface formats now cover BC1–BC7, R8/R8G8/R8G8B8A8/B8G8R8A8 (`0x0c01`),
+  and the full **ASTC LDR family** (4x4–12x12, UNORM+SRGB); ASTC + the
+  low-bpp formats are **decode/round-trip only** (no encoder). The TotK
+  container is structurally identical to `0x00040000` — only the version
+  field + format set differ. Note: HDR's recolored `info_melee` B8G8R8A8
+  pack parses + decodes but does **not** round-trip byte-identically
+  (a C#-tool non-uniform BRTI spacing, same known-gap class as
+  `sgpo_one_pane_png_proof`); its B8G8R8A8 handling is covered by a
+  semantic write→re-parse test instead.
 - **SARC**: native reader + custom writer re-pack `info_melee.layout.arc`
   at ~2.16 MB (was 4.7 MB via a naive 0x2000 writer), all 344 entries
   byte-identical, per-file alignment correct.
@@ -104,15 +113,20 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 23): `compression::yaz0`
+- **Library unit tests** (`cargo test --lib`, 38): `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
   round-trip + frame-header dict-id parsing on hand-built headers matching
   the real ZsDic/blarc/pack descriptors), `compression::dict` (embedded-id
   parse + registry keying), `compression` (codec detect, Cow passthrough,
-  high-level zstd/Yaz0 round-trips, missing-dict error), and `sarc` (native
+  high-level zstd/Yaz0 round-trips, missing-dict error), `sarc` (native
   reader↔writer round-trip incl. hash-only entries, big-endian, garbage
-  rejection). These run with no fixtures.
+  rejection), `bntx` (surface-format code round-trip across **every**
+  format incl. the full ASTC family, pinned codes for R8/R8G8/BGRA8/ASTC,
+  ASTC block geometry + 16-byte block size), and `dds` (DXGI round-trip
+  for the new formats + canonical ASTC DXGI codes). These run with no
+  fixtures — the format-code tests are the correctness net for the ASTC
+  family we can't fully fixture-cover.
 - `tests/compression_fixtures.rs` — fixture-gated (skips without
   `tests/fixtures/totk/compression/ZsDic.pack.zs`): loads the 3 TotK
   dictionaries (ids {1,2,3}), decompresses each local `.blarc.zs` to a SARC
@@ -140,8 +154,8 @@ src/
   BNTX, 157 BFLAN, 0 failures) and asserts the full `unpacked/` tree
   audit (451 BFLYT all parse + all v9; 2 BFLYT / 42 materials flagged
   `flags_untrusted`; 32 BFLYT / 174 materials with v9 extension bytes; 31
-  BNTX with exactly 1 unsupported-surface-format failure — HDR's
-  recolored info_melee, code `0x00000c01`; 5838 BFLAN, 0 failed, 12 with
+  BNTX, **all parse** now that B8G8R8A8 `0x0c01` is supported — HDR's
+  recolored info_melee no longer fails; 5838 BFLAN, 0 failed, 12 with
   a truncated final section). A third case audits `archives/` (6 packed
   `layout.arc`) to cover the in-memory unpack→recurse path (95 bflyt / 6
   bntx / 1306 bflan reached inside, all parse).
@@ -174,13 +188,22 @@ src/
   `tests/fixtures/bntx/` file, asserts decoded dims == BNTX metadata +
   RGBA byte count, asserts the corpus covers BC1/BC4/BC5/BC7, and pins
   channel-swizzle application (textures with `One,One,One,*` RGB swizzle
-  must decode to white RGB). 764 textures / 6 fixtures in our setup.
+  must decode to white RGB). 989 textures / 7 fixtures in our setup
+  (incl. the TotK file's ASTC_4x4_SRGB + R8G8 textures).
 - `tests/bflyt_synthesis.rs` — 2 synthetic-layout round-trip tests.
 - `tests/bflyt_real_fixtures.rs` — walks every `*.bflyt` under
   `tests/fixtures/` recursively (**881** in our setup: 508 Smash +
   373 TotK Boot/Common/Title), all byte-identical.
 - `tests/bntx_real_fixtures.rs` — walks `tests/fixtures/bntx/`,
-  tolerates the known sgpo_one_pane_png_proof RLT diff.
+  tolerates the known sgpo_one_pane_png_proof RLT diff. Now also covers
+  the TotK `totk_title__Combined.bntx` (v`0x00040100`, byte-identical).
+- `tests/bntx_totk_formats.rs` — TotK/new-format coverage (fixture-gated):
+  the TotK Title `__Combined.bntx` round-trips **byte-identically**
+  (asserts version `0x00040100` + presence of ASTC_4x4_SRGB & R8G8), and
+  **all 225 textures decode** (mip 0) to the right dims. A second test
+  takes HDR's `info_melee` B8G8R8A8 (`0x0c01`) pack through a *semantic*
+  round-trip (write→re-parse → every texture's format/dims/mips/pixels
+  intact) + decode-all (it isn't byte-identical: C#-tool BRTI spacing).
 - `tests/bntx_dict_edge.rs` — 10 Patricia-trie edge cases (empty,
   prefix, non-ASCII, last-bit-only, 64-key power-of-two).
 - `tests/bntx_replace_in_place.rs` — 2 tests pinning the
@@ -255,7 +278,8 @@ src/
 | Item | Severity | Notes |
 |---|---|---|
 | `sgpo_one_pane_png_proof.bntx` 8KB RLT diff | Low | C# tool's verbose RLT. Both layouts valid. |
-| TotK BNTX (v`0x00040100`) + ASTC / low-bpp formats | Medium | Version-gated + new surface formats; not yet supported. See `todo.md`. |
+| TotK BNTX (v`0x00040100`) + ASTC / low-bpp formats | Resolved | Read/write/decode for `0x00040100`, full ASTC LDR family (4x4–12x12), R8/R8G8, B8G8R8A8 (`0x0c01`). TotK `__Combined.bntx` round-trips byte-identically. Decode/round-trip only (no ASTC/low-bpp **encoder** yet) — see `todo.md`. |
+| HDR `info_melee` B8G8R8A8 pack not byte-identical | Low | C#-tool non-uniform BRTI spacing (same class as `sgpo_one_pane_png_proof`). Parses + decodes; semantic round-trip tested. |
 | In-tool ZSTD+dict / Yaz0 decompression | Resolved | `compression` module: zstd (+ TotK dicts via `ZsDic.pack.zs`) decode **byte-identical to Python 3.14 `compression.zstd`**; native Yaz0/Yaz1; verbs `decompress`/`compress`/`archive-extract`; compression-aware `layout-audit --dict/--romfs`. Re-compression is lossless, not container-identical (expected). |
 | In-game runtime validation on Switch hardware | High value | Untestable without hardware. |
 | v9 BFLYT 60-byte material extension (flag bit 19) | Low | Captured verbatim; can't construct from scratch (unspec'd). User accepted this gap. |
@@ -282,8 +306,10 @@ src/
 ## TODO / roadmap
 
 The **live, prioritized backlog lives in `todo.md`** — read it first for
-current work. Status snapshot (compression committed @ `bd454c7`; the SARC
-crate-ready hardening below is staged, pending commit approval):
+current work. Status snapshot: the BNTX `0x00040100` + ASTC/low-bpp batch
+below is **committed and pushed** this session; `origin/main` now includes
+it plus the previously un-pushed compression (bd454c7) and SARC-hardening
+(a36c07c) commits (origin was at c6159ec):
 
 - ✅ **Prior 7-item handoff** (bntx export-png/all, format-preserving
   replace, DDS export/import/replace, layout-apply-arc, layout-diff,
@@ -298,15 +324,23 @@ crate-ready hardening below is staged, pending commit approval):
   0.13`; `compression::{mod,zstd,yaz0,dict}`; verbs `decompress`/`compress`/
   `archive-extract`; compression-aware `layout-audit`. Decode byte-identical
   to Python on real TotK `.blarc.zs`/`.pack.zs`.
-- ✅ **SARC crate-ready hardening** (staged): `src/sarc.rs` → `src/sarc/`
+- ✅ **SARC crate-ready hardening** (commit a36c07c): `src/sarc.rs` → `src/sarc/`
   (`mod`/`read`/`write`/`error`/`fsutil`); typed `SarcError` (wired into the
   crate `Error` via `#[from]`); std-only codec core with the `walkdir`/`fs`
   helpers isolated in `fsutil`; 14 original unit tests (LE/BE round-trip,
   alignment derivation, hash-only ordering, empty/single/large, malformed
   inputs, pseudo-random property round-trip). Ready to lift into `nx-sarc`.
-- ▶️ **Next** (see `todo.md`, recommended order): BNTX `0x00040100` +
-  ASTC → BYAML → RSTB/RESTBL → MSBT → AAMP → BFLYT advanced mutations →
-  layout-repair → BFRES inspect-only → project workflow.
+- ✅ **BNTX `0x00040100` + full ASTC family + R8/R8G8/B8G8R8A8** (this
+  session, uncommitted): version gate + 28 ASTC variants (`AstcBlock`) +
+  R8/R8G8/BGRA8; byte-identical round-trip on a real 225-texture TotK
+  `__Combined.bntx`; decode for ASTC (all footprints), R8/R8G8, BGRA8;
+  decode/round-trip only (no encoder). `0x0c01` now parses so `layout-audit`
+  reports 0 unsupported BNTX. `filename_offset` writer now locates the
+  container name by value (fixes non-slot-1 string pools).
+- ▶️ **Next** (see `todo.md`, recommended order): BYAML/BYML → RSTB/RESTBL
+  → MSBT → AAMP → BFLYT advanced mutations → layout-repair → BFRES
+  inspect-only → project workflow. (ASTC/low-bpp **encode** is a smaller
+  follow-up under Hardening.)
 
 Standing backlog (no owner):
 
@@ -315,6 +349,59 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-05-31 — BNTX 0x00040100 + full ASTC family + R8/R8G8/B8G8R8A8
+Roadmap item #1. Unlocks TotK textures (and HDR's B8G8R8A8 Smash mods).
+Committed + pushed this session. Done in the disciplined staged order:
+read/inspect + byte-identical round-trip FIRST, then decode, encode
+deferred.
+
+**Findings (real fixtures).** Extracted a TotK `__Combined.bntx` via
+`archive-extract` on `Title*.blarc.zs`: version `0x00040100` is
+**structurally identical** to `0x00040000` (same `0x198` info-ptr offset,
+`0x150` memory pool, uniform `0x2a8` BRTI stride — all section offsets land
+where the writer computes them). New surface formats confirmed by
+byte-math (swizzled `image_size` matches the computed block layout):
+`0x2d06` = ASTC_4x4_SRGB (swizzled `10240 = 320×32`), `0x0901` = R8G8
+(`8192 = 128×64`, swizzle `[R,R,R,G]`). HDR's `0x0c01` measured as
+B8G8R8A8 (32bpp identity-swizzle, *not* the 16bpp the old TODO guessed).
+ASTC family codes (`0x2D` 4x4 … `0x3A` 12x12) cross-checked against public
+BNTX research + ARM's 14-footprint ordering (no GPL code consulted).
+
+**Stage A — parse + round-trip.** `read.rs` accepts `0x00040000` **and**
+`0x00040100`. New `AstcBlock` enum (14 footprints; `index()` is the single
+ordering source for the surface-format high byte `0x2D+idx` and the DXGI
+code `134+idx*4`) + `TextureFormat::Astc { block, srgb }`, plus flat
+`R8Unorm`/`R8G8Unorm`/`Bgra8Unorm`/`Bgra8UnormSrgb`. Wired
+`to/from_surface_format`, `block_dim`, `block_size` (ASTC=16), `has_alpha`,
+`name`, and the `dds.rs` DXGI map. **Byte-identical round-trip on the real
+225-texture TotK `__Combined.bntx`** (verified via `bntx-roundtrip-test`
+and a fixture test). Also fixed a latent writer bug: `filename_offset`
+hard-assumed the container name was `strings[1]`; it now locates the name
+by value (byte-identical for standard files, correct for HDR's reordered
+pool).
+
+**Stage B — decode.** `decode.rs`: `block_dim_for` derives arbitrary
+footprints from `TextureFormat::block_dim`; ASTC dispatches to
+`texture2ddecoder::decode_astc(.., bw, bh, ..)`; R8/R8G8/B8G8R8A8 expand
+straight to RGBA (BGRA swaps R↔B). **All 225 TotK textures export to PNG**
+and three spot-checks render as real images (ASTC bonus icon, R8G8 "x2"
+text, BGRA meter). Channel-swizzle still applied on top.
+
+**Stage C — encode deferred.** ASTC + the low-bpp formats are
+non-encodable (clear `texpipe` error; `format_is_encodable` excludes them).
+
+**Tests/docs.** New `tests/bntx_totk_formats.rs` (TotK byte-identical
+round-trip + decode-all; HDR B8G8R8A8 semantic round-trip + decode-all);
+4 new lib unit tests pin the surface-format/DXGI code maps across the
+**whole** ASTC family (the correctness net we can't fully fixture-cover);
+`tests/layout_audit.rs` updated (HDR `0x0c01` now parses → 0 unsupported
+BNTX). Copied the TotK BNTX into `tests/fixtures/bntx/` (gitignored) so the
+existing round-trip + export tests exercise it too. `cargo test` green
+(38 lib + all integration); `clippy --all-targets` clean;
+`--no-default-features` builds. **Known gap:** HDR `info_melee` isn't
+byte-identical (C#-tool non-uniform BRTI spacing, same class as
+`sgpo_one_pane_png_proof`).
 
 ### 2026-05-30 — SARC crate-ready hardening (module split + SarcError)
 Follow-up to the compression batch (same session). Restructured the native
