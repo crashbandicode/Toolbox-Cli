@@ -76,6 +76,12 @@ src/
 │   ├── read.rs         Parser (header + section walk; LBL1 hash table + TXT2 offsets, bounds-checked)
 │   ├── write.rs        Verbatim writer (byte-identical round-trip)
 │   └── error.rs        MsbtError (offset / section / index context)
+├── aamp/               AAMP (BOTW binary parameter archive) read + round-trip + canonical + set
+│   ├── mod.rs          ParameterList/Object/Parameter, Value enum, ParamType (0..20), AampDocument
+│   ├── read.rs         Offset-driven parser (header → root list → list/object/param tree)
+│   ├── write.rs        Verbatim writer + from-scratch canonical writer (semantically lossless)
+│   ├── edit.rs         set_by_path (type-preserving scalar mutation by name/hash path)
+│   └── error.rs        AampError (offset / type / edit context)
 ├── sarc/               Native SARC read+write (no `sarc` crate); crate-extractable
 │   ├── mod.rs          Public API, ArcFile/ArcEntry/UnpackedFile, format constants
 │   ├── read.rs         Reader (header/SFAT/SFNT, bounds-checked) — pure std
@@ -165,6 +171,25 @@ src/
   control tags preserved as hex; import overlays edits by label then
   canonical-writes) — verified end-to-end (byte-identical no-edit rebuild; an
   edit propagates).
+- **AAMP** (binary resource parameter archive): BOTW's `agl::utl::Parameter`
+  container (`.bxml`/`.bgparamlist`/`.baiprog`/`.bphysics`/…), packed inside
+  `Actor/Pack/*.sbactorpack` (Yaz0 SARC). TotK replaced AAMP with BYML, so
+  fixtures come from a **BOTW** dump. The reader decodes the v2 header (LE /
+  UTF-8) and the offset-driven tree (root Parameter IO → lists → objects →
+  parameters), all 21 `ParameterType`s (keys kept as CRC-32 hashes).
+  `write_aamp` re-emits the captured bytes → **byte-identical** for an
+  unmodified file — verified on **418** real BOTW AAMP files (Link / Guardian /
+  Lizalfos / Gerudo, weapons / armor / animals / objects / treasure / items),
+  every one byte-identical, zero parse errors. `write_aamp_canonical` rebuilds
+  from the decoded tree (sections header → lists [BFS] → objects → params →
+  data → de-duplicated strings, 4-aligned because offsets are stored `/4`);
+  **semantically lossless** across all 418 files (re-parses to the same tree;
+  not byte-identical by contract). `set_by_path` (`aamp-set`) edits a parameter
+  by a `/<lists…>/<object>/<param>` name path (CRC-32-matched; `0x…` = raw
+  hash), type-preserving, then canonical-writes. Verbs `aamp-inspect`
+  (`--json`, `--names` to resolve hashes), `aamp-roundtrip-test` (`--canonical`),
+  `aamp-set`. *Follow-ups:* a name table for readable inspect by default;
+  decoding curve control points (kept as raw bytes today); add/remove params.
 - **Compression**: zstd decode is **byte-identical to Python 3.14's
   `compression.zstd`** on real TotK `Boot.blarc.zs` (id-1 dict) and
   `AI.Global…pack.zs` (id-3 dict, 3.9 MB → 25 MB). Containers can't be
@@ -176,7 +201,7 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 96): the `verbs`
+- **Library unit tests** (`cargo test --lib`, 105): the `verbs`
   `--texture-format` alias/`--srgb` resolver, plus `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
@@ -213,7 +238,11 @@ src/
   copy-subtree with cycle + collision guards, a mutate→write→read structural
   round-trip, set-text read-back + write/read, set-window border edits) and
   `bflyt::repair` (material/texture prune index-remap, duplicate-name dedupe,
-  dangling-ref clamp, full `repair()`, prt1-skip).
+  dangling-ref clamp, full `repair()`, prt1-skip). Plus `aamp::read` (hand-built
+  minimal AAMP decode + verbatim round-trip; bad-magic/version/too-small
+  rejection), `aamp::write` (canonical semantic round-trip of a nested doc), and
+  `aamp::edit` (scalar/string/color set, nested-list descent, hex-hash segments,
+  every error path).
 - `tests/compression_fixtures.rs` — fixture-gated (skips without
   `tests/fixtures/totk/compression/ZsDic.pack.zs`): loads the 3 TotK
   dictionaries (ids {1,2,3}), decompresses each local `.blarc.zs` to a SARC
@@ -249,9 +278,18 @@ src/
   "Home on Arrange") and `Npc` (labels == messages, every label index
   resolves). Locally the corpus is the 4 sampled USen files; the full 1510
   USen + 1510 JPja corpus was round-tripped via `msbt-roundtrip-test` (all
-  byte-identical). A `canonical_writer_semantic_round_trips_corpus` test runs
+  byte-identical). A   `canonical_writer_semantic_round_trips_corpus` test runs
   `read → write_msbt_canonical → read` over the fixtures (labels/messages/
   entries preserved; also reports the byte-identical count — 4/4 locally).
+- `tests/aamp_roundtrip.rs` — fixture-gated (skips without
+  `tests/fixtures/aamp/`, 32 BOTW files across 18 extensions). Asserts every
+  fixture `write_aamp`-round-trips **byte-identically**; a
+  `canonical_writer_semantic_round_trips_corpus` test runs `read →
+  write_aamp_canonical → read` (same tree); pins `Weapon_Sword_001`
+  `.bxml`/`.bphysics` counts `(1,3,38)`/`(14,23,231)`; and edits a real Int
+  param via `set_by_path` (hex-hash path) → canonical-write → re-read. The full
+  418-file BOTW sweep (verbatim + `--canonical`) was run via
+  `aamp-roundtrip-test`.
 - `tests/restbl_roundtrip.rs` — fixture-gated. Inflates the real TotK
   `ResourceSizeTable.Product.{121,143}.…rsizetable.zs` and asserts each
   re-serializes **byte-identically** with sorted CRC + name tables; pins the
@@ -446,12 +484,12 @@ src/
 ## TODO / roadmap
 
 The **live, prioritized backlog lives in `todo.md`** — read it first for
-current work. Status snapshot: `origin/main` is at **e7594cb** (MSBT JSON
-export/import) — all BYML / RESTBL / MSBT work is pushed. Local `main` is **4
-commits ahead, unpushed**: `c1ed99e` (BYML `byml-set`), `a50ae76` (BFLYT pane
-remove/move/rename/copy-subtree), `582e493` (BFLYT prune + repair), `d75960a`
-(BFLYT set-text/-window) — see the top Session log entries. **Ask the user
-before pushing.**
+current work. Status snapshot: `origin/main` is at **e7594cb** (MSBT) — all
+BYML / RESTBL / MSBT work is pushed. Local `main` is **9 commits ahead,
+unpushed**: `c1ed99e` (BYML `byml-set`); `a50ae76` / `582e493` / `d75960a`
+(BFLYT pane ops / prune+repair / set-text+window); `ab6b86f` (docs); `ef11b4c`
+/ `6ad1ee6` / `cf9f257` (AAMP read / canonical / set); plus this doc update —
+see the top Session log entries. **Ask the user before pushing.**
 
 - ✅ **Prior 7-item handoff** (bntx export-png/all, format-preserving
   replace, DDS export/import/replace, layout-apply-arc, layout-diff,
@@ -514,14 +552,18 @@ before pushing.**
   dangling texture refs, dedupe duplicate pane names, `repair()` →
   `RepairReport`. Verbs `bflyt-prune` + `bflyt-repair` (`--dry-run`). Material
   pruning skips when prt1 property data is present.
+- ✅ **AAMP (BOTW binary parameter archive)** (this session, committed
+  `ef11b4c` / `6ad1ee6` / `cf9f257`): `src/aamp/` read + verbatim byte-identical
+  round-trip (**418** real BOTW files) + from-scratch canonical writer
+  (semantically lossless on all 418) + `set_by_path` type-preserving scalar
+  mutation. Verbs `aamp-inspect` / `aamp-roundtrip-test` / `aamp-set`. Fixtures
+  (32 files across 18 extensions, from a BOTW dump) under the gitignored
+  `tests/fixtures/aamp/`.
 - ▶️ **Next** (see `todo.md`): **BFRES inspect-only** → **project workflow**
-  (project-init/audit/apply/build + cached corpus audit). **AAMP is deferred to
-  the bottom — blocked on fixtures**: TotK is 100% BYML (`.bgyml`); a full romfs
-  extension scan **and** cracking an actor pack (`Pack/Actor/*.pack.zs`) found
-  **zero** AAMP (`YB`/BYML + `.ainb`). AAMP needs a **BOTW** dump (its actor
-  packs) or a Python `oead` byte oracle first. (Smaller Hardening follow-ups:
-  layout.arc-level `layout-repair`, ASTC/low-bpp **encode**, BYML
-  add/remove-by-path, BOTW `RSTB`, MSBT `ATR1`/older versions.)
+  (project-init/audit/apply/build + cached corpus audit). (Smaller Hardening
+  follow-ups: AAMP name table for readable inspect + curve-control-point decode
+  + add/remove params; layout.arc-level `layout-repair`; ASTC/low-bpp
+  **encode**; BYML add/remove-by-path; BOTW `RSTB`; MSBT `ATR1`/older versions.)
 
 Standing backlog (no owner):
 
@@ -530,6 +572,50 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-05-31 — AAMP (BOTW binary parameter archive) read + round-trip + canonical + set
+The user dumped **BOTW** (`01007EF00011E000`), unblocking AAMP (TotK has none).
+Done in the disciplined order, three committed batches, all green.
+
+**Fixtures.** BOTW actor params live in `Actor/Pack/*.sbactorpack` (Yaz0 SARC).
+`archive-extract` (native Yaz0 + SARC) pulls them out as raw `AAMP` files.
+Curated 32 fixtures across 18 extensions (`.bxml`/`.bgparamlist`/`.baiprog`/
+`.bphysics`/`.bdmgparam`/…) into the gitignored `tests/fixtures/aamp/`.
+
+**Stage A — read + verbatim round-trip (`ef11b4c`).** New `src/aamp/`
+(`mod`/`read`/`write`/`error`, typed `AampError`). Header confirmed on real
+bytes (magic `AAMP`, v2, flags 0x3 = LE+UTF-8). Offset-driven recursive parser:
+root Parameter IO → list (0xC) / object (0x8) / parameter (0x8), each node's
+children/data found via `/4` relative offsets; decodes all 21 `ParameterType`s
+(scalars, vec2-4/color/quat, 4 string variants in the string section, buffers
+[count at `data_off-4`], curves [raw]). Keys kept as CRC-32 hashes.
+`write_aamp` = verbatim → **byte-identical**; verified on **418** real BOTW
+files (Link/Guardian/Lizalfos/Gerudo, weapons/armor/animals/objects/treasure/
+items), zero parse errors. Verbs `aamp-inspect` (`--json`, `--names` to resolve
+hashes) + `aamp-roundtrip-test`.
+
+**Stage B — canonical writer (`6ad1ee6`).** `write_aamp_canonical` rebuilds
+from the decoded tree: sections header → lists (BFS, contiguous sibling runs) →
+objects → params → data → de-duplicated strings, **4-aligning every data/string
+entry** (offsets are `/4`, so each must land on a `/4`-encodable position).
+Contract = semantic round-trip (not byte-identical: AAMP layout is
+writer-specific). **Semantically lossless on all 418** files. `aamp-roundtrip-
+test --canonical` sweeps it.
+
+**Stage C — `aamp-set` (`cf9f257`).** `src/aamp/edit.rs` `set_by_path` edits a
+parameter by a `/<lists…>/<object>/<param>` name path (CRC-32-matched; `0x…` =
+raw hash), **type-preserving** (parses the value into the param's existing type;
+strings keep their str32/64/256/ref kind; curve/buffer rejected), then
+canonical-writes. Verb `aamp-set`. Verified end-to-end on a real `.bgparamlist`
+(`int(20) → int(99)`, re-inspected). Shared `Value::summary` with the inspector.
+
+Tests: `tests/aamp_roundtrip.rs` (fixture-gated: corpus verbatim byte-identical
++ canonical semantic round-trip + pinned `Weapon_Sword_001` structure + a real
+Int `set_by_path` round-trip) + fixture-free unit tests in `aamp::read`/`write`/
+`edit`. `cargo test` green (**105** lib unit + all integration); `clippy
+--all-targets` clean; `--no-default-features` builds. **Follow-ups:** a name
+table for readable inspect by default; curve control-point decode (raw today);
+AAMP add/remove params.
 
 ### 2026-05-31 — BFLYT advanced pane mutations + prune/repair (roadmap #3 + #4)
 Three committed batches on top of `byml-set`, all green.
