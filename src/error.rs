@@ -28,6 +28,10 @@ pub enum Error {
     #[error("RESTBL error: {0}")]
     Restbl(#[from] crate::restbl::RestblError),
 
+    /// An MSBT (LibMessageStudio message) parse or write error.
+    #[error("MSBT error: {0}")]
+    Msbt(#[from] crate::msbt::MsbtError),
+
     /// An underlying I/O failure (reading/writing files).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

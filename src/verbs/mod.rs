@@ -43,6 +43,8 @@ mod layout_audit;
 mod layout_diff;
 mod layout_validate_manifest;
 mod mat_rename;
+mod msbt_inspect;
+mod msbt_roundtrip_test;
 mod pane_clone;
 mod pane_set;
 mod restbl_inspect;
@@ -251,6 +253,15 @@ pub enum Verb {
     /// key, arrays by index). Inflates `.byml.zs`. Use --json.
     BymlDiff(byml_diff::Args),
 
+    /// Print a structured snapshot of an MSBT (LibMessageStudio message) file:
+    /// endianness, encoding, sections, and decoded label→message text.
+    /// Inflates `.msbt.zs`. Use --json / --limit.
+    MsbtInspect(msbt_inspect::Args),
+
+    /// Internal: read an MSBT, write it back, and report whether the
+    /// round-trip is byte-identical (inflating `.msbt.zs` first).
+    MsbtRoundtripTest(msbt_roundtrip_test::Args),
+
     /// Print a structured snapshot of a RESTBL (Resource Size Table): version,
     /// table counts, name (collision) table, and optional path/hash lookup.
     /// Inflates `.rsizetable.zs`. Use --json.
@@ -336,6 +347,8 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::BymlInspect(args) => Ok(byml_inspect::run(args)?),
         Verb::BymlRoundtripTest(args) => Ok(byml_roundtrip_test::run(args)?),
         Verb::BymlDiff(args) => Ok(byml_diff::run(args)?),
+        Verb::MsbtInspect(args) => Ok(msbt_inspect::run(args)?),
+        Verb::MsbtRoundtripTest(args) => Ok(msbt_roundtrip_test::run(args)?),
         Verb::RestblInspect(args) => Ok(restbl_inspect::run(args)?),
         Verb::RestblRoundtripTest(args) => Ok(restbl_roundtrip_test::run(args)?),
         Verb::RestblSet(args) => Ok(restbl_set::run(args)?),

@@ -6,6 +6,22 @@ session immediately after this file was written.
 
 ## In progress / next
 
+- [x] **MSBT inspect + round-trip (Stage A).** Roadmap item (text/message
+  format), done + committed. New `src/msbt/` (`mod`/`read`/`write`/`error`,
+  typed `MsbtError`): `MsgStdBn` header (endian via BOM, encoding, version,
+  section count), generic section walk with structural decode of `LBL1`
+  (label→message-index hash table) and `TXT2` (UTF-16 messages + a tag-aware
+  chunk decoder: `0x000E` open / `0x000F` close, literal `\n`/`\t` preserved);
+  other sections retained opaque. `write_msbt` re-emits captured bytes
+  **verbatim** → byte-identical round-trip (verified on **all 1510 USen +
+  1510 JPja** TotK `Mals` `.msbt`, both byte-identical). Verbs `msbt-inspect`
+  (`--json`/`--limit`, inflates `.msbt.zs` via `--dict`/`--romfs`) +
+  `msbt-roundtrip-test`. Tests: `tests/msbt_roundtrip.rs` (fixture-gated
+  corpus byte-identical + pinned `Info_BuildHouse`/`Npc` structure) + 5
+  fixture-free unit tests. Fixtures gitignored under `tests/fixtures/msbt/`.
+  *Follow-up (Stage B, not done):* `msbt-export-json`/`msbt-import-json`
+  (reversible control-tag escapes) + a from-scratch canonical writer
+  (semantically lossless), then label/message mutation.
 - [x] **BYAML/BYML inspect + round-trip + diff.** Roadmap item #2 (done,
   committed). New `src/byml/` (read/write/diff/mod/error): `Byml` value tree
   + `BymlDocument`, both endians + versions `1..=7`, bounds-checked +
