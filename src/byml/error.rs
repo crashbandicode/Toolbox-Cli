@@ -71,6 +71,11 @@ pub enum BymlError {
     /// offsets).
     #[error("BYML nesting exceeds the depth limit {limit} at offset 0x{offset:x}")]
     TooDeep { limit: usize, offset: usize },
+
+    /// The canonical writer was handed a root that isn't an array/hash (BYML
+    /// requires a container at the root).
+    #[error("BYML root must be a container (array/hash), got {0}")]
+    NonContainerRoot(&'static str),
 }
 
 /// Convenience alias for the BYML module's fallible operations.

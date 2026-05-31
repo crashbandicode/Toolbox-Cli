@@ -30,7 +30,7 @@ general-purpose Switch-modding toolkit (live roadmap in `todo.md`).
 ```bash
 cargo build           # dev (also compiles vendored libzstd via zstd-sys)
 cargo build --release # release (static-links Intel ISPC, ~3 min from clean)
-cargo test            # ~85 tests across 24 integration binaries + lib unit
+cargo test            # ~90 tests across 25 integration binaries + lib unit
                       # tests (compression + sarc) + 1 doctest
                       # (many skip cleanly when tests/fixtures/ is absent)
 ```
@@ -55,10 +55,11 @@ src/
 │   ├── pipeline.rs     PNG/DDS import (BC7 default or RGBA8 via ImportTextureFormat), format-preserving replace, DDS export
 │   └── dict_builder.rs Patricia-trie builder for _DIC
 ├── bflan.rs            BFLAN parse/write (verbatim sections, byte-identical) + pat1/pai1 inspect
-├── byml/               BYML (binary YAML) read + verbatim round-trip; decoded value tree
+├── byml/               BYML (binary YAML) read + round-trip + structural diff
 │   ├── mod.rs          Byml value enum, BymlDocument, node-type constants
 │   ├── read.rs         Parser (both endians, v1..=7; bounds-checked, depth-guarded)
-│   ├── write.rs        Verbatim writer (raw passthrough; canonical writer TBD)
+│   ├── write.rs        Verbatim writer + from-scratch canonical writer
+│   ├── diff.rs         Path-keyed structural diff of two Byml trees
 │   └── error.rs        BymlError (offset / node-type / index context)
 ├── compression/
 │   ├── mod.rs          Codec detect + decompress/compress entry points (Cow passthrough)
@@ -114,8 +115,15 @@ src/
   assets: uncompressed `CookingTable.bgyml` (LE v7), compressed RSDB
   `ActorInfo`/`Challenge` (`.byml.zs`, LE) and `GameDataList` (`.byml.zs`,
   **big-endian** — a TotK quirk the auto-detect handles) — **~3.3M nodes
-  total, all byte-identical**, zero unknown-type/truncation errors. The
-  from-scratch canonical writer + structural diff are the next batch.
+  total, all byte-identical**, zero unknown-type/truncation errors. A
+  from-scratch **canonical writer** (`write_byml_canonical`, for mutated /
+  synthesized trees) is **semantically lossless** across the whole corpus
+  (`read(write(x)) == read(x)`, both endians, up to 12.7 MB / 1.4M nodes;
+  it even reproduces the exact byte length on several files, though
+  byte-identity is not its contract). `diff_byml` / `byml-diff` give a
+  path-keyed structural diff (matching hashes by key, arrays by index) — on
+  real `ActorInfo.121`→`.143` it surfaces +8212/−8249/~79401 changes
+  (added actors, heap-size tweaks, an f32 precision shift).
 - **Compression**: zstd decode is **byte-identical to Python 3.14's
   `compression.zstd`** on real TotK `Boot.blarc.zs` (id-1 dict) and
   `AI.Global…pack.zs` (id-3 dict, 3.9 MB → 25 MB). Containers can't be
@@ -127,7 +135,7 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 43): the `verbs`
+- **Library unit tests** (`cargo test --lib`, 49): the `verbs`
   `--texture-format` alias/`--srgb` resolver, plus `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
@@ -142,7 +150,10 @@ src/
   for the new formats + canonical ASTC DXGI codes), and `byml` (a
   hand-built minimal little-endian array decodes to the right inline
   scalars + writes back verbatim; bad-magic / too-small / truncated-node
-  rejection). These run with no fixtures — the format-code tests are the
+  rejection; the **canonical writer** round-trips a tree of every node kind
+  in both endians + rejects a scalar root; the **diff** detects
+  add/remove/change + nested-path / type changes). These run with no
+  fixtures — the format-code tests are the
   correctness net for the ASTC family / BYML reader we can't fully
   fixture-cover on CI.
 - `tests/compression_fixtures.rs` — fixture-gated (skips without
@@ -159,7 +170,14 @@ src/
   `CookingTable.bgyml` (v7, LE; `RecipeList`=158, `SingleRecipeList`=15,
   `SystemData` 11 entries incl. known string values) and asserts
   `GameDataList.Product.110` parses as **big-endian** v7 — coverage across
-  both endians + compressed/uncompressed.
+  both endians + compressed/uncompressed. A second test runs
+  `write_byml_canonical` over the whole corpus and asserts the result
+  re-parses to the same tree (semantic round-trip, both endians, ≤12.7 MB).
+- `tests/byml_diff.rs` — fixture-gated. Self-diff of a real file is empty; a
+  mutated clone of `CookingTable` (add a root key, change one nested string,
+  remove one nested key) yields exactly those three diff entries at the
+  expected paths; and (when both present) `ActorInfo.121`↔`.143` differ with
+  a mirror-image reverse diff.
 - `tests/sarc_writer.rs` — round-trips `info_melee.layout.arc` through
   `read_arc` → `write_arc` (now exercising the **native reader** too): all
   344 files byte-identical, re-readable, output stays ~2.16 MB (not the old
@@ -314,7 +332,7 @@ src/
 | TotK BNTX (v`0x00040100`) + ASTC / low-bpp formats | Resolved | Read/write/decode for `0x00040100`, full ASTC LDR family (4x4–12x12), R8/R8G8, B8G8R8A8 (`0x0c01`). TotK `__Combined.bntx` round-trips byte-identically. Decode/round-trip only (no ASTC/low-bpp **encoder** yet) — see `todo.md`. |
 | HDR `info_melee` B8G8R8A8 pack not byte-identical | Low | C#-tool non-uniform BRTI spacing (same class as `sgpo_one_pane_png_proof`). Parses + decodes; semantic round-trip tested. |
 | In-tool ZSTD+dict / Yaz0 decompression | Resolved | `compression` module: zstd (+ TotK dicts via `ZsDic.pack.zs`) decode **byte-identical to Python 3.14 `compression.zstd`**; native Yaz0/Yaz1; verbs `decompress`/`compress`/`archive-extract`; compression-aware `layout-audit --dict/--romfs`. Re-compression is lossless, not container-identical (expected). |
-| BYML canonical (from-scratch) writer | In progress | Stage A is read + inspect + **verbatim** round-trip (byte-identical for unchanged docs, both endians, v1..=7). The from-scratch canonical writer (for mutated/synthesized trees), semantic round-trip, and `byml-diff` are Stage B. |
+| BYML canonical (from-scratch) writer | Resolved | `write_byml_canonical` emits sorted/deduped string tables + BFS node layout with back-patched offsets; **semantically lossless** on the real corpus (both endians, ≤12.7 MB). Not byte-identical to Nintendo by contract (writer-specific layout), though it matches several files' exact size. `byml-diff` added. Mutation-by-path (`byml-set`) is a future follow-up. |
 | In-game runtime validation on Switch hardware | High value | Untestable without hardware. |
 | v9 BFLYT 60-byte material extension (flag bit 19) | Low | Captured verbatim; can't construct from scratch (unspec'd). User accepted this gap. |
 | `flags_untrusted` materials can't safely re-encode after sub-section count changes | Resolved in TODO #4 | `Material::assert_flags_trusted()` + `clear_untrusted_flag()` API; writer `debug_assert!` catches misuse via `original_section_size` snapshot. |
@@ -344,8 +362,8 @@ current work. Status snapshot: `origin/main` is at **bff4757** (a doc-sync on
 top of **14e5991**, the PNG-import RGBA8 format option), itself on top of
 **f46788c** (BNTX `0x00040100` + ASTC/low-bpp) and the earlier compression
 (bd454c7) + SARC-hardening (a36c07c) commits — all pushed. The current
-session adds BYML Stage A (read + inspect + verbatim round-trip) — see the
-top Session log entry:
+session adds BYML (read + inspect + verbatim round-trip in 686ad53, then the
+canonical writer + `byml-diff`) — see the top two Session log entries:
 
 - ✅ **Prior 7-item handoff** (bntx export-png/all, format-preserving
   replace, DDS export/import/replace, layout-apply-arc, layout-diff,
@@ -373,12 +391,14 @@ top Session log entry:
   decode/round-trip only (no encoder). `0x0c01` now parses so `layout-audit`
   reports 0 unsupported BNTX. `filename_offset` writer now locates the
   container name by value (fixes non-slot-1 string pools).
-- ▶️ **In progress: BYAML/BYML.** Stage A (read + `byml-inspect` +
-  verbatim byte-identical round-trip + fixture/unit tests) is done this
-  session; Stage B (from-scratch canonical writer + semantic round-trip +
-  `byml-diff`) is next. Then (see `todo.md`): RSTB/RESTBL → MSBT → AAMP →
-  BFLYT advanced mutations → layout-repair → BFRES inspect-only → project
-  workflow. (ASTC/low-bpp **encode** is a smaller follow-up under Hardening.)
+- ✅ **BYAML/BYML** (this session): read + `byml-inspect` + verbatim
+  byte-identical round-trip (Stage A, 686ad53) **plus** the from-scratch
+  canonical writer (semantically lossless) + `byml-diff` (Stage B). Only
+  mutation-by-path (`byml-set`) is left as a future follow-up.
+- ▶️ **Next** (see `todo.md`, recommended order): RSTB/RESTBL → MSBT →
+  AAMP → BFLYT advanced mutations → layout-repair → BFRES inspect-only →
+  project workflow. (ASTC/low-bpp **encode** is a smaller follow-up under
+  Hardening; BYML `byml-set` mutation is another.)
 
 Standing backlog (no owner):
 
@@ -387,6 +407,38 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-05-31 — BYML canonical writer + structural diff (Stage B)
+Roadmap item #2, Stage B (same session as Stage A 686ad53). Adds the
+from-scratch writer (for mutated/synthesized trees) and a structural diff.
+
+- `write_byml_canonical(version, big_endian, root)`: collects every hash key +
+  string value into **sorted, deduped** `0xc2` tables, then lays the node tree
+  out **breadth-first** with back-patched offsets (containers / 64-bit values /
+  binary placed after their parent; value slots patched once their offset is
+  known). Hash entries are emitted key-sorted (BYML's binary-search
+  requirement), so the output re-parses to the same tree. Its contract is the
+  **semantic** round-trip `read(write(x)) == read(x)`, *not* byte-identity —
+  BYML byte layout is writer-specific (dedup / ordering / padding). In
+  practice it reproduces the **exact byte length** of `CookingTable`,
+  `Challenge`, and `ActorInfo` and is 4 bytes off `GameDataList`. New
+  `BymlError::NonContainerRoot` for a scalar root.
+- `diff_byml` + `byml-diff` verb: path-keyed structural diff (JSON-pointer-ish
+  paths), matching hashes by key and arrays by index, classifying
+  added/removed/changed with short value summaries (`s32(42)`,
+  `string("foo")`, `array[3]`, …); bitwise float compare so `NaN`/`-0.0`
+  don't false-positive. `--json`, `--limit`, and `--dict`/`--romfs` (inflates
+  compressed input). On real `ActorInfo.121`→`.143`: +8212 −8249 ~79401
+  (added actors like `Obj_DailyChallenge_00`, heap-size tweaks, an f32
+  precision shift).
+- Tests: `tests/byml_diff.rs` (self-diff empty; precise mutated-clone diff on
+  `CookingTable`; `ActorInfo.121`↔`.143` non-empty + mirror-image reverse) and
+  a `canonical_writer_semantic_round_trips` walk over the whole corpus
+  (`read → write_byml_canonical → read` equals the original tree, both endians,
+  up to 12.7 MB / 1.4M nodes). 6 new lib unit tests in `byml::write`/
+  `byml::diff`. `cargo test` green (49 lib unit + all integration); `clippy
+  --all-targets` clean; `--no-default-features` builds. Diff fixtures
+  (`ActorInfo.Product.121/.143`) added to the gitignored `tests/fixtures/byml/`.
 
 ### 2026-05-31 — BYML (binary YAML) read + inspect + verbatim round-trip (Stage A)
 Roadmap item #2, Stage A. BYML is the most-edited Switch data format (game

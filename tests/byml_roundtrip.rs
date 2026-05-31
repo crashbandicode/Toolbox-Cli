@@ -11,8 +11,24 @@
 
 use std::path::{Path, PathBuf};
 
-use nx_layout_toolbox::byml::{read_byml, write_byml, Byml, BymlDocument};
+use nx_layout_toolbox::byml::{read_byml, write_byml, write_byml_canonical, Byml, BymlDocument};
 use nx_layout_toolbox::compression::{self, DictRegistry};
+
+/// Recursively sort hash keys so trees compare order-insensitively (the
+/// canonical writer emits keys sorted; real files are already sorted, so this
+/// is a no-op for them but keeps the assertion honest regardless).
+fn normalized(v: &Byml) -> Byml {
+    match v {
+        Byml::Array(a) => Byml::Array(a.iter().map(normalized).collect()),
+        Byml::Hash(h) => {
+            let mut e: Vec<(String, Byml)> =
+                h.iter().map(|(k, c)| (k.clone(), normalized(c))).collect();
+            e.sort_by(|a, b| a.0.cmp(&b.0));
+            Byml::Hash(e)
+        }
+        other => other.clone(),
+    }
+}
 
 fn byml_dir() -> &'static Path {
     Path::new("tests/fixtures/byml")
@@ -107,6 +123,40 @@ fn byml_fixtures_round_trip_byte_identically() {
     if saw_be {
         assert!(saw_le, "expected at least one little-endian fixture alongside big-endian");
     }
+}
+
+/// The from-scratch canonical writer must produce a valid BYML that re-parses
+/// to the same tree (semantic round-trip) across the real corpus — both
+/// endians and the multi-million-node GameDataList.
+#[test]
+fn canonical_writer_semantic_round_trips() {
+    let reg = load_registry();
+    let fixtures = byml_fixtures();
+    if fixtures.is_empty() {
+        eprintln!("skipping (no fixtures in {})", byml_dir().display());
+        return;
+    }
+
+    let mut processed = 0usize;
+    for path in &fixtures {
+        let Some((_bytes, doc)) = load_doc(path, &reg) else {
+            continue;
+        };
+        let name = path.file_name().unwrap().to_string_lossy();
+        let written =
+            write_byml_canonical(doc.version, doc.big_endian, &doc.root).expect("canonical write");
+        let reparsed = read_byml(&written).unwrap_or_else(|e| panic!("re-parse {name}: {e}"));
+        assert_eq!(reparsed.version, doc.version, "{name} version");
+        assert_eq!(reparsed.big_endian, doc.big_endian, "{name} endian");
+        assert_eq!(
+            normalized(&reparsed.root),
+            normalized(&doc.root),
+            "{name}: canonical writer is not semantically lossless"
+        );
+        processed += 1;
+        eprintln!("OK canonical {name}: {} bytes", written.len());
+    }
+    assert!(processed > 0);
 }
 
 /// Pin decoded structure on the uncompressed TotK CookingTable (when present).

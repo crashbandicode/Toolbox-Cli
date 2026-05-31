@@ -23,7 +23,7 @@ pub struct Args {
     #[arg(long)]
     json: bool,
 
-    /// Indent JSON output. Pass --no-indent for compact JSON.
+    /// Indent JSON output. Pass `--indent false` for compact JSON.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     indent: bool,
 

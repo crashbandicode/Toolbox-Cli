@@ -90,7 +90,9 @@ pub mod prelude {
         ImportTextureFormat, ReplaceSource,
     };
     pub use crate::bntx::{read_bntx, write_bntx, AppendTextureSpec, BntxFile, TextureFormat};
-    pub use crate::byml::{read_byml, write_byml, Byml, BymlDocument};
+    pub use crate::byml::{
+        diff_byml, read_byml, write_byml, write_byml_canonical, Byml, BymlDiff, BymlDocument,
+    };
     pub use crate::compression::{compress_yaz0, compress_zstd, decompress, Codec, DictRegistry};
     pub use crate::layout::{
         apply_manifest, validate_manifest, ApplyOptions, ApplyReport, ValidateOptions,

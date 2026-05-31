@@ -16,17 +16,21 @@
 //! tool's bytes from a decoded tree is a separate problem, so [`read_byml`]
 //! retains the original bytes and [`write_byml`] re-emits them verbatim for an
 //! unmodified document — byte-identical by construction, the same discipline
-//! the [`crate::compression`] layer uses for unchanged files. A from-scratch
-//! canonical writer (for mutated/synthesized trees) lands in a follow-up; its
-//! guarantee is the *semantic* round-trip `read(write(x)) == read(x)`.
+//! the [`crate::compression`] layer uses for unchanged files. For mutated or
+//! synthesized trees, [`write_byml_canonical`] is a from-scratch writer whose
+//! guarantee is the *semantic* round-trip `read(write(x)) == read(x)` (it does
+//! not chase a specific tool's byte layout). [`diff_byml`] produces a
+//! path-keyed structural diff of two trees.
 
+mod diff;
 mod error;
 mod read;
 mod write;
 
+pub use diff::{diff_byml, BymlDiff, ChangedEntry, DiffEntry};
 pub use error::{BymlError, Result};
 pub use read::read_byml;
-pub use write::write_byml;
+pub use write::{write_byml, write_byml_canonical};
 
 // ---- BYML node type tags (shared by the reader and writer) ----
 pub(crate) const NODE_STRING: u8 = 0xa0;
