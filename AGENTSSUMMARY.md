@@ -55,12 +55,13 @@ src/
 │   ├── pipeline.rs     PNG/DDS import (BC7 default or RGBA8 via ImportTextureFormat), format-preserving replace, DDS export
 │   └── dict_builder.rs Patricia-trie builder for _DIC
 ├── bflan.rs            BFLAN parse/write (verbatim sections, byte-identical) + pat1/pai1 inspect
-├── byml/               BYML (binary YAML) read + round-trip + structural diff
+├── byml/               BYML (binary YAML) read + round-trip + diff + scalar edit
 │   ├── mod.rs          Byml value enum, BymlDocument, node-type constants
 │   ├── read.rs         Parser (both endians, v1..=7; bounds-checked, depth-guarded)
 │   ├── write.rs        Verbatim writer + from-scratch canonical writer
 │   ├── diff.rs         Path-keyed structural diff of two Byml trees
-│   └── error.rs        BymlError (offset / node-type / index context)
+│   ├── edit.rs         Scalar mutation by path (set_by_path + ScalarType) for byml-set
+│   └── error.rs        BymlError (offset / node-type / index / path-edit context)
 ├── compression/
 │   ├── mod.rs          Codec detect + decompress/compress entry points (Cow passthrough)
 │   ├── zstd.rs         libzstd wrapper + pure-Rust frame-header dict-id parser
@@ -129,7 +130,12 @@ src/
   byte-identity is not its contract). `diff_byml` / `byml-diff` give a
   path-keyed structural diff (matching hashes by key, arrays by index) — on
   real `ActorInfo.121`→`.143` it surfaces +8212/−8249/~79401 changes
-  (added actors, heap-size tweaks, an f32 precision shift).
+  (added actors, heap-size tweaks, an f32 precision shift). `set_by_path`
+  (`byml-set`) edits a scalar leaf addressed by a diff-style path
+  (`/RecipeList/0/ResultActorName`) — type-preserving by default, `--type` to
+  override the kind or promote a `null` — then canonical-writes; verified on
+  real `CookingTable` (a one-leaf edit yields **exactly one** structural diff,
+  the rest of the tree untouched).
 - **RESTBL** (Resource Size Table): TotK `RESTBL` v1 (`System/Resource/
   ResourceSizeTable.Product.NNN.rsizetable.zs`). A fixed deterministic layout
   (22-byte header + CRC table `{hash,size}` sorted by hash + a 160-byte-name
@@ -169,7 +175,7 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 63): the `verbs`
+- **Library unit tests** (`cargo test --lib`, 74): the `verbs`
   `--texture-format` alias/`--srgb` resolver, plus `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
@@ -184,9 +190,13 @@ src/
   for the new formats + canonical ASTC DXGI codes), and `byml` (a
   hand-built minimal little-endian array decodes to the right inline
   scalars + writes back verbatim; bad-magic / too-small / truncated-node
-  rejection; the **canonical writer** round-trips a tree of every node kind
+  rejection;   the **canonical writer** round-trips a tree of every node kind
   in both endians + rejects a scalar root; the **diff** detects
-  add/remove/change + nested-path / type changes), and `restbl` (CRC-32
+  add/remove/change + nested-path / type changes; **`set_by_path`** sets a
+  nested hash / array leaf type-preserving, via a `--type` override, and from
+  hex `u32`, and rejects every bad path/value (unknown key, index out of range,
+  descend-through-scalar, container target, unparseable value/type)), and
+  `restbl` (CRC-32
   `0xCBF43926` check value; build → byte-identical write → read; get/set/
   insert by hash / name / path keeps the tables sorted), and `msbt` (a
   hand-built minimal LE/UTF-16 file with a 2-label `LBL1` + 2-message `TXT2`
@@ -221,6 +231,12 @@ src/
   remove one nested key) yields exactly those three diff entries at the
   expected paths; and (when both present) `ActorInfo.121`↔`.143` differ with
   a mirror-image reverse diff.
+- `tests/byml_set.rs` — fixture-gated. Edits a real `CookingTable` scalar via
+  `set_by_path` (a type-preserving string, a type-preserving numeric, and a
+  `--type` override string→u32), canonical-writes, re-reads, and asserts the
+  result differs from the original by **exactly one** structural diff at the
+  targeted path — the core safety property that a single edit doesn't perturb
+  the rest of the tree.
 - `tests/msbt_roundtrip.rs` — fixture-gated (skips without
   `tests/fixtures/msbt/`). Reads every `.msbt`, decodes each message's chunks,
   and asserts `write_msbt` reproduces the input **byte-identically**; pins the
@@ -392,7 +408,7 @@ src/
 | TotK BNTX (v`0x00040100`) + ASTC / low-bpp formats | Resolved | Read/write/decode for `0x00040100`, full ASTC LDR family (4x4–12x12), R8/R8G8, B8G8R8A8 (`0x0c01`). TotK `__Combined.bntx` round-trips byte-identically. Decode/round-trip only (no ASTC/low-bpp **encoder** yet) — see `todo.md`. |
 | HDR `info_melee` B8G8R8A8 pack not byte-identical | Low | C#-tool non-uniform BRTI spacing (same class as `sgpo_one_pane_png_proof`). Parses + decodes; semantic round-trip tested. |
 | In-tool ZSTD+dict / Yaz0 decompression | Resolved | `compression` module: zstd (+ TotK dicts via `ZsDic.pack.zs`) decode **byte-identical to Python 3.14 `compression.zstd`**; native Yaz0/Yaz1; verbs `decompress`/`compress`/`archive-extract`; compression-aware `layout-audit --dict/--romfs`. Re-compression is lossless, not container-identical (expected). |
-| BYML canonical (from-scratch) writer | Resolved | `write_byml_canonical` emits sorted/deduped string tables + BFS node layout with back-patched offsets; **semantically lossless** on the real corpus (both endians, ≤12.7 MB). Not byte-identical to Nintendo by contract (writer-specific layout), though it matches several files' exact size. `byml-diff` added. Mutation-by-path (`byml-set`) is a future follow-up. |
+| BYML canonical (from-scratch) writer | Resolved | `write_byml_canonical` emits sorted/deduped string tables + BFS node layout with back-patched offsets; **semantically lossless** on the real corpus (both endians, ≤12.7 MB). Not byte-identical to Nintendo by contract (writer-specific layout), though it matches several files' exact size. `byml-diff` + `byml-set` (scalar mutation-by-path → canonical write) added. Add/remove-by-path remains a follow-up. |
 | BOTW `RSTB` (older magic) | Not implemented | Only TotK `RESTBL` v1 is implemented (read/write/update byte-identical, real fixtures). BOTW's `RSTB` header differs (no version / `string_block_size`; 128-byte names) — a follow-up when BOTW fixtures are available. |
 | In-game runtime validation on Switch hardware | High value | Untestable without hardware. |
 | v9 BFLYT 60-byte material extension (flag bit 19) | Low | Captured verbatim; can't construct from scratch (unspec'd). User accepted this gap. |
@@ -419,11 +435,12 @@ src/
 ## TODO / roadmap
 
 The **live, prioritized backlog lives in `todo.md`** — read it first for
-current work. Status snapshot: `origin/main` is at **71fe57c** (RESTBL), on top
-of `aa7d166` (BYML canonical writer + `byml-diff`), `686ad53` (BYML
-read/inspect/round-trip), `bff4757`, `14e5991`, `f46788c`, `bd454c7`,
-`a36c07c` — all pushed. This session adds **MSBT (Stage A)** read + verbatim
-round-trip on top (committed, unpushed) — see the top Session log entry:
+current work. Status snapshot: `origin/main` is at **e7594cb** (MSBT JSON
+export/import), on top of `3bbdfb3`/`df26ede` (MSBT canonical writer + read),
+`71fe57c` (RESTBL), `aa7d166`/`686ad53` (BYML) — all pushed (the 3 MSBT commits
+the prior handoff flagged as unpushed are now in sync with the remote). This
+session adds **`byml-set`** (BYML scalar mutation-by-path) on top — see the top
+Session log entry:
 
 - ✅ **Prior 7-item handoff** (bntx export-png/all, format-preserving
   replace, DDS export/import/replace, layout-apply-arc, layout-diff,
@@ -453,8 +470,9 @@ round-trip on top (committed, unpushed) — see the top Session log entry:
   container name by value (fixes non-slot-1 string pools).
 - ✅ **BYAML/BYML** (this session): read + `byml-inspect` + verbatim
   byte-identical round-trip (686ad53) **plus** the from-scratch canonical
-  writer (semantically lossless) + `byml-diff` (aa7d166). Only mutation-by-
-  path (`byml-set`) is left as a future follow-up.
+  writer (semantically lossless) + `byml-diff` (aa7d166). Scalar
+  mutation-by-path (`byml-set`) added this session; add/remove-by-path remains
+  a follow-up.
 - ✅ **RSTB/RESTBL** (commit 71fe57c): TotK `RESTBL` v1 read/write
   (byte-identical) + CRC-32 path lookup + size update/insert; verbs
   `restbl-inspect`/`restbl-roundtrip-test`/`restbl-set`. BOTW `RSTB` (older
@@ -466,10 +484,22 @@ round-trip on top (committed, unpushed) — see the top Session log entry:
   `msbt-inspect`/`msbt-roundtrip-test`/`msbt-export-json`/`msbt-import-json`
   (translation-editing workflow). BOTW/older versions + `ATR1`/`TSY1`
   structural decode are follow-ups.
-- ▶️ **Next** (see `todo.md`, recommended order): AAMP → BFLYT advanced
-  mutations → layout-repair → BFRES inspect-only → project workflow. (Smaller
-  follow-ups under Hardening: ASTC/low-bpp **encode**, BYML `byml-set`
-  mutation, BOTW `RSTB`, MSBT `ATR1`/older versions.)
+- ✅ **`byml-set`** (this session, committed): BYML scalar mutation-by-path —
+  new `src/byml/edit.rs` (`set_by_path` + `ScalarType` + `SetReport`,
+  type-preserving by default or `--type` override / `null` promotion; refuses
+  to clobber containers/binary or descend through scalars) → re-serialize with
+  `write_byml_canonical`. Verb `byml-set` (path/value/`--type`, inflates
+  `.byml.zs`, writes uncompressed). 11 unit + 3 fixture-gated tests
+  (`tests/byml_set.rs`: a real `CookingTable` edit = exactly one structural
+  diff). Add/remove-by-path is the remaining BYML follow-up.
+- ▶️ **Next** (see `todo.md`): **AAMP is blocked on fixtures** — TotK is 100%
+  BYML (`.bgyml`); a full romfs extension scan **and** cracking an actor pack
+  (`Pack/Actor/*.pack.zs`) found **zero** AAMP — its actor params are all
+  `YB`/BYML + `.ainb`. AAMP needs a **BOTW** dump (AAMP lives in BOTW actor
+  packs) or a Python `oead` byte oracle before the disciplined read→round-trip
+  pass. Otherwise: BFLYT advanced mutations → layout-repair → BFRES
+  inspect-only → project workflow. (Smaller Hardening follow-ups: ASTC/low-bpp
+  **encode**, BYML add/remove-by-path, BOTW `RSTB`, MSBT `ATR1`/older versions.)
 
 Standing backlog (no owner):
 
@@ -478,6 +508,44 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-05-31 — BYML `byml-set` (scalar mutation-by-path) + AAMP fixture finding
+Picked up the AAMP handoff (roadmap #2). **Investigation result that reframes
+AAMP:** Tears of the Kingdom does **not** use AAMP — every parameter file is
+BYML (`.bgyml`). A full recursive romfs scan for ~21 AAMP extensions
+(`.baiprog`/`.bphysics`/`.bgparamlist`/…) found **none**, and cracking a real
+actor pack (`Pack/Actor/Accessory_Battery.pack.zs`) showed all 18 entries are
+`YB`/BYML + `.ainb` (AI Node Binary) — zero AAMP. AAMP is a **BOTW-era** format;
+with no AAMP fixtures locally it can't meet the project's real-bytes
+round-trip bar. The full AAMP v2 spec is captured (header at 0x30; list/object/
+param node layout with `>>2` relative offsets; the 21 `ParameterType`s; CRC32
+keys), and the plan maps onto the BYML two-writer discipline — **queued pending
+a BOTW dump (its actor packs) or a Python `oead` byte oracle.**
+
+Pivoted to the **`byml-set`** BYML follow-up (highest TotK-editing value: TotK
+params are all BYML, and the reader + canonical writer + diff already exist).
+New **`src/byml/edit.rs`**: `set_by_path(root, path, raw, ty)` edits a single
+scalar leaf addressed by a `byml-diff`-style path (`/RecipeList/0/ResultActorName`;
+hash keys by name, arrays by index, leading slash optional). The target type is
+**preserved** by default (editing an `f32` keeps it `f32`); `--type` overrides
+the kind (`bool`/`s32`/`u32`/`f32`/`s64`/`u64`/`f64`/`string`/`null`) or promotes
+a `null`. It **refuses** to clobber a container/binary node or descend through a
+scalar, so a typo can't silently delete a subtree. `u32`/`u64` accept `0x` hex.
+Then `write_byml_canonical` re-serializes (semantically lossless — re-parses to
+the mutated tree, not byte-identical by contract). New `ScalarType` + `SetReport`
++ 8 new `BymlError` edit variants; exported from `byml` + the prelude.
+
+Verb **`byml-set`** (`-i`/`-o`/`--path`/`--value`/`--type`, inflates `.byml.zs`
+via `--dict`/`--romfs`, writes uncompressed). Verified end-to-end on real
+`CookingTable`: `byml-set … --path /RecipeList/0/ResultActorName --value
+Item_Cook_TEST` then `byml-diff` reports **+0 −0 ~1** (exactly the one leaf).
+Tests: 11 fixture-free unit tests in `byml::edit` (nested/array set,
+type-preserve, `--type` override, hex u32, and every rejection path) +
+`tests/byml_set.rs` (3 fixture-gated: a real `CookingTable` string + numeric +
+type-override edit each canonical-round-trip to **exactly one** structural diff
+at the target). `cargo test` green (**74** lib unit + all integration);
+`clippy --all-targets` clean; `--no-default-features` builds.
+**Follow-up:** add/remove-by-path (create a new key / append / delete).
 
 ### 2026-05-31 — MSBT (LibMessageStudio message) read + round-trip + JSON edit (Stages A+B)
 Roadmap item: the text/message format. TotK ships localized text in

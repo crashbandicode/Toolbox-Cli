@@ -126,8 +126,8 @@ fn byml_eq(a: &Byml, b: &Byml) -> bool {
 }
 
 /// A short, one-line summary of a value (scalars in full; containers as a
-/// kind + size).
-fn summary(v: &Byml) -> String {
+/// kind + size). Shared with [`super::edit`] for its edit reports.
+pub(crate) fn summary(v: &Byml) -> String {
     match v {
         Byml::Null => "null".to_string(),
         Byml::Bool(b) => format!("bool({b})"),
