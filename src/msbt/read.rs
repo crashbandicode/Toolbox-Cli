@@ -29,6 +29,7 @@ pub fn read_msbt(data: &[u8]) -> Result<MsbtDocument> {
     let section_count = read_u16(data, 0x0E, big_endian)? as usize;
 
     let mut sections = Vec::with_capacity(section_count);
+    let mut lbl1_groups = 0u32;
     let mut off = HEADER_LEN;
     for index in 0..section_count {
         if off + SECTION_HEADER_LEN > data.len() {
@@ -53,7 +54,13 @@ pub fn read_msbt(data: &[u8]) -> Result<MsbtDocument> {
         }
         let body_bytes = &data[body..body + size];
         let payload = match &magic {
-            b"LBL1" => SectionData::Labels(read_lbl1(body_bytes, big_endian)?),
+            b"LBL1" => {
+                let (labels, groups) = read_lbl1(body_bytes, big_endian)?;
+                if lbl1_groups == 0 {
+                    lbl1_groups = groups;
+                }
+                SectionData::Labels(labels)
+            }
             b"TXT2" => SectionData::Text(read_txt2(body_bytes, big_endian)?),
             _ => SectionData::Opaque(body_bytes.to_vec()),
         };
@@ -72,6 +79,7 @@ pub fn read_msbt(data: &[u8]) -> Result<MsbtDocument> {
         encoding,
         version,
         sections,
+        lbl1_groups,
         raw: data.to_vec(),
     })
 }
@@ -80,7 +88,7 @@ pub fn read_msbt(data: &[u8]) -> Result<MsbtDocument> {
 /// `{count, offset}`, with the label entries (`len`-prefixed ASCII name +
 /// `u32` message index) living at the bucket offsets (relative to the section
 /// body start).
-fn read_lbl1(body: &[u8], big_endian: bool) -> Result<Vec<Label>> {
+fn read_lbl1(body: &[u8], big_endian: bool) -> Result<(Vec<Label>, u32)> {
     if body.len() < 4 {
         return Err(MsbtError::Truncated {
             offset: 0,
@@ -125,7 +133,7 @@ fn read_lbl1(body: &[u8], big_endian: bool) -> Result<Vec<Label>> {
             p = idx_start + 4;
         }
     }
-    Ok(labels)
+    Ok((labels, ngroups as u32))
 }
 
 /// Decode a `TXT2` section body: a `u32` count, a table of `u32` offsets
@@ -330,6 +338,22 @@ mod tests {
 
         // Verbatim writer reproduces the input byte-for-byte.
         assert_eq!(write_msbt(&doc).unwrap(), bytes);
+    }
+
+    #[test]
+    fn canonical_writer_semantic_round_trips() {
+        let bytes = minimal_msbt();
+        let doc = read_msbt(&bytes).expect("parse");
+        // The canonical writer rebuilds from the decoded sections; re-reading
+        // it must yield the same labels + messages (semantic round-trip), even
+        // though the bytes need not match the input.
+        let rebuilt = write_msbt_canonical(&doc).expect("canonical write");
+        let doc2 = read_msbt(&rebuilt).expect("re-parse canonical");
+        assert_eq!(doc2.labels(), doc.labels());
+        assert_eq!(doc2.messages(), doc.messages());
+        assert_eq!(doc2.entries(), doc.entries());
+        // Single group in the source -> the rebuilt file preserves the count.
+        assert_eq!(doc2.lbl1_groups, doc.lbl1_groups);
     }
 
     #[test]

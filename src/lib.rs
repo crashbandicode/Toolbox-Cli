@@ -105,7 +105,7 @@ pub mod prelude {
         ValidateReport,
     };
     pub use crate::manifest::{SkinElement, SkinManifest};
-    pub use crate::msbt::{read_msbt, write_msbt, MsbtDocument, TextChunk};
+    pub use crate::msbt::{read_msbt, write_msbt, write_msbt_canonical, MsbtDocument, TextChunk};
     pub use crate::restbl::{read_restbl, write_restbl, Restbl, SetOutcome};
     pub use crate::texpipe::Bc7Quality;
     pub use crate::{sarc, Error, Result};

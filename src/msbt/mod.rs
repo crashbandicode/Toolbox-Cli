@@ -31,7 +31,7 @@ mod write;
 
 pub use error::{MsbtError, Result};
 pub use read::read_msbt;
-pub use write::write_msbt;
+pub use write::{write_msbt, write_msbt_canonical};
 
 /// MSBT section header magic + size fields occupy a fixed 0x10 bytes; the
 /// section body follows immediately after.
@@ -204,6 +204,10 @@ pub struct MsbtDocument {
     pub version: u8,
     /// Sections in file order.
     pub sections: Vec<Section>,
+    /// The `LBL1` hash-bucket count captured at read time (0 if no `LBL1`).
+    /// The canonical writer rehashes labels into this many buckets so the
+    /// rebuilt table matches the game's lookup convention.
+    pub(crate) lbl1_groups: u32,
     /// The original file bytes, used for the verbatim [`write_msbt`] path.
     pub(crate) raw: Vec<u8>,
 }
@@ -315,6 +319,17 @@ fn decode_utf16_chunks(raw: &[u8], big_endian: bool) -> Vec<TextChunk> {
     }
     flush(&mut text, &mut chunks);
     chunks
+}
+
+/// The LMS label hash: `h = h*0x492 + byte` (wrapping u32) over the label's
+/// ASCII bytes. The bucket is `hash % group_count`. Verified against the whole
+/// TotK `Mals` corpus (every label lands in the bucket it is stored under).
+pub(crate) fn label_hash(name: &str) -> u32 {
+    let mut h: u32 = 0;
+    for b in name.bytes() {
+        h = h.wrapping_mul(0x492).wrapping_add(b as u32);
+    }
+    h
 }
 
 /// Drop a trailing single-byte NUL terminator (UTF-8 messages).

@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nx_layout_toolbox::msbt::{read_msbt, write_msbt, Encoding};
+use nx_layout_toolbox::msbt::{read_msbt, write_msbt, write_msbt_canonical, Encoding};
 
 fn msbt_dir() -> &'static Path {
     Path::new("tests/fixtures/msbt")
@@ -72,6 +72,45 @@ fn msbt_corpus_round_trips_byte_identically() {
         fixtures.len(),
         total_labels,
         total_messages
+    );
+}
+
+#[test]
+fn canonical_writer_semantic_round_trips_corpus() {
+    let fixtures = msbt_fixtures();
+    if fixtures.is_empty() {
+        eprintln!("skipping: no fixtures under {}", msbt_dir().display());
+        return;
+    }
+
+    let mut byte_identical = 0usize;
+    for path in &fixtures {
+        let original = std::fs::read(path).expect("read fixture");
+        let doc = read_msbt(&original).expect("parse");
+
+        let rebuilt = write_msbt_canonical(&doc)
+            .unwrap_or_else(|e| panic!("canonical write {}: {e}", path.display()));
+        let doc2 = read_msbt(&rebuilt)
+            .unwrap_or_else(|e| panic!("re-parse canonical {}: {e}", path.display()));
+
+        // Semantic round-trip: labels + messages + label->message pairing match.
+        assert_eq!(doc2.labels(), doc.labels(), "labels differ for {}", path.display());
+        assert_eq!(
+            doc2.messages(),
+            doc.messages(),
+            "messages differ for {}",
+            path.display()
+        );
+        assert_eq!(doc2.entries(), doc.entries(), "entries differ for {}", path.display());
+
+        if rebuilt == original {
+            byte_identical += 1;
+        }
+    }
+    eprintln!(
+        "MSBT canonical writer: {}/{} fixture(s) also byte-identical",
+        byte_identical,
+        fixtures.len()
     );
 }
 
