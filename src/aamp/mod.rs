@@ -35,10 +35,12 @@
 //! original bytes and [`write_aamp`] re-emits them **verbatim** — byte-identical
 //! by construction for an unmodified document.
 
+mod edit;
 mod error;
 mod read;
 mod write;
 
+pub use edit::{set_by_path, SetReport};
 pub use error::{AampError, Result};
 pub use read::read_aamp;
 pub use write::{write_aamp, write_aamp_canonical};
@@ -188,6 +190,27 @@ pub enum Value {
 }
 
 impl Value {
+    /// A short, one-line summary of the value (for inspect / edit reports).
+    pub fn summary(&self) -> String {
+        match self {
+            Value::Bool(b) => format!("bool({b})"),
+            Value::F32(x) => format!("f32({x})"),
+            Value::Int(i) => format!("int({i})"),
+            Value::U32(u) => format!("u32({u})"),
+            Value::Vec2(a) => format!("vec2({}, {})", a[0], a[1]),
+            Value::Vec3(a) => format!("vec3({}, {}, {})", a[0], a[1], a[2]),
+            Value::Vec4(a) => format!("vec4({}, {}, {}, {})", a[0], a[1], a[2], a[3]),
+            Value::Color(a) => format!("color({}, {}, {}, {})", a[0], a[1], a[2], a[3]),
+            Value::Quat(a) => format!("quat({}, {}, {}, {})", a[0], a[1], a[2], a[3]),
+            Value::Str { ty, value } => format!("{}({value:?})", ty.label()),
+            Value::Curve { ty, raw } => format!("{}[{} bytes]", ty.label(), raw.len()),
+            Value::BufferInt(v) => format!("buffer_int[{}]", v.len()),
+            Value::BufferF32(v) => format!("buffer_f32[{}]", v.len()),
+            Value::BufferU32(v) => format!("buffer_u32[{}]", v.len()),
+            Value::BufferBinary(v) => format!("buffer_binary[{} bytes]", v.len()),
+        }
+    }
+
     /// The [`ParamType`] tag this value serializes as.
     pub fn param_type(&self) -> ParamType {
         match self {

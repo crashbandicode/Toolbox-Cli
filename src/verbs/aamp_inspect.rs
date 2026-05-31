@@ -98,27 +98,6 @@ pub fn run(args: Args) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// A short, one-line summary of a value.
-fn value_summary(v: &Value) -> String {
-    match v {
-        Value::Bool(b) => format!("bool({b})"),
-        Value::F32(x) => format!("f32({x})"),
-        Value::Int(i) => format!("int({i})"),
-        Value::U32(u) => format!("u32({u})"),
-        Value::Vec2(a) => format!("vec2({}, {})", a[0], a[1]),
-        Value::Vec3(a) => format!("vec3({}, {}, {})", a[0], a[1], a[2]),
-        Value::Vec4(a) => format!("vec4({}, {}, {}, {})", a[0], a[1], a[2], a[3]),
-        Value::Color(a) => format!("color({}, {}, {}, {})", a[0], a[1], a[2], a[3]),
-        Value::Quat(a) => format!("quat({}, {}, {}, {})", a[0], a[1], a[2], a[3]),
-        Value::Str { ty, value } => format!("{}({value:?})", ty.label()),
-        Value::Curve { ty, raw } => format!("{}[{} bytes]", ty.label(), raw.len()),
-        Value::BufferInt(v) => format!("buffer_int[{}]", v.len()),
-        Value::BufferF32(v) => format!("buffer_f32[{}]", v.len()),
-        Value::BufferU32(v) => format!("buffer_u32[{}]", v.len()),
-        Value::BufferBinary(v) => format!("buffer_binary[{} bytes]", v.len()),
-    }
-}
-
 fn print_list(l: &ParameterList, depth: usize, resolve: &impl Fn(u32) -> String, name: &str) {
     let pad = "  ".repeat(depth);
     println!("{pad}list {name} ({} obj, {} list)", l.objects.len(), l.lists.len());
@@ -127,7 +106,7 @@ fn print_list(l: &ParameterList, depth: usize, resolve: &impl Fn(u32) -> String,
         println!("{pad2}obj {} ({} param)", resolve(o.name_hash), o.params.len());
         let pad3 = "  ".repeat(depth + 2);
         for p in &o.params {
-            println!("{pad3}{} = {}", resolve(p.name_hash), value_summary(&p.value));
+            println!("{pad3}{} = {}", resolve(p.name_hash), p.value.summary());
         }
     }
     for child in &l.lists {
