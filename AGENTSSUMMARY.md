@@ -69,6 +69,11 @@ src/
 ├── texpipe.rs          PNG → BC7/BC1/BC3/BC4/BC5 (intel_tex_2) → Tegra swizzle
 ├── dds.rs              DDS (DX10) read/write; DXGI↔TextureFormat; interchange
 ├── restbl.rs           RESTBL (Resource Size Table) read/write (byte-identical) + CRC-32 lookup/update
+├── msbt/               MSBT (LibMessageStudio message) read + verbatim round-trip
+│   ├── mod.rs          MsbtDocument, Section/SectionData, Label, Message + UTF-16 tag-aware chunk decoder
+│   ├── read.rs         Parser (header + section walk; LBL1 hash table + TXT2 offsets, bounds-checked)
+│   ├── write.rs        Verbatim writer (byte-identical round-trip)
+│   └── error.rs        MsbtError (offset / section / index context)
 ├── sarc/               Native SARC read+write (no `sarc` crate); crate-extractable
 │   ├── mod.rs          Public API, ArcFile/ArcEntry/UnpackedFile, format constants
 │   ├── read.rs         Reader (header/SFAT/SFNT, bounds-checked) — pure std
@@ -135,6 +140,17 @@ src/
   search), so a mod can update a resource's reserved size (`restbl-set`) —
   the thing needed to repack without crashing. BOTW's older `RSTB` magic
   (128-byte names, no version field) is a follow-up (no fixtures locally).
+- **MSBT** (LibMessageStudio message): TotK `Mals/*.sarc.zs` ships a SARC of
+  `.msbt` text files (`MsgStdBn`; LE / UTF-16 / v3 / `LBL1`+`TXT2`). The reader
+  decodes the header, the `LBL1` label→message-index hash table, and the
+  `TXT2` UTF-16 messages (a tag-aware chunk decoder splits literal text from
+  the `0x000E` open / `0x000F` close control tags; `\n`/`\t` stay literal);
+  other section magics (`ATR1`/`NLI1`/`TSY1`/…) are retained opaque. `write_msbt`
+  re-emits the bytes captured at parse time, so an unmodified file is
+  **byte-identical** by construction — verified on **all 1510 USen + 1510
+  JPja** `Mals` `.msbt` (every one byte-identical, zero parse errors), so the
+  parser provably walks every section/label/message. JSON export/import + a
+  from-scratch canonical writer (for edits) are the Stage B follow-up.
 - **Compression**: zstd decode is **byte-identical to Python 3.14's
   `compression.zstd`** on real TotK `Boot.blarc.zs` (id-1 dict) and
   `AI.Global…pack.zs` (id-3 dict, 3.9 MB → 25 MB). Containers can't be
@@ -146,7 +162,7 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 55): the `verbs`
+- **Library unit tests** (`cargo test --lib`, 60): the `verbs`
   `--texture-format` alias/`--srgb` resolver, plus `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
@@ -165,7 +181,11 @@ src/
   in both endians + rejects a scalar root; the **diff** detects
   add/remove/change + nested-path / type changes), and `restbl` (CRC-32
   `0xCBF43926` check value; build → byte-identical write → read; get/set/
-  insert by hash / name / path keeps the tables sorted). These run with no
+  insert by hash / name / path keeps the tables sorted), and `msbt` (a
+  hand-built minimal LE/UTF-16 file with a 2-label `LBL1` + 2-message `TXT2`
+  — one message carrying a `0x000E` tag — decodes to the right
+  labels/messages/chunks and writes back verbatim; bad-magic / bad-BOM /
+  too-small / section-overrun rejection). These run with no
   fixtures — the format-code tests are the
   correctness net for the ASTC family / BYML reader we can't fully
   fixture-cover on CI.
@@ -191,6 +211,14 @@ src/
   remove one nested key) yields exactly those three diff entries at the
   expected paths; and (when both present) `ActorInfo.121`↔`.143` differ with
   a mirror-image reverse diff.
+- `tests/msbt_roundtrip.rs` — fixture-gated (skips without
+  `tests/fixtures/msbt/`). Reads every `.msbt`, decodes each message's chunks,
+  and asserts `write_msbt` reproduces the input **byte-identically**; pins the
+  structure of `Info_BuildHouse` (4 labels / 4 messages, `Name` →
+  "Home on Arrange") and `Npc` (labels == messages, every label index
+  resolves). Locally the corpus is the 4 sampled USen files; the full 1510
+  USen + 1510 JPja corpus was round-tripped via `msbt-roundtrip-test` (all
+  byte-identical).
 - `tests/restbl_roundtrip.rs` — fixture-gated. Inflates the real TotK
   `ResourceSizeTable.Product.{121,143}.…rsizetable.zs` and asserts each
   re-serializes **byte-identically** with sorted CRC + name tables; pins the
@@ -379,11 +407,11 @@ src/
 ## TODO / roadmap
 
 The **live, prioritized backlog lives in `todo.md`** — read it first for
-current work. Status snapshot: `origin/main` is at **aa7d166** (BYML canonical
-writer + `byml-diff`), on top of `686ad53` (BYML read/inspect/round-trip),
-`bff4757`, `14e5991`, `f46788c`, `bd454c7`, `a36c07c` — all pushed. This
-session also adds **RESTBL** (read/write/update) on top — see the top three
-Session log entries:
+current work. Status snapshot: `origin/main` is at **71fe57c** (RESTBL), on top
+of `aa7d166` (BYML canonical writer + `byml-diff`), `686ad53` (BYML
+read/inspect/round-trip), `bff4757`, `14e5991`, `f46788c`, `bd454c7`,
+`a36c07c` — all pushed. This session adds **MSBT (Stage A)** read + verbatim
+round-trip on top (committed, unpushed) — see the top Session log entry:
 
 - ✅ **Prior 7-item handoff** (bntx export-png/all, format-preserving
   replace, DDS export/import/replace, layout-apply-arc, layout-diff,
@@ -415,12 +443,16 @@ Session log entries:
   byte-identical round-trip (686ad53) **plus** the from-scratch canonical
   writer (semantically lossless) + `byml-diff` (aa7d166). Only mutation-by-
   path (`byml-set`) is left as a future follow-up.
-- ✅ **RSTB/RESTBL** (this session): TotK `RESTBL` v1 read/write
+- ✅ **RSTB/RESTBL** (commit 71fe57c): TotK `RESTBL` v1 read/write
   (byte-identical) + CRC-32 path lookup + size update/insert; verbs
   `restbl-inspect`/`restbl-roundtrip-test`/`restbl-set`. BOTW `RSTB` (older
   magic) is a follow-up.
-- ▶️ **Next** (see `todo.md`, recommended order): MSBT → AAMP → BFLYT
-  advanced mutations → layout-repair → BFRES inspect-only → project
+- ✅ **MSBT (Stage A)** (this session, committed/unpushed): `src/msbt/` read +
+  verbatim byte-identical round-trip (all 1510 USen + 1510 JPja `Mals` `.msbt`)
+  + verbs `msbt-inspect`/`msbt-roundtrip-test`. Stage B (JSON export/import +
+  canonical writer for edits) is the follow-up.
+- ▶️ **Next** (see `todo.md`, recommended order): MSBT **Stage B** → AAMP →
+  BFLYT advanced mutations → layout-repair → BFRES inspect-only → project
   workflow. (Smaller follow-ups under Hardening: ASTC/low-bpp **encode**,
   BYML `byml-set` mutation, BOTW `RSTB`.)
 
@@ -431,6 +463,42 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-05-31 — MSBT (LibMessageStudio message) read + verbatim round-trip (Stage A)
+Roadmap item: the text/message format. TotK ships localized text in
+`Mals/<lang>.Product.NNN.sarc.zs` — a zstd SARC of `.msbt` files
+(`archive-extract --romfs <dump>` to get them).
+
+**Format (verified on real bytes; 1510 USen files all uniform).** `MsgStdBn`:
+0x20-byte header (magic + BOM at 0x08 picking endianness, `encoding` u8 / 0=UTF-8
+1=UTF-16 2=UTF-32, `version` u8, `section_count` u16, `file_size` u32), then
+sections each headed by `{magic[4], size u32, pad[8]}` and tail-padded with
+`0xAB` to 0x10. TotK uses LE / UTF-16 / v3 / `LBL1`+`TXT2`. `LBL1` = a hash
+table (`u32 ngroups`, `{count, offset}` buckets, then `{u8 len, ASCII name,
+u32 message-index}` entries). `TXT2` = `u32 count`, a `u32` offset table, then
+NUL-terminated UTF-16 messages with inline control tags: `0x000E` opens
+(group/type/size/payload), `0x000F` closes (group/type); literal `\n`/`\t`
+are ordinary text, not tags (confirmed by scanning the corpus — 95k newlines
+vs 104k real tags).
+
+**New `src/msbt/`** (`mod`/`read`/`write`/`error`, typed `MsbtError` via
+`#[from]`). Reader is bounds-checked + reports the failing offset; it decodes
+`LBL1` + `TXT2` (a tag-aware chunk decoder splits text from control tags) and
+keeps other section magics opaque. `write_msbt` re-emits the bytes captured at
+parse time → **byte-identical** for an unmodified file (the BYML/compression
+discipline). Verbs `msbt-inspect` (`--json`/`--limit`, inflates `.msbt.zs` via
+`--dict`/`--romfs`) + `msbt-roundtrip-test`.
+
+**Validation.** **All 1510 USen + 1510 JPja** `Mals` `.msbt` round-trip
+byte-identically (CJK + control tags + `é`-class UTF-16 all decode correctly).
+Tests: `tests/msbt_roundtrip.rs` (fixture-gated corpus byte-identical + pinned
+`Info_BuildHouse`/`Npc` structure) + 5 fixture-free unit tests (hand-built
+minimal MSBT with a tagged message; bad-magic/BOM/too-small/section-overrun
+rejection). `cargo test` green (60 lib unit + all integration); `clippy
+--all-targets` clean; `--no-default-features` builds. Fixtures (4 sampled USen
+files) under the gitignored `tests/fixtures/msbt/`. **Stage B follow-up:** JSON
+export/import (reversible tag escapes) + a from-scratch canonical writer for
+edits.
 
 ### 2026-05-31 — RESTBL (Resource Size Table) read + write + update
 Roadmap item #3. Lets a mod repack BOTW/TotK without crashing: if a modified
