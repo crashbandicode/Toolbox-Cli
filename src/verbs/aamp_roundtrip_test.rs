@@ -9,13 +9,19 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::aamp::{read_aamp, write_aamp};
+use crate::aamp::{read_aamp, write_aamp, write_aamp_canonical};
 use crate::compression;
 
 #[derive(Parser, Debug)]
 pub struct Args {
     #[arg(short, long)]
     input: PathBuf,
+
+    /// Test the from-scratch canonical writer's *semantic* round-trip
+    /// (read -> write_canonical -> read decodes to the same tree) instead of
+    /// the verbatim byte-identical round-trip.
+    #[arg(long)]
+    canonical: bool,
 
     /// Dictionary pack (for a compressed `.zs` input).
     #[arg(long)]
@@ -33,6 +39,27 @@ pub fn run(args: Args) -> Result<ExitCode> {
     let original = compression::decompress(&raw, &dicts).map_err(|e| anyhow!("{e}"))?;
 
     let doc = read_aamp(&original).map_err(|e| anyhow!("{e}"))?;
+
+    if args.canonical {
+        let rebuilt = write_aamp_canonical(&doc).map_err(|e| anyhow!("{e}"))?;
+        let doc2 = read_aamp(&rebuilt).map_err(|e| anyhow!("{e}"))?;
+        if doc.root == doc2.root && doc.pio_type == doc2.pio_type {
+            println!(
+                "OK: AAMP canonical semantic round-trip ({} -> {} bytes{})",
+                original.len(),
+                rebuilt.len(),
+                if rebuilt == *original {
+                    ", byte-identical"
+                } else {
+                    ""
+                },
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        println!("MISMATCH: canonical round-trip decodes to a different tree");
+        return Ok(ExitCode::from(1));
+    }
+
     let written = write_aamp(&doc);
 
     if written == *original {

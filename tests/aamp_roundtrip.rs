@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use nx_layout_toolbox::aamp::{read_aamp, write_aamp};
+use nx_layout_toolbox::aamp::{read_aamp, write_aamp, write_aamp_canonical};
 
 fn aamp_dir() -> &'static Path {
     Path::new("tests/fixtures/aamp")
@@ -36,6 +36,42 @@ fn every_aamp_fixture_round_trips_byte_identically() {
     }
     assert!(n >= 1, "expected at least one AAMP fixture in {}", dir.display());
     eprintln!("AAMP fixtures round-tripped byte-identically: {n}");
+}
+
+#[test]
+fn canonical_writer_semantic_round_trips_corpus() {
+    let dir = aamp_dir();
+    if !dir.exists() {
+        eprintln!("skipping (no {})", dir.display());
+        return;
+    }
+    let mut n = 0usize;
+    let mut byte_identical = 0usize;
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&p).unwrap();
+        if bytes.get(0..4) != Some(b"AAMP".as_slice()) {
+            continue;
+        }
+        let doc = read_aamp(&bytes).unwrap();
+        let rebuilt =
+            write_aamp_canonical(&doc).unwrap_or_else(|e| panic!("canonical {}: {e}", p.display()));
+        let doc2 =
+            read_aamp(&rebuilt).unwrap_or_else(|e| panic!("re-parse canonical {}: {e}", p.display()));
+        // Semantic round-trip: the rebuilt document decodes to the same tree.
+        assert_eq!(doc.root, doc2.root, "{} canonical tree mismatch", p.display());
+        assert_eq!(doc.pio_type, doc2.pio_type, "{} pio_type", p.display());
+        assert_eq!(doc.pio_version, doc2.pio_version, "{} pio_version", p.display());
+        if rebuilt == bytes {
+            byte_identical += 1;
+        }
+        n += 1;
+    }
+    assert!(n >= 1, "expected at least one AAMP fixture");
+    eprintln!("AAMP canonical semantic round-trip: {n} files ({byte_identical} also byte-identical)");
 }
 
 /// Pin the decoded structure of two known fixtures (counts = `(lists,
