@@ -6,8 +6,10 @@
 //! transform, and rename a material. They operate on the public [`BFLYT`]
 //! tree and return [`BflytError`] on validation failures.
 
+use std::collections::HashSet;
+
 use super::sections::PANE_NAME_LEN;
-use super::{BflytError, BFLYT, MAT_NAME_LEN_USIZE};
+use super::{BasePane, BflytError, Group, BFLYT, MAT_NAME_LEN_USIZE};
 
 /// Parameters for [`BFLYT::clone_pane`]. `None` overrides keep the
 /// template's value; children are never copied.
@@ -277,5 +279,395 @@ impl BFLYT {
             }
         }
         Ok(())
+    }
+
+    /// Detach the pane named `name` (and its subtree) from its parent and
+    /// return it. Errors if the pane doesn't exist or is the root pane (which
+    /// has no parent to detach from). Shared by [`remove_pane`](Self::remove_pane)
+    /// and [`move_pane`](Self::move_pane).
+    fn detach_pane(&mut self, name: &str) -> Result<BasePane, BflytError> {
+        if !self.pane_exists(name) {
+            return Err(BflytError::Format(format!("pane '{name}' not found")));
+        }
+        let parent_name = self.parent_pane_name(name).ok_or_else(|| {
+            BflytError::Format(format!(
+                "pane '{name}' is the root pane and cannot be removed or moved"
+            ))
+        })?;
+        let parent = self
+            .find_pane_mut(&parent_name)
+            .ok_or_else(|| BflytError::Format(format!("parent pane '{parent_name}' not found")))?;
+        let pos = parent
+            .children
+            .iter()
+            .position(|c| c.name == name)
+            .ok_or_else(|| {
+                BflytError::Format(format!("pane '{name}' not found under its parent"))
+            })?;
+        Ok(parent.children.remove(pos))
+    }
+
+    /// Remove the pane named `name` and its entire subtree, scrubbing the
+    /// removed pane names from every group's pane list. Returns the number of
+    /// panes removed (the subtree size). Errors if the pane is missing or is
+    /// the root pane.
+    pub fn remove_pane(&mut self, name: &str) -> Result<usize, BflytError> {
+        let removed = self.detach_pane(name)?;
+        let mut names = Vec::new();
+        collect_subtree_names(&removed, &mut names);
+        let count = names.len();
+        let set: HashSet<String> = names.into_iter().collect();
+        if let Some(g) = self.root_group.as_mut() {
+            remove_names_from_groups(g, &set);
+        }
+        Ok(count)
+    }
+
+    /// Reparent the pane named `name` under `new_parent`. Errors if either
+    /// pane is missing, if `name` is the root, if `new_parent` is `name`
+    /// itself, or if `new_parent` lives inside `name`'s own subtree (which
+    /// would create a cycle).
+    pub fn move_pane(&mut self, name: &str, new_parent: &str) -> Result<(), BflytError> {
+        if name == new_parent {
+            return Err(BflytError::Format("a pane cannot be its own parent".into()));
+        }
+        if !self.pane_exists(name) {
+            return Err(BflytError::Format(format!("pane '{name}' not found")));
+        }
+        if !self.pane_exists(new_parent) {
+            return Err(BflytError::Format(format!(
+                "new parent pane '{new_parent}' not found"
+            )));
+        }
+        // Cycle guard: the new parent must not live inside the moved subtree.
+        if let Some(subtree) = self.find_pane(name) {
+            if subtree.find(new_parent).is_some() {
+                return Err(BflytError::Format(format!(
+                    "cannot move '{name}' under '{new_parent}': '{new_parent}' is inside \
+                     '{name}'s own subtree"
+                )));
+            }
+        }
+        let pane = self.detach_pane(name)?;
+        let parent = self.find_pane_mut(new_parent).ok_or_else(|| {
+            BflytError::Format(format!("new parent pane '{new_parent}' not found"))
+        })?;
+        parent.children.push(pane);
+        Ok(())
+    }
+
+    /// Rename the pane `from` to `to`, updating any group pane-list
+    /// references. `to` must be non-empty, unique, and fit the 24-byte name
+    /// slot. Renaming a pane to its current name is a no-op.
+    pub fn rename_pane(&mut self, from: &str, to: &str) -> Result<(), BflytError> {
+        if to.is_empty() {
+            return Err(BflytError::Format("new pane name must not be empty".into()));
+        }
+        if to.len() > PANE_NAME_LEN {
+            return Err(BflytError::Format(format!(
+                "new pane name '{to}' is {} bytes (max {PANE_NAME_LEN})",
+                to.len()
+            )));
+        }
+        if from == to {
+            return Ok(());
+        }
+        if !self.pane_exists(from) {
+            return Err(BflytError::Format(format!("pane '{from}' not found")));
+        }
+        if self.pane_exists(to) {
+            return Err(BflytError::Format(format!(
+                "pane '{to}' already exists; refusing to create a duplicate"
+            )));
+        }
+        if let Some(p) = self.find_pane_mut(from) {
+            p.name = to.to_string();
+        }
+        if let Some(g) = self.root_group.as_mut() {
+            rename_in_groups(g, from, to);
+        }
+        Ok(())
+    }
+
+    /// Deep-copy the subtree rooted at `template` (children included) and
+    /// attach the copy under `parent` (default: the template's own parent).
+    /// The copied root is named `new_root_name` (default `template + suffix`)
+    /// and `suffix` is appended to every copied *descendant* name, so the
+    /// copy's names stay unique. Returns the number of panes copied. Errors if
+    /// any resulting name is empty, too long, collides within the copy, or
+    /// collides with an existing pane.
+    pub fn copy_subtree(
+        &mut self,
+        template: &str,
+        new_root_name: Option<&str>,
+        parent: Option<&str>,
+        suffix: &str,
+    ) -> Result<usize, BflytError> {
+        let src = self
+            .find_pane(template)
+            .ok_or_else(|| BflytError::Format(format!("template pane '{template}' not found")))?;
+        let target_parent = parent
+            .map(|s| s.to_string())
+            .or_else(|| self.parent_pane_name(template))
+            .unwrap_or_else(|| "RootPane".to_string());
+
+        let mut clone = src.clone();
+        clone.name = match new_root_name {
+            Some(n) => n.to_string(),
+            None => format!("{template}{suffix}"),
+        };
+        for child in &mut clone.children {
+            append_suffix_recursive(child, suffix);
+        }
+
+        // Validate the resulting names: each fits the slot, is unique within
+        // the copy, and doesn't collide with an existing pane. A typo can't
+        // produce an invalid or ambiguous tree.
+        let mut new_names = Vec::new();
+        collect_subtree_names(&clone, &mut new_names);
+        let mut seen: HashSet<&str> = HashSet::new();
+        for n in &new_names {
+            if n.is_empty() {
+                return Err(BflytError::Format(
+                    "a copied pane has an empty name (the subtree contains an unnamed/opaque \
+                     pane); copy a named subtree instead"
+                        .into(),
+                ));
+            }
+            if n.len() > PANE_NAME_LEN {
+                return Err(BflytError::Format(format!(
+                    "copied pane name '{n}' is {} bytes (max {PANE_NAME_LEN}); use a shorter suffix",
+                    n.len()
+                )));
+            }
+            if !seen.insert(n.as_str()) {
+                return Err(BflytError::Format(format!(
+                    "copied subtree would contain duplicate name '{n}'; choose a different suffix"
+                )));
+            }
+            if self.pane_exists(n) {
+                return Err(BflytError::Format(format!(
+                    "pane '{n}' already exists; choose a different name/suffix"
+                )));
+            }
+        }
+
+        let count = new_names.len();
+        let parent_node = self.find_pane_mut(&target_parent).ok_or_else(|| {
+            BflytError::Format(format!("parent pane '{target_parent}' not found"))
+        })?;
+        parent_node.children.push(clone);
+        Ok(count)
+    }
+}
+
+/// Collect this pane's name and all descendant names (depth-first).
+fn collect_subtree_names(pane: &BasePane, out: &mut Vec<String>) {
+    out.push(pane.name.clone());
+    for c in &pane.children {
+        collect_subtree_names(c, out);
+    }
+}
+
+/// Append `suffix` to this pane's name and every descendant's name.
+fn append_suffix_recursive(pane: &mut BasePane, suffix: &str) {
+    pane.name = format!("{}{}", pane.name, suffix);
+    for c in &mut pane.children {
+        append_suffix_recursive(c, suffix);
+    }
+}
+
+/// Remove any pane names in `names` from this group and its descendant groups.
+fn remove_names_from_groups(group: &mut Group, names: &HashSet<String>) {
+    group.panes.retain(|p| !names.contains(p));
+    for child in &mut group.children {
+        remove_names_from_groups(child, names);
+    }
+}
+
+/// Replace every `from` pane reference with `to` in this group and descendants.
+fn rename_in_groups(group: &mut Group, from: &str, to: &str) {
+    for p in &mut group.panes {
+        if p == from {
+            *p = to.to_string();
+        }
+    }
+    for child in &mut group.children {
+        rename_in_groups(child, from, to);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bflyt::{LayoutInfo, PaneKind};
+
+    /// A childless `pan1` with all-default fields and the given name.
+    fn leaf(name: &str) -> BasePane {
+        let mut p = BasePane::opaque(*b"pan1", Vec::new());
+        // `opaque()` is just a convenient all-zeroed constructor; turn it
+        // back into a real named pan1 node.
+        p.kind = PaneKind::Pane;
+        p.opaque = None;
+        p.name = name.to_string();
+        p
+    }
+
+    fn branch(name: &str, children: Vec<BasePane>) -> BasePane {
+        let mut p = leaf(name);
+        p.children = children;
+        p
+    }
+
+    /// RootPane > [A > [A1, A2], B]; a group references A, A1, B.
+    fn sample() -> BFLYT {
+        BFLYT {
+            version: 0x0800_0000,
+            layout: LayoutInfo {
+                draw_centered: false,
+                width: 100.0,
+                height: 100.0,
+                max_parts_width: 0.0,
+                max_parts_height: 0.0,
+                name: "test".into(),
+            },
+            textures: Vec::new(),
+            fonts: Vec::new(),
+            materials: Vec::new(),
+            root_pane: Some(branch(
+                "RootPane",
+                vec![branch("A", vec![leaf("A1"), leaf("A2")]), leaf("B")],
+            )),
+            root_group: Some(Group {
+                name: "RootGroup".into(),
+                panes: vec!["A".into(), "A1".into(), "B".into()],
+                children: Vec::new(),
+            }),
+            user_data: None,
+            control_data: None,
+            opaque_sections: Vec::new(),
+            trailing_sections: Vec::new(),
+        }
+    }
+
+    fn group_panes(b: &BFLYT) -> Vec<String> {
+        b.root_group.as_ref().unwrap().panes.clone()
+    }
+
+    #[test]
+    fn remove_pane_drops_subtree_and_scrubs_groups() {
+        let mut b = sample();
+        // Removing A drops A, A1, A2 (3 panes) and scrubs A, A1 from the group.
+        let n = b.remove_pane("A").unwrap();
+        assert_eq!(n, 3);
+        assert!(!b.pane_exists("A"));
+        assert!(!b.pane_exists("A1"));
+        assert!(!b.pane_exists("A2"));
+        assert!(b.pane_exists("B"));
+        assert_eq!(group_panes(&b), vec!["B".to_string()]);
+    }
+
+    #[test]
+    fn remove_pane_rejects_root_and_missing() {
+        let mut b = sample();
+        assert!(b.remove_pane("RootPane").is_err());
+        assert!(b.remove_pane("nope").is_err());
+    }
+
+    #[test]
+    fn move_pane_reparents() {
+        let mut b = sample();
+        b.move_pane("A1", "B").unwrap();
+        // A1 is no longer under A, and B now has it.
+        let a = b.find_pane("A").unwrap();
+        assert!(a.children.iter().all(|c| c.name != "A1"));
+        let bp = b.find_pane("B").unwrap();
+        assert!(bp.children.iter().any(|c| c.name == "A1"));
+    }
+
+    #[test]
+    fn move_pane_rejects_cycles_and_root() {
+        let mut b = sample();
+        // Can't move A under its own descendant A1.
+        assert!(b.move_pane("A", "A1").is_err());
+        // Can't move a pane under itself.
+        assert!(b.move_pane("A", "A").is_err());
+        // Can't move the root.
+        assert!(b.move_pane("RootPane", "A").is_err());
+    }
+
+    #[test]
+    fn rename_pane_updates_groups() {
+        let mut b = sample();
+        b.rename_pane("A1", "A1_new").unwrap();
+        assert!(!b.pane_exists("A1"));
+        assert!(b.pane_exists("A1_new"));
+        assert_eq!(
+            group_panes(&b),
+            vec!["A".to_string(), "A1_new".to_string(), "B".to_string()]
+        );
+    }
+
+    #[test]
+    fn rename_pane_rejects_duplicate_and_too_long() {
+        let mut b = sample();
+        assert!(b.rename_pane("A1", "B").is_err()); // duplicate
+        assert!(b.rename_pane("A1", &"x".repeat(PANE_NAME_LEN + 1)).is_err());
+        assert!(b.rename_pane("A1", "A1").is_ok()); // no-op
+    }
+
+    #[test]
+    fn copy_subtree_deep_copies_with_suffix() {
+        let mut b = sample();
+        // Copy A (+ A1, A2) under B with suffix "_c".
+        let n = b.copy_subtree("A", None, Some("B"), "_c").unwrap();
+        assert_eq!(n, 3);
+        assert!(b.pane_exists("A_c"));
+        assert!(b.pane_exists("A1_c"));
+        assert!(b.pane_exists("A2_c"));
+        // Originals untouched.
+        assert!(b.pane_exists("A") && b.pane_exists("A1"));
+        // The copy is attached under B.
+        let bp = b.find_pane("B").unwrap();
+        assert!(bp.children.iter().any(|c| c.name == "A_c"));
+        let copied_root = b.find_pane("A_c").unwrap();
+        assert_eq!(copied_root.children.len(), 2);
+    }
+
+    #[test]
+    fn copy_subtree_explicit_root_name() {
+        let mut b = sample();
+        b.copy_subtree("A", Some("Clone"), Some("RootPane"), "_2").unwrap();
+        assert!(b.pane_exists("Clone"));
+        assert!(b.pane_exists("A1_2"));
+    }
+
+    #[test]
+    fn copy_subtree_rejects_collisions() {
+        let mut b = sample();
+        // Empty suffix + descendants -> descendant names collide with originals.
+        assert!(b.copy_subtree("A", Some("A_root"), None, "").is_err());
+        // Explicit root name that already exists.
+        assert!(b.copy_subtree("A1", Some("B"), None, "_x").is_err());
+    }
+
+    /// A mutated tree must still serialize + re-parse with the new structure.
+    #[test]
+    fn ops_survive_write_read_round_trip() {
+        let mut b = sample();
+        b.rename_pane("B", "B_renamed").unwrap();
+        b.copy_subtree("A", Some("A_copy"), Some("RootPane"), "_cp").unwrap();
+        b.remove_pane("A2").unwrap();
+
+        let bytes = crate::bflyt::write_bflyt(&b).unwrap();
+        let back = crate::bflyt::read_bflyt(&bytes).unwrap();
+        assert!(back.pane_exists("B_renamed"));
+        assert!(back.pane_exists("A_copy"));
+        assert!(back.pane_exists("A1_cp") && back.pane_exists("A2_cp"));
+        // The original A2 is gone; the copy's A2_cp survives.
+        assert!(!back.pane_exists("A2"));
+        // A_copy keeps both copied children; the original A now has only A1.
+        assert_eq!(back.find_pane("A_copy").unwrap().children.len(), 2);
+        assert_eq!(back.find_pane("A").unwrap().children.len(), 1);
     }
 }
