@@ -17,6 +17,9 @@ local-assets/
 *.arc
 *.szs
 *.png
+*.byml
+*.bgyml
+*.zs
 
 # Allow the README assets if any are added later
 !docs/assets/*.png
