@@ -21,6 +21,8 @@ mod bflyt_prune;
 mod bflyt_repair;
 mod bflyt_roundtrip_test;
 mod bflyt_section_diff;
+mod bflyt_set_text;
+mod bflyt_set_window;
 mod bntx_dict_test;
 mod bntx_export_all;
 mod bntx_export_dds;
@@ -218,6 +220,12 @@ pub enum Verb {
     /// preview.
     BflytRepair(bflyt_repair::Args),
 
+    /// Set a txt1 text-box pane's string (standard single-string layout).
+    BflytSetText(bflyt_set_text::Args),
+
+    /// Edit a wnd1 window pane's stretch / frame-size borders.
+    BflytSetWindow(bflyt_set_window::Args),
+
     /// Print a structured snapshot of a BNTX. Use --json for tool consumption.
     BntxInspect(bntx_inspect::Args),
 
@@ -380,6 +388,8 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::PaneCopy(args) => Ok(pane_copy::run(args)?),
         Verb::BflytPrune(args) => Ok(bflyt_prune::run(args)?),
         Verb::BflytRepair(args) => Ok(bflyt_repair::run(args)?),
+        Verb::BflytSetText(args) => Ok(bflyt_set_text::run(args)?),
+        Verb::BflytSetWindow(args) => Ok(bflyt_set_window::run(args)?),
         Verb::BntxInspect(args) => Ok(bntx_inspect::run(args)?),
         Verb::BntxExportPng(args) => Ok(bntx_export_png::run(args)?),
         Verb::BntxExportAll(args) => Ok(bntx_export_all::run(args)?),

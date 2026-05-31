@@ -16,7 +16,7 @@ mod repair;
 mod sections;
 mod write;
 
-pub use ops::{ClonePaneSpec, PaneEdit};
+pub use ops::{ClonePaneSpec, PaneEdit, WindowEdit};
 pub use repair::RepairReport;
 
 // Re-export the types CLI verbs and external callers need. Internal-only
