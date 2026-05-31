@@ -9,6 +9,8 @@
 //! - 2 = invocation error (bad flags) — handled by clap
 //! - 64 = unhandled internal case
 
+mod aamp_inspect;
+mod aamp_roundtrip_test;
 mod archive_extract;
 mod bflan_inspect;
 mod bflan_roundtrip_test;
@@ -327,6 +329,15 @@ pub enum Verb {
     /// crashing the game.
     RestblSet(restbl_set::Args),
 
+    /// Print a structured snapshot of an AAMP (binary parameter archive,
+    /// BOTW): header + decoded list/object/parameter tree. Keys are CRC-32
+    /// hashes; pass --names to resolve them. Use --json.
+    AampInspect(aamp_inspect::Args),
+
+    /// Internal: read an AAMP, write it back, and report whether the
+    /// round-trip is byte-identical.
+    AampRoundtripTest(aamp_roundtrip_test::Args),
+
     /// Apply an SGPO skin manifest to a packed `layout.arc` end-to-end:
     /// unpack in memory, apply to the BFLYT+BNTX, validate, and re-pack
     /// every entry into a new archive.
@@ -414,6 +425,8 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::RestblInspect(args) => Ok(restbl_inspect::run(args)?),
         Verb::RestblRoundtripTest(args) => Ok(restbl_roundtrip_test::run(args)?),
         Verb::RestblSet(args) => Ok(restbl_set::run(args)?),
+        Verb::AampInspect(args) => Ok(aamp_inspect::run(args)?),
+        Verb::AampRoundtripTest(args) => Ok(aamp_roundtrip_test::run(args)?),
         Verb::LayoutApplyArc(args) => Ok(layout_apply_arc::run(args)?),
         Verb::LayoutApplyManifest(args) => Ok(layout_apply_manifest::run(args)?),
         Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),

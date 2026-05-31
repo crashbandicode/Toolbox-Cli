@@ -32,6 +32,10 @@ pub enum Error {
     #[error("MSBT error: {0}")]
     Msbt(#[from] crate::msbt::MsbtError),
 
+    /// An AAMP (binary parameter archive) parse or write error.
+    #[error("AAMP error: {0}")]
+    Aamp(#[from] crate::aamp::AampError),
+
     /// An underlying I/O failure (reading/writing files).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

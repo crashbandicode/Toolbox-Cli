@@ -32,6 +32,8 @@
 //!   [`byml::Byml`] value tree (inspect / diff / [`byml::set_by_path`] edit).
 //! - [`restbl`] — RESTBL (Resource Size Table) read/write (byte-identical)
 //!   + CRC-32 path lookup / size update.
+//! - [`aamp`] — AAMP (binary parameter archive, BOTW) read + verbatim
+//!   round-trip + a decoded [`aamp::ParameterList`] tree (inspect).
 //! - [`msbt`] — MSBT (LibMessageStudio message) read + verbatim round-trip +
 //!   decoded label/message tree (inspect).
 //! - [`compression`] — zstd (with TotK dictionaries) and Yaz0/Yaz1
@@ -71,6 +73,7 @@
 mod error;
 pub use error::{Error, Result};
 
+pub mod aamp;
 pub mod audit;
 pub mod bflan;
 pub mod bflyt;
@@ -106,6 +109,7 @@ pub mod prelude {
         ValidateReport,
     };
     pub use crate::manifest::{SkinElement, SkinManifest};
+    pub use crate::aamp::{read_aamp, write_aamp, AampDocument, ParameterList, Value};
     pub use crate::msbt::{read_msbt, write_msbt, write_msbt_canonical, MsbtDocument, TextChunk};
     pub use crate::restbl::{read_restbl, write_restbl, Restbl, SetOutcome};
     pub use crate::texpipe::Bc7Quality;
