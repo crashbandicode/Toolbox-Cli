@@ -51,10 +51,19 @@ pub struct Args {
     /// chain. Or an explicit count.
     #[arg(long, default_value = "1")]
     mips: String,
+
+    /// Surface format for the new texture: `bc7` (default), `rgba8`, or
+    /// `rgba8-srgb`. RGBA8 is uncompressed (sharper small text/edges,
+    /// larger data); `--quality` is ignored for it. Cube imports are
+    /// BC7-only.
+    #[arg(long, default_value = "bc7")]
+    texture_format: String,
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
     let quality: Bc7Quality = args.quality.parse().map_err(|e| anyhow!("{e}"))?;
+    let (texture_format, srgb) =
+        super::parse_import_texture_format(&args.texture_format, args.srgb)?;
     let bntx_bytes =
         fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
     let mut bntx = read_bntx(&bntx_bytes).map_err(|e| anyhow!("{e}"))?;
@@ -73,9 +82,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
         let mip_count = parse_mip_count(&args.mips, w, w)?;
         let opts = ImportOptions {
             quality,
-            srgb: args.srgb,
+            srgb,
             align: args.align,
             mip_count,
+            texture_format,
         };
         pipeline::import_cube_png_files(&mut bntx, &args.name, &faces, &opts)?;
     } else {
@@ -88,9 +98,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
         let mip_count = parse_mip_count(&args.mips, w, h)?;
         let opts = ImportOptions {
             quality,
-            srgb: args.srgb,
+            srgb,
             align: args.align,
             mip_count,
+            texture_format,
         };
         pipeline::import_image(&mut bntx, &args.name, &img, &opts)?;
     }

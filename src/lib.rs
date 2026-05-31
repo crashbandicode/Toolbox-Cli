@@ -84,7 +84,7 @@ pub mod prelude {
     pub use crate::bflyt::{read_bflyt, write_bflyt, ClonePaneSpec, PaneEdit, BFLYT};
     pub use crate::bntx::pipeline::{
         import_cube_png_files, import_image, import_png_file, replace_texture, ImportOptions,
-        ReplaceSource,
+        ImportTextureFormat, ReplaceSource,
     };
     pub use crate::bntx::{read_bntx, write_bntx, AppendTextureSpec, BntxFile, TextureFormat};
     pub use crate::compression::{compress_yaz0, compress_zstd, decompress, Codec, DictRegistry};

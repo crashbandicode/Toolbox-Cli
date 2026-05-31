@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::bflyt::{read_bflyt, write_bflyt, ClonePaneSpec, BFLYT};
-use crate::bntx::{pipeline, pipeline::ImportOptions, read_bntx, write_bntx, BntxFile};
+use crate::bntx::{
+    pipeline, pipeline::ImportOptions, pipeline::ImportTextureFormat, read_bntx, write_bntx,
+    BntxFile,
+};
 use crate::error::{Error, Result};
 use crate::manifest::{SkinElement, SkinManifest};
 use crate::sarc::{read_arc, write_arc};
@@ -31,12 +34,14 @@ pub struct ApplyOptions {
     pub pane_template: String,
     /// Existing material to clone for each element.
     pub material_template: String,
-    /// BC7 encoder quality.
+    /// BC7 encoder quality (ignored for the uncompressed RGBA8 formats).
     pub quality: Bc7Quality,
-    /// Encode imported textures as sRGB.
+    /// Encode imported textures as sRGB (applies to BC7).
     pub srgb: bool,
     /// Override BRTD texture-data alignment.
     pub align: Option<u32>,
+    /// Surface format for imported textures (BC7 default, or RGBA8).
+    pub texture_format: ImportTextureFormat,
     /// Skip elements already fully present (idempotent re-runs).
     pub skip_existing: bool,
 }
@@ -51,6 +56,7 @@ impl Default for ApplyOptions {
             quality: Bc7Quality::Fast,
             srgb: false,
             align: None,
+            texture_format: ImportTextureFormat::Bc7,
             skip_existing: false,
         }
     }
@@ -158,6 +164,7 @@ pub fn apply_manifest_in_memory(
                 srgb: opts.srgb,
                 align: opts.align,
                 mip_count: 1,
+                texture_format: opts.texture_format,
             };
             pipeline::import_png_file(bntx, &texture_name, &image_path, &import_opts)?;
         }

@@ -72,12 +72,20 @@ session immediately after this file was written.
   it's **B8G8R8A8** (32bpp, identity channel-swizzle — *not* the 16bpp
   R5G6B5 guessed here), decoded by swapping R↔B back to RGBA. HDR's
   recolored `info_melee` now parses + decodes (audit reports it clean).
-- [ ] **ASTC + low-bpp (R8/R8G8/B8G8R8A8) *encode*.** Decode/round-trip
-  landed; editing these textures needs an encoder. ASTC needs a new MIT
-  encoder crate (none wired — `intel_tex_2` is BCn-only); R8/R8G8/BGRA8
-  encode is trivial (channel pack) but currently gated off in
-  `texpipe::format_is_encodable` / `encode_mip_blocks`. Add when TotK
-  *texture editing* (vs inspect/export) is needed.
+- [x] **Uncompressed RGBA8 PNG import** (SGPO sharper-text option). Done
+  (committed, unpushed): `ImportTextureFormat { Bc7, Rgba8, Rgba8Srgb }` +
+  `ImportOptions/ApplyOptions::texture_format`; `--texture-format`
+  (`bc7`/`rgba8`/`rgba8-srgb` + aliases) on `bntx-import-png` /
+  `layout-apply-manifest` / `layout-apply-arc`; BC7 default unchanged
+  byte-for-byte. New `AppendTextureSpec::texture_2d_with_mips`. 2D only
+  (cube stays BC7). `R8G8B8A8` is now fully editable (import + in-place
+  replace).
+- [ ] **ASTC + R8/R8G8/B8G8R8A8 *encode*.** ASTC needs a new MIT encoder
+  crate (none wired — `intel_tex_2` is BCn-only). The single-channel
+  `R8`/two-channel `R8G8` and the byte-swapped `B8G8R8A8` are trivial
+  channel-packs but still gated off in `texpipe::format_is_encodable` /
+  `encode_mip_blocks` (only `R8G8B8A8` is wired). Add the rest when TotK
+  *texture editing* (vs inspect/export) needs them.
 - [ ] **Confirm the non-4x4 ASTC footprints on real data.** Only
   ASTC_4x4 (SRGB) appears in our local TotK fixtures; 5x5/6x6/8x8/etc.
   decode is generic + unit-tested for codes, but unverified against real

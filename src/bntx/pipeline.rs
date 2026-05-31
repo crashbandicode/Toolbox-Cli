@@ -23,18 +23,37 @@ use crate::texpipe::{
     compress_image_to_format, format_is_encodable, Bc7Quality, CompressedTexture,
 };
 
+/// Surface format for a **new** PNG import. BC7 (the default) gives the
+/// smallest files; the uncompressed RGBA8 variants avoid BC7's block
+/// artifacts on sharp UI text/edges (at the cost of ~5x the data), which
+/// is what SGPO wants for crisp letter skins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImportTextureFormat {
+    /// BC7; sRGB-ness comes from [`ImportOptions::srgb`]. Default.
+    #[default]
+    Bc7,
+    /// Uncompressed `R8G8B8A8_UNORM`.
+    Rgba8,
+    /// Uncompressed `R8G8B8A8_UNORM_SRGB`.
+    Rgba8Srgb,
+}
+
 /// Options for the import helpers.
 #[derive(Debug, Clone)]
 pub struct ImportOptions {
-    /// BC7 encoder quality.
+    /// BC7 encoder quality. Ignored for the uncompressed RGBA8 formats.
     pub quality: Bc7Quality,
-    /// Encode as `BC7_UNORM_SRGB` (vs `BC7_UNORM`).
+    /// For `texture_format = Bc7`, encode as `BC7_UNORM_SRGB` (vs
+    /// `BC7_UNORM`). Ignored for the RGBA8 formats (their variant is
+    /// already explicit about sRGB).
     pub srgb: bool,
     /// Override the texture-data alignment within BRTD (default 0x200).
     pub align: Option<u32>,
     /// Number of mip levels (1 = single mip). Use
     /// [`crate::texpipe::natural_mip_count`] to compute a full chain.
     pub mip_count: u32,
+    /// Surface format for the appended texture. Defaults to [`ImportTextureFormat::Bc7`].
+    pub texture_format: ImportTextureFormat,
 }
 
 impl Default for ImportOptions {
@@ -44,6 +63,7 @@ impl Default for ImportOptions {
             srgb: false,
             align: None,
             mip_count: 1,
+            texture_format: ImportTextureFormat::Bc7,
         }
     }
 }
@@ -56,31 +76,23 @@ pub enum ReplaceSource<'a> {
     CubeFaces(&'a [PathBuf; 6]),
 }
 
+/// Append a pre-encoded 2D texture (the result of one of the `texpipe`
+/// encoders) under `format`, applying an optional alignment override.
 fn append_2d(
     bntx: &mut BntxFile,
     name: &str,
+    format: TextureFormat,
     c: CompressedTexture,
-    srgb: bool,
     align: Option<u32>,
 ) -> Result<()> {
-    let mut spec = if c.mip_count > 1 {
-        AppendTextureSpec::bc7_2d_with_mips(
-            c.width,
-            c.height,
-            c.mip_count as u16,
-            c.block_height_log2 as i32,
-            c.swizzled_data,
-            srgb,
-        )
-    } else {
-        AppendTextureSpec::bc7_2d_default(
-            c.width,
-            c.height,
-            c.block_height_log2 as i32,
-            c.swizzled_data,
-            srgb,
-        )
-    };
+    let mut spec = AppendTextureSpec::texture_2d_with_mips(
+        format,
+        c.width,
+        c.height,
+        c.mip_count as u16,
+        c.block_height_log2 as i32,
+        c.swizzled_data,
+    );
     if let Some(a) = align {
         spec.align = a;
     }
@@ -88,19 +100,50 @@ fn append_2d(
     Ok(())
 }
 
+/// Resolve an [`ImportTextureFormat`] (+ the `srgb` flag, which only
+/// applies to BC7) into a concrete [`TextureFormat`].
+fn resolve_2d_format(tf: ImportTextureFormat, srgb: bool) -> TextureFormat {
+    match tf {
+        ImportTextureFormat::Bc7 => {
+            if srgb {
+                TextureFormat::Bc7UnormSrgb
+            } else {
+                TextureFormat::Bc7Unorm
+            }
+        }
+        ImportTextureFormat::Rgba8 => TextureFormat::R8G8B8A8Unorm,
+        ImportTextureFormat::Rgba8Srgb => TextureFormat::R8G8B8A8UnormSrgb,
+    }
+}
+
 /// Encode a 2D image and append it to the BNTX as a new named texture.
+/// Honors [`ImportOptions::texture_format`]: BC7 (default) runs the
+/// `intel_tex_2` encoder at `opts.quality`; the uncompressed RGBA8
+/// formats store the pixels directly (no quality/compression, sharper
+/// small text). Either way the result is Tegra-swizzled before append.
 pub fn import_image(
     bntx: &mut BntxFile,
     name: &str,
     img: &DynamicImage,
     opts: &ImportOptions,
 ) -> Result<()> {
-    let compressed = if opts.mip_count > 1 {
-        compress_image_bc7_with_mips(img, opts.quality, opts.mip_count)?
-    } else {
-        compress_image_bc7(img, opts.quality)?
+    let format = resolve_2d_format(opts.texture_format, opts.srgb);
+    let compressed = match opts.texture_format {
+        ImportTextureFormat::Bc7 => {
+            // Preserve the in-game-validated BC7 path byte-for-byte.
+            if opts.mip_count > 1 {
+                compress_image_bc7_with_mips(img, opts.quality, opts.mip_count)?
+            } else {
+                compress_image_bc7(img, opts.quality)?
+            }
+        }
+        ImportTextureFormat::Rgba8 | ImportTextureFormat::Rgba8Srgb => {
+            // Uncompressed: no BC7 compression; `quality` is unused. The
+            // canonical block height is inferred (block_height_log2 = None).
+            compress_image_to_format(img, format, opts.quality, opts.mip_count, None)?
+        }
     };
-    append_2d(bntx, name, compressed, opts.srgb, opts.align)
+    append_2d(bntx, name, format, compressed, opts.align)
 }
 
 /// Open a PNG/JPG/BMP file and [`import_image`] it.
@@ -123,6 +166,11 @@ pub fn import_cube_png_files(
     faces: &[PathBuf; 6],
     opts: &ImportOptions,
 ) -> Result<()> {
+    if opts.texture_format != ImportTextureFormat::Bc7 {
+        return Err(Error::Texpipe(
+            "cube-map import is BC7-only; the RGBA8 import format applies to 2D images".into(),
+        ));
+    }
     let c = compress_cube_bc7(faces, opts.quality, opts.mip_count)?;
     let mut spec = AppendTextureSpec::bc7_cube_default(
         c.width,

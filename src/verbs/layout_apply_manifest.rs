@@ -54,6 +54,12 @@ pub struct Args {
     #[arg(long)]
     align: Option<u32>,
 
+    /// Surface format for imported textures: `bc7` (default), `rgba8`, or
+    /// `rgba8-srgb`. RGBA8 is uncompressed (sharper small text/edges,
+    /// larger data); `--quality` is ignored for it.
+    #[arg(long, default_value = "bc7")]
+    texture_format: String,
+
     /// Skip elements that already exist in the layout (idempotent re-runs).
     #[arg(long)]
     skip_existing: bool,
@@ -65,6 +71,8 @@ pub fn run(args: Args) -> Result<ExitCode> {
     let manifest: SkinManifest = serde_json::from_str(&manifest_text)
         .with_context(|| format!("parsing {}", args.manifest.display()))?;
     let quality: Bc7Quality = args.quality.parse().map_err(|e| anyhow!("{e}"))?;
+    let (texture_format, srgb) =
+        super::parse_import_texture_format(&args.texture_format, args.srgb)?;
 
     let opts = ApplyOptions {
         bflyt_rel: args.bflyt,
@@ -72,8 +80,9 @@ pub fn run(args: Args) -> Result<ExitCode> {
         pane_template: args.pane_template,
         material_template: args.material_template,
         quality,
-        srgb: args.srgb,
+        srgb,
         align: args.align,
+        texture_format,
         skip_existing: args.skip_existing,
     };
     let report = apply_manifest(&args.layout_dir, &manifest, &args.skin_dir, &opts)?;

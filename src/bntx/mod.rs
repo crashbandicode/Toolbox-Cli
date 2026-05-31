@@ -798,21 +798,41 @@ impl AppendTextureSpec {
         swizzled_data: Vec<u8>,
         srgb: bool,
     ) -> Self {
+        let format = if srgb {
+            TextureFormat::Bc7UnormSrgb
+        } else {
+            TextureFormat::Bc7Unorm
+        };
+        Self::texture_2d_with_mips(format, width, height, mip_count, size_range, swizzled_data)
+    }
+
+    /// Build a 2D, single-array-layer spec for an arbitrary `format`
+    /// (BC7, RGBA8, …) with `mip_count` mip levels. The `swizzled_data`
+    /// must already be tiled for `format` (see [`crate::texpipe`]); this
+    /// constructor only records metadata. The BNTX-metadata defaults
+    /// (alignment, channel-swizzle, GPU-access flags, etc.) are the same
+    /// sane values BC7 uses — verified format-agnostic against real
+    /// Smash/TotK BRTI headers (the `flags` byte tracks the *game/tool*,
+    /// not the surface format, so the Smash-default `1` is kept).
+    pub fn texture_2d_with_mips(
+        format: TextureFormat,
+        width: u32,
+        height: u32,
+        mip_count: u16,
+        size_range: i32,
+        swizzled_data: Vec<u8>,
+    ) -> Self {
         Self {
-            format: if srgb {
-                TextureFormat::Bc7UnormSrgb
-            } else {
-                TextureFormat::Bc7Unorm
-            },
+            format,
             width,
             height,
             depth: 1,
             mips_count: mip_count,
             array_len: 1,
             size_range,
-            // Channel swizzle: R=2, G=3, B=4, A=5 (standard mapping).
+            // Channel swizzle: R=2, G=3, B=4, A=5 (standard identity mapping).
             channel_swizzle: 0x05_04_03_02,
-            // 0x200 = 512 bytes (sufficient for BC7 textures up to ~256x256).
+            // 0x200 = 512 bytes (fine for UI textures up to ~256x256).
             // Larger textures may need a larger alignment; callers can
             // override (use 0x1000 for 512x512+).
             align: 0x200,

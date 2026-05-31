@@ -52,7 +52,7 @@ src/
 │   ├── read.rs         Full-fidelity parser (str pool, dict, RLT, BRTD)
 │   ├── write.rs        Writer with canonical/preserved RLT modes
 │   ├── decode.rs       Deswizzle + decode (texture2ddecoder; BCn/ASTC/R8/R8G8/RGBA8/BGRA8) → RGBA, applies channel-swizzle
-│   ├── pipeline.rs     PNG/DDS import, format-preserving replace, DDS export
+│   ├── pipeline.rs     PNG/DDS import (BC7 default or RGBA8 via ImportTextureFormat), format-preserving replace, DDS export
 │   └── dict_builder.rs Patricia-trie builder for _DIC
 ├── bflan.rs            BFLAN parse/write (verbatim sections, byte-identical) + pat1/pai1 inspect
 ├── compression/
@@ -113,7 +113,8 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 38): `compression::yaz0`
+- **Library unit tests** (`cargo test --lib`, 39): the `verbs`
+  `--texture-format` alias/`--srgb` resolver, plus `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
   round-trip + frame-header dict-id parsing on hand-built headers matching
@@ -197,6 +198,12 @@ src/
 - `tests/bntx_real_fixtures.rs` — walks `tests/fixtures/bntx/`,
   tolerates the known sgpo_one_pane_png_proof RLT diff. Now also covers
   the TotK `totk_title__Combined.bntx` (v`0x00040100`, byte-identical).
+- `tests/bntx_import_format.rs` — PNG-import format selection
+  (fixture-gated): appends a generated image as `Rgba8`/`Rgba8Srgb` and
+  asserts the re-read texture is `R8G8B8A8_UNORM`/`_SRGB` with the **exact
+  source dims** (no block padding), the default BC7 path is unchanged
+  (`BC7_UNORM`, padded to the 4-grid), and `apply_manifest_to_arc` with
+  `texture_format = Rgba8` imports the manifest PNG as RGBA8 + validates.
 - `tests/bntx_totk_formats.rs` — TotK/new-format coverage (fixture-gated):
   the TotK Title `__Combined.bntx` round-trips **byte-identically**
   (asserts version `0x00040100` + presence of ASTC_4x4_SRGB & R8G8), and
@@ -306,10 +313,11 @@ src/
 ## TODO / roadmap
 
 The **live, prioritized backlog lives in `todo.md`** — read it first for
-current work. Status snapshot: the BNTX `0x00040100` + ASTC/low-bpp batch
-below is **committed and pushed** this session; `origin/main` now includes
-it plus the previously un-pushed compression (bd454c7) and SARC-hardening
-(a36c07c) commits (origin was at c6159ec):
+current work. Status snapshot: the **PNG-import RGBA8 format option** batch
+(below) is **committed locally but NOT pushed** (awaiting push approval);
+`origin/main` is at **f46788c** (the BNTX `0x00040100` + ASTC/low-bpp
+batch, pushed this session along with the earlier compression bd454c7 and
+SARC-hardening a36c07c commits):
 
 - ✅ **Prior 7-item handoff** (bntx export-png/all, format-preserving
   replace, DDS export/import/replace, layout-apply-arc, layout-diff,
@@ -349,6 +357,37 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-05-31 — PNG import: selectable BC7 / uncompressed RGBA8
+Lets SGPO generate sharper UI skins: BC7's block quantization softens small
+text/letters, so an uncompressed RGBA8 import path was added (BC7 stays the
+default — unchanged). Committed locally, **not pushed**.
+
+- New `pipeline::ImportTextureFormat { Bc7, Rgba8, Rgba8Srgb }` +
+  `ImportOptions::texture_format` (default `Bc7`). `import_image` branches:
+  BC7 keeps the in-game-validated `compress_image_bc7[_with_mips]` path
+  **byte-for-byte**; RGBA8 routes through `compress_image_to_format`
+  (no compression, `--quality` ignored). `import_cube_png_files` errors on
+  a non-BC7 request (cube is BC7-only; the feature is 2D).
+- New generic `AppendTextureSpec::texture_2d_with_mips(format, …)`;
+  `bc7_2d_with_mips` now delegates to it (identical BC7 specs). Defaults
+  are format-agnostic — verified against real BRTI headers: every Smash
+  texture (any format) uses `flags=1`, every TotK texture `flags=9`, i.e.
+  the `flags` byte tracks the game/tool, not the surface format, so the
+  Smash-default `1` is correct for SGPO appends.
+- `ApplyOptions::texture_format` threads the choice through
+  `apply_manifest` / `apply_manifest_to_arc`. CLI: `--texture-format`
+  (`bc7`|`rgba8`|`rgba8-srgb`, plus aliases `bc7-unorm`/`bc7-srgb`/
+  `r8g8b8a8`/`r8g8b8a8-srgb`/…) on `bntx-import-png`,
+  `layout-apply-manifest`, `layout-apply-arc`; default `bc7`. A shared
+  `verbs::parse_import_texture_format` resolves the flag (+ `--srgb`).
+- Tests: `tests/bntx_import_format.rs` (rgba8/rgba8-srgb append as
+  `R8G8B8A8_UNORM`/`_SRGB`, exact source dims, write→read-back, BC7 default
+  unchanged; plus `apply_manifest_to_arc` with `texture_format = Rgba8`
+  imports + validates) and a `verbs` unit test pinning the
+  `--texture-format` alias/`--srgb` resolution. `cargo test` green
+  (39 lib + all integration); `clippy --all-targets` clean;
+  `--no-default-features` builds.
 
 ### 2026-05-31 — BNTX 0x00040100 + full ASTC family + R8/R8G8/B8G8R8A8
 Roadmap item #1. Unlocks TotK textures (and HDR's B8G8R8A8 Smash mods).

@@ -50,6 +50,7 @@ use clap::Subcommand;
 use std::path::Path;
 use std::process::ExitCode;
 
+use crate::bntx::pipeline::ImportTextureFormat;
 use crate::compression::DictRegistry;
 
 /// Load the zstd dictionary registry the compression verbs need.
@@ -104,6 +105,36 @@ pub(crate) fn first_diff(a: &[u8], b: &[u8]) -> usize {
         }
     }
     n
+}
+
+/// Parse a `--texture-format` CLI value into the import format and the
+/// effective sRGB flag for BC7. BC7 sRGB-ness can be requested either via
+/// the explicit `bc7-srgb` alias or the separate `--srgb` flag; the RGBA8
+/// variants carry their own sRGB-ness. Accepts the common spellings
+/// (`_`/`-` interchangeable). Shared by the PNG-import verbs.
+pub(crate) fn parse_import_texture_format(
+    s: &str,
+    srgb_flag: bool,
+) -> Result<(ImportTextureFormat, bool)> {
+    let key = s.trim().to_ascii_lowercase().replace('_', "-");
+    Ok(match key.as_str() {
+        "bc7" | "bc7-unorm" => (ImportTextureFormat::Bc7, srgb_flag),
+        "bc7-srgb" | "bc7-unorm-srgb" => (ImportTextureFormat::Bc7, true),
+        "rgba8" | "rgba8-unorm" | "r8g8b8a8" | "r8g8b8a8-unorm" => {
+            if srgb_flag {
+                (ImportTextureFormat::Rgba8Srgb, true)
+            } else {
+                (ImportTextureFormat::Rgba8, false)
+            }
+        }
+        "rgba8-srgb" | "r8g8b8a8-srgb" => (ImportTextureFormat::Rgba8Srgb, true),
+        other => {
+            return Err(anyhow::anyhow!(
+                "unknown --texture-format '{other}'; valid: bc7, bc7-srgb, rgba8, rgba8-srgb \
+                 (aliases: bc7-unorm, bc7-unorm-srgb, rgba8-unorm, r8g8b8a8, r8g8b8a8-srgb)"
+            ))
+        }
+    })
 }
 
 #[derive(Subcommand, Debug)]
@@ -279,5 +310,30 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::Decompress(args) => Ok(decompress::run(args)?),
         Verb::Compress(args) => Ok(compress::run(args)?),
         Verb::ArchiveExtract(args) => Ok(archive_extract::run(args)?),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_import_texture_format;
+    use crate::bntx::pipeline::ImportTextureFormat::{Bc7, Rgba8, Rgba8Srgb};
+
+    #[test]
+    fn texture_format_flag_aliases() {
+        // BC7: sRGB comes from the --srgb flag, or the explicit -srgb alias.
+        assert_eq!(parse_import_texture_format("bc7", false).unwrap(), (Bc7, false));
+        assert_eq!(parse_import_texture_format("bc7", true).unwrap(), (Bc7, true));
+        assert_eq!(parse_import_texture_format("BC7-UNORM", false).unwrap(), (Bc7, false));
+        assert_eq!(parse_import_texture_format("bc7-srgb", false).unwrap(), (Bc7, true));
+        assert_eq!(parse_import_texture_format("bc7_unorm_srgb", false).unwrap(), (Bc7, true));
+        // RGBA8: the variant carries sRGB; --srgb promotes the plain alias.
+        assert_eq!(parse_import_texture_format("rgba8", false).unwrap(), (Rgba8, false));
+        assert_eq!(parse_import_texture_format("rgba8", true).unwrap(), (Rgba8Srgb, true));
+        assert_eq!(parse_import_texture_format("r8g8b8a8", false).unwrap(), (Rgba8, false));
+        assert_eq!(parse_import_texture_format("rgba8-srgb", false).unwrap(), (Rgba8Srgb, true));
+        assert_eq!(parse_import_texture_format("r8g8b8a8_srgb", false).unwrap(), (Rgba8Srgb, true));
+        // Unknown values are rejected.
+        assert!(parse_import_texture_format("astc", false).is_err());
+        assert!(parse_import_texture_format("", false).is_err());
     }
 }

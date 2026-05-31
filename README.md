@@ -27,7 +27,7 @@ against real Smash Ultimate assets (byte-identical round-trip corpus).
 | BNTX `_DIC` Patricia-trie builder | **Validated** — rebuilds the trie in texture (BRTI) order; routes all lookups; survives append/remove |
 | BNTX → PNG / DDS export | **Working** — deswizzle + decode of BC1–BC7, R8/R8G8/R8G8B8A8/B8G8R8A8, and the full **ASTC** LDR family (4x4–12x12), honoring the channel-swizzle; DDS (DX10) interchange |
 | PNG → BC1/BC3/BC4/BC5/BC7 → Tegra swizzle | **Working** — [`intel_tex_2`](https://crates.io/crates/intel_tex_2) (Intel ISPC) + [`tegra_swizzle`](https://crates.io/crates/tegra_swizzle); multi-mip + cube; auto-pads non-4-aligned dims |
-| BNTX texture append / remove / replace | **Working** — append (2D/cube/multi-mip), remove, format-preserving in-place replace from PNG or DDS |
+| BNTX texture append / remove / replace | **Working** — append (2D/cube/multi-mip) as **BC7 (default) or uncompressed RGBA8** (`--texture-format`, sharper small text), remove, format-preserving in-place replace from PNG or DDS |
 | BFLYT mutation (add texture ref / material / pane / set transform / clone pane) | **Working** |
 | SARC unpack / pack | **Working** — **native reader + writer** (no third-party SARC crate); the writer assigns per-file alignment (no `0x2000`-everywhere bloat) and preserves hash-only entries |
 | Compression: zstd (+ TotK dictionaries) / Yaz0 (`.szs`) | **Working** — transparent decompress (dictionary auto-selected by zstd frame id), recursive `archive-extract`, dict-aware re-compress; decode is **byte-identical** to Python 3.14's `compression.zstd` reference on real TotK `.blarc.zs`/`.pack.zs` |
@@ -125,7 +125,7 @@ bflyt-add-material        Clone a template material; optionally bind a texture
 mat-rename                Rename an existing material in mat1
 pane-clone                Clone a template pane (e.g. SGPO marker) under a new name
 pane-set                  Edit a pane's transform / alpha / visibility / material binding
-bntx-import-png           Encode a PNG to BC7 + swizzle, append to BNTX
+bntx-import-png           Encode a PNG (BC7 default, or --texture-format rgba8) + swizzle, append to BNTX
 bntx-replace-png          Re-encode a PNG over an existing texture (format-preserving)
 bntx-remove-texture       Remove a named texture (shrinks string pool / dict / BRTD)
 bntx-import-dds           Swizzle a DDS surface and append as a new texture
@@ -278,9 +278,12 @@ structure), but the Rust code is original.
   **decode/round-trip only** — there is no ASTC encoder, so editing those
   textures in place is not yet supported (BC1/BC3/BC4/BC5/BC7 + R8G8B8A8
   remain editable).
-- BNTX append supports 2D, cube, and multi-mip; PNG import re-encodes to
-  BC7, while in-place replace preserves the existing format
-  (BC1/BC3/BC4/BC5/BC7). BC2 and BC6 have no encoder.
+- BNTX append supports 2D, cube, and multi-mip. New PNG imports default to
+  BC7; pass `--texture-format rgba8` (or `rgba8-srgb`) on `bntx-import-png`
+  / `layout-apply-manifest` / `layout-apply-arc` for an uncompressed
+  R8G8B8A8 texture (no block artifacts on small text/edges, ~5x the size;
+  2D only — cube stays BC7). In-place replace preserves the existing format
+  (BC1/BC3/BC4/BC5/BC7 + R8G8B8A8). BC2, BC6, and ASTC have no encoder.
 - BNTX texture data alignment defaults to 0x200 in `bntx-import-png` /
   `layout-apply-manifest` (good to ~256x256). Use `--align 0x1000` for
   512x512+ textures.
