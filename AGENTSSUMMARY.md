@@ -313,11 +313,10 @@ src/
 ## TODO / roadmap
 
 The **live, prioritized backlog lives in `todo.md`** — read it first for
-current work. Status snapshot: the **PNG-import RGBA8 format option** batch
-(below) is **committed locally but NOT pushed** (awaiting push approval);
-`origin/main` is at **f46788c** (the BNTX `0x00040100` + ASTC/low-bpp
-batch, pushed this session along with the earlier compression bd454c7 and
-SARC-hardening a36c07c commits):
+current work. Status snapshot: `origin/main` is at **14e5991** (the
+PNG-import RGBA8 format option), on top of **f46788c** (BNTX `0x00040100` +
+ASTC/low-bpp) and the earlier compression (bd454c7) + SARC-hardening
+(a36c07c) commits — all pushed this session:
 
 - ✅ **Prior 7-item handoff** (bntx export-png/all, format-preserving
   replace, DDS export/import/replace, layout-apply-arc, layout-diff,
@@ -361,7 +360,7 @@ Standing backlog (no owner):
 ### 2026-05-31 — PNG import: selectable BC7 / uncompressed RGBA8
 Lets SGPO generate sharper UI skins: BC7's block quantization softens small
 text/letters, so an uncompressed RGBA8 import path was added (BC7 stays the
-default — unchanged). Committed locally, **not pushed**.
+default — unchanged). Committed + pushed this session (14e5991).
 
 - New `pipeline::ImportTextureFormat { Bc7, Rgba8, Rgba8Srgb }` +
   `ImportOptions::texture_format` (default `Bc7`). `import_image` branches:
