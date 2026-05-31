@@ -32,6 +32,7 @@ mod bntx_remove_texture;
 mod bntx_replace_png;
 mod bntx_rlt_dump;
 mod bntx_roundtrip_test;
+mod byml_diff;
 mod byml_inspect;
 mod byml_roundtrip_test;
 mod compress;
@@ -243,6 +244,10 @@ pub enum Verb {
     /// round-trip is byte-identical (inflating `.byml.zs` first).
     BymlRoundtripTest(byml_roundtrip_test::Args),
 
+    /// Structural before/after diff of two BYML documents (hashes matched by
+    /// key, arrays by index). Inflates `.byml.zs`. Use --json.
+    BymlDiff(byml_diff::Args),
+
     /// Apply an SGPO skin manifest to a packed `layout.arc` end-to-end:
     /// unpack in memory, apply to the BFLYT+BNTX, validate, and re-pack
     /// every entry into a new archive.
@@ -313,6 +318,7 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::BntxLayoutDump(args) => Ok(bntx_layout_dump::run(args)?),
         Verb::BymlInspect(args) => Ok(byml_inspect::run(args)?),
         Verb::BymlRoundtripTest(args) => Ok(byml_roundtrip_test::run(args)?),
+        Verb::BymlDiff(args) => Ok(byml_diff::run(args)?),
         Verb::LayoutApplyArc(args) => Ok(layout_apply_arc::run(args)?),
         Verb::LayoutApplyManifest(args) => Ok(layout_apply_manifest::run(args)?),
         Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),
