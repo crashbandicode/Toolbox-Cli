@@ -28,6 +28,8 @@
 //! - [`bntx`] — BNTX parse/write and texture append/remove;
 //!   [`bntx::pipeline`] adds PNG/DDS import/replace and
 //!   [`bntx::decode`] does deswizzle + decode to RGBA.
+//! - [`byml`] — BYML (binary YAML) read + verbatim round-trip + a decoded
+//!   [`byml::Byml`] value tree (inspect / diff).
 //! - [`compression`] — zstd (with TotK dictionaries) and Yaz0/Yaz1
 //!   (`.szs`) decode/encode + codec detection.
 //! - [`texpipe`] — PNG → BC1/BC3/BC4/BC5/BC7 (intel_tex_2) → Tegra
@@ -69,6 +71,7 @@ pub mod audit;
 pub mod bflan;
 pub mod bflyt;
 pub mod bntx;
+pub mod byml;
 pub mod compression;
 pub mod dds;
 pub mod diff;
@@ -87,6 +90,7 @@ pub mod prelude {
         ImportTextureFormat, ReplaceSource,
     };
     pub use crate::bntx::{read_bntx, write_bntx, AppendTextureSpec, BntxFile, TextureFormat};
+    pub use crate::byml::{read_byml, write_byml, Byml, BymlDocument};
     pub use crate::compression::{compress_yaz0, compress_zstd, decompress, Codec, DictRegistry};
     pub use crate::layout::{
         apply_manifest, validate_manifest, ApplyOptions, ApplyReport, ValidateOptions,

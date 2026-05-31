@@ -32,6 +32,8 @@ mod bntx_remove_texture;
 mod bntx_replace_png;
 mod bntx_rlt_dump;
 mod bntx_roundtrip_test;
+mod byml_inspect;
+mod byml_roundtrip_test;
 mod compress;
 mod decompress;
 mod layout_apply_arc;
@@ -232,6 +234,15 @@ pub enum Verb {
     /// the BRTD block.
     BntxLayoutDump(bntx_layout_dump::Args),
 
+    /// Print a structured snapshot of a BYML/BYAML document (version,
+    /// endianness, decoded value tree). Inflates `.byml.zs` via
+    /// `--dict`/`--romfs`. Use --json / --max-depth.
+    BymlInspect(byml_inspect::Args),
+
+    /// Internal: read a BYML, write it back, and report whether the
+    /// round-trip is byte-identical (inflating `.byml.zs` first).
+    BymlRoundtripTest(byml_roundtrip_test::Args),
+
     /// Apply an SGPO skin manifest to a packed `layout.arc` end-to-end:
     /// unpack in memory, apply to the BFLYT+BNTX, validate, and re-pack
     /// every entry into a new archive.
@@ -300,6 +311,8 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::BntxDictTest(args) => Ok(bntx_dict_test::run(args)?),
         Verb::BntxRltDump(args) => Ok(bntx_rlt_dump::run(args)?),
         Verb::BntxLayoutDump(args) => Ok(bntx_layout_dump::run(args)?),
+        Verb::BymlInspect(args) => Ok(byml_inspect::run(args)?),
+        Verb::BymlRoundtripTest(args) => Ok(byml_roundtrip_test::run(args)?),
         Verb::LayoutApplyArc(args) => Ok(layout_apply_arc::run(args)?),
         Verb::LayoutApplyManifest(args) => Ok(layout_apply_manifest::run(args)?),
         Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),

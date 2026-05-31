@@ -6,6 +6,23 @@ session immediately after this file was written.
 
 ## In progress / next
 
+- [~] **BYAML/BYML inspect + round-trip (+ diff).** Roadmap item #2.
+  **Stage A done** (committed): new `src/byml/` (read/write/mod/error),
+  `Byml` value tree + `BymlDocument`, both endians + versions `1..=7`,
+  bounds-checked + depth-guarded parser; `write_byml` re-emits the captured
+  bytes verbatim → **byte-identical round-trip** for unchanged docs. Verbs
+  `byml-inspect` (`--json`/`--max-depth`, inflates `.byml.zs` via
+  `--dict`/`--romfs`) + `byml-roundtrip-test`. Verified on real TotK assets
+  (`CookingTable.bgyml` LE, RSDB `Challenge`/`ActorInfo` LE, `GameDataList`
+  **big-endian** — ~3.3M nodes, all byte-identical). Tests:
+  `tests/byml_roundtrip.rs` + 4 fixture-free unit tests. Fixtures gitignored
+  under `tests/fixtures/byml/`.
+  **Stage B (next, same session):** from-scratch `write_byml_canonical`
+  (sorted/deduped hash-key + string tables, node layout, offset fixups) with
+  the *semantic* round-trip `read(write(x)) == read(x)`; `byml-diff`
+  (path-keyed structural diff) tested on the real version pairs
+  (`GameDataList.110`↔`.140`, `ActorInfo.121`↔`.143`). Mutation (`byml-set`
+  by path) stays out of scope for now.
 - [x] **Doc scan/refresh** — README, `lib.rs` rustdoc, AGENTSSUMMARY
   brought up to date with the current verb/format/test set.
 - [x] **BFLYT cross-game robustness** — unknown sections no longer fatal;
