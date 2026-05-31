@@ -48,6 +48,10 @@ mod msbt_inspect;
 mod msbt_json;
 mod msbt_roundtrip_test;
 mod pane_clone;
+mod pane_copy;
+mod pane_move;
+mod pane_remove;
+mod pane_rename;
 mod pane_set;
 mod restbl_inspect;
 mod restbl_roundtrip_test;
@@ -189,6 +193,19 @@ pub enum Verb {
 
     /// Clone a template pane (e.g. an SGPO marker) under a new name.
     PaneClone(pane_clone::Args),
+
+    /// Remove a pane and its entire subtree (also scrubbed from groups).
+    PaneRemove(pane_remove::Args),
+
+    /// Reparent a pane (and its subtree) under a new parent pane.
+    PaneMove(pane_move::Args),
+
+    /// Rename a pane in place, updating group pane-list references.
+    PaneRename(pane_rename::Args),
+
+    /// Deep-copy a pane subtree under a new parent, suffixing the copied
+    /// descendant names to keep them unique.
+    PaneCopy(pane_copy::Args),
 
     /// Print a structured snapshot of a BNTX. Use --json for tool consumption.
     BntxInspect(bntx_inspect::Args),
@@ -346,6 +363,10 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::MatRename(args) => Ok(mat_rename::run(args)?),
         Verb::PaneSet(args) => Ok(pane_set::run(args)?),
         Verb::PaneClone(args) => Ok(pane_clone::run(args)?),
+        Verb::PaneRemove(args) => Ok(pane_remove::run(args)?),
+        Verb::PaneMove(args) => Ok(pane_move::run(args)?),
+        Verb::PaneRename(args) => Ok(pane_rename::run(args)?),
+        Verb::PaneCopy(args) => Ok(pane_copy::run(args)?),
         Verb::BntxInspect(args) => Ok(bntx_inspect::run(args)?),
         Verb::BntxExportPng(args) => Ok(bntx_export_png::run(args)?),
         Verb::BntxExportAll(args) => Ok(bntx_export_all::run(args)?),
