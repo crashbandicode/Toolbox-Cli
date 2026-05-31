@@ -24,6 +24,10 @@ pub enum Error {
     #[error("BYML error: {0}")]
     Byml(#[from] crate::byml::BymlError),
 
+    /// A RESTBL (Resource Size Table) parse or write error.
+    #[error("RESTBL error: {0}")]
+    Restbl(#[from] crate::restbl::RestblError),
+
     /// An underlying I/O failure (reading/writing files).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
