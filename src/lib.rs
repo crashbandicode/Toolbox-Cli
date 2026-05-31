@@ -30,6 +30,8 @@
 //!   [`bntx::decode`] does deswizzle + decode to RGBA.
 //! - [`byml`] — BYML (binary YAML) read + verbatim round-trip + a decoded
 //!   [`byml::Byml`] value tree (inspect / diff).
+//! - [`restbl`] — RESTBL (Resource Size Table) read/write (byte-identical)
+//!   + CRC-32 path lookup / size update.
 //! - [`compression`] — zstd (with TotK dictionaries) and Yaz0/Yaz1
 //!   (`.szs`) decode/encode + codec detection.
 //! - [`texpipe`] — PNG → BC1/BC3/BC4/BC5/BC7 (intel_tex_2) → Tegra
@@ -77,6 +79,7 @@ pub mod dds;
 pub mod diff;
 pub mod layout;
 pub mod manifest;
+pub mod restbl;
 pub mod sarc;
 pub mod texpipe;
 
@@ -99,6 +102,7 @@ pub mod prelude {
         ValidateReport,
     };
     pub use crate::manifest::{SkinElement, SkinManifest};
+    pub use crate::restbl::{read_restbl, write_restbl, Restbl, SetOutcome};
     pub use crate::texpipe::Bc7Quality;
     pub use crate::{sarc, Error, Result};
 }

@@ -45,6 +45,9 @@ mod layout_validate_manifest;
 mod mat_rename;
 mod pane_clone;
 mod pane_set;
+mod restbl_inspect;
+mod restbl_roundtrip_test;
+mod restbl_set;
 mod sarc_pack;
 mod sarc_unpack;
 
@@ -248,6 +251,20 @@ pub enum Verb {
     /// key, arrays by index). Inflates `.byml.zs`. Use --json.
     BymlDiff(byml_diff::Args),
 
+    /// Print a structured snapshot of a RESTBL (Resource Size Table): version,
+    /// table counts, name (collision) table, and optional path/hash lookup.
+    /// Inflates `.rsizetable.zs`. Use --json.
+    RestblInspect(restbl_inspect::Args),
+
+    /// Internal: read a RESTBL, write it back, and report whether the
+    /// round-trip is byte-identical (inflating `.rsizetable.zs` first).
+    RestblRoundtripTest(restbl_roundtrip_test::Args),
+
+    /// Update a resource's reserved size in a RESTBL (by --path / --hash /
+    /// --name), optionally inserting it. Required to repack mods without
+    /// crashing the game.
+    RestblSet(restbl_set::Args),
+
     /// Apply an SGPO skin manifest to a packed `layout.arc` end-to-end:
     /// unpack in memory, apply to the BFLYT+BNTX, validate, and re-pack
     /// every entry into a new archive.
@@ -319,6 +336,9 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::BymlInspect(args) => Ok(byml_inspect::run(args)?),
         Verb::BymlRoundtripTest(args) => Ok(byml_roundtrip_test::run(args)?),
         Verb::BymlDiff(args) => Ok(byml_diff::run(args)?),
+        Verb::RestblInspect(args) => Ok(restbl_inspect::run(args)?),
+        Verb::RestblRoundtripTest(args) => Ok(restbl_roundtrip_test::run(args)?),
+        Verb::RestblSet(args) => Ok(restbl_set::run(args)?),
         Verb::LayoutApplyArc(args) => Ok(layout_apply_arc::run(args)?),
         Verb::LayoutApplyManifest(args) => Ok(layout_apply_manifest::run(args)?),
         Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),

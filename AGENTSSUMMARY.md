@@ -30,7 +30,7 @@ general-purpose Switch-modding toolkit (live roadmap in `todo.md`).
 ```bash
 cargo build           # dev (also compiles vendored libzstd via zstd-sys)
 cargo build --release # release (static-links Intel ISPC, ~3 min from clean)
-cargo test            # ~90 tests across 25 integration binaries + lib unit
+cargo test            # ~95 tests across 26 integration binaries + lib unit
                       # tests (compression + sarc) + 1 doctest
                       # (many skip cleanly when tests/fixtures/ is absent)
 ```
@@ -68,6 +68,7 @@ src/
 │   └── dict.rs         DictRegistry: ZsDic.pack loader, id-keyed (zs=1, bcett=2, pack=3)
 ├── texpipe.rs          PNG → BC7/BC1/BC3/BC4/BC5 (intel_tex_2) → Tegra swizzle
 ├── dds.rs              DDS (DX10) read/write; DXGI↔TextureFormat; interchange
+├── restbl.rs           RESTBL (Resource Size Table) read/write (byte-identical) + CRC-32 lookup/update
 ├── sarc/               Native SARC read+write (no `sarc` crate); crate-extractable
 │   ├── mod.rs          Public API, ArcFile/ArcEntry/UnpackedFile, format constants
 │   ├── read.rs         Reader (header/SFAT/SFNT, bounds-checked) — pure std
@@ -124,6 +125,16 @@ src/
   path-keyed structural diff (matching hashes by key, arrays by index) — on
   real `ActorInfo.121`→`.143` it surfaces +8212/−8249/~79401 changes
   (added actors, heap-size tweaks, an f32 precision shift).
+- **RESTBL** (Resource Size Table): TotK `RESTBL` v1 (`System/Resource/
+  ResourceSizeTable.Product.NNN.rsizetable.zs`). A fixed deterministic layout
+  (22-byte header + CRC table `{hash,size}` sorted by hash + a 160-byte-name
+  collision/overflow table sorted by name), so `write_restbl` is
+  **byte-identical** — verified on the real 379,715-entry / 3.04 MB tables
+  (both 1.2.1 and 1.4.3). Standard CRC-32 (verified against the `0xCBF43926`
+  check value); `get`/`set`/`insert` by hash / name / resource path (binary
+  search), so a mod can update a resource's reserved size (`restbl-set`) —
+  the thing needed to repack without crashing. BOTW's older `RSTB` magic
+  (128-byte names, no version field) is a follow-up (no fixtures locally).
 - **Compression**: zstd decode is **byte-identical to Python 3.14's
   `compression.zstd`** on real TotK `Boot.blarc.zs` (id-1 dict) and
   `AI.Global…pack.zs` (id-3 dict, 3.9 MB → 25 MB). Containers can't be
@@ -135,7 +146,7 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 49): the `verbs`
+- **Library unit tests** (`cargo test --lib`, 55): the `verbs`
   `--texture-format` alias/`--srgb` resolver, plus `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
@@ -152,7 +163,9 @@ src/
   scalars + writes back verbatim; bad-magic / too-small / truncated-node
   rejection; the **canonical writer** round-trips a tree of every node kind
   in both endians + rejects a scalar root; the **diff** detects
-  add/remove/change + nested-path / type changes). These run with no
+  add/remove/change + nested-path / type changes), and `restbl` (CRC-32
+  `0xCBF43926` check value; build → byte-identical write → read; get/set/
+  insert by hash / name / path keeps the tables sorted). These run with no
   fixtures — the format-code tests are the
   correctness net for the ASTC family / BYML reader we can't fully
   fixture-cover on CI.
@@ -178,6 +191,13 @@ src/
   remove one nested key) yields exactly those three diff entries at the
   expected paths; and (when both present) `ActorInfo.121`↔`.143` differ with
   a mirror-image reverse diff.
+- `tests/restbl_roundtrip.rs` — fixture-gated. Inflates the real TotK
+  `ResourceSizeTable.Product.{121,143}.…rsizetable.zs` and asserts each
+  re-serializes **byte-identically** with sorted CRC + name tables; pins the
+  1.2.1 counts (379,715 CRC + 32 name) and known lookups
+  (`MainField_U_30_50.bkres` = 64416 via the collision table); and inserts a
+  new resource into the real table, checking the +8-byte growth, sortedness,
+  and a write→read resolve.
 - `tests/sarc_writer.rs` — round-trips `info_melee.layout.arc` through
   `read_arc` → `write_arc` (now exercising the **native reader** too): all
   344 files byte-identical, re-readable, output stays ~2.16 MB (not the old
@@ -333,6 +353,7 @@ src/
 | HDR `info_melee` B8G8R8A8 pack not byte-identical | Low | C#-tool non-uniform BRTI spacing (same class as `sgpo_one_pane_png_proof`). Parses + decodes; semantic round-trip tested. |
 | In-tool ZSTD+dict / Yaz0 decompression | Resolved | `compression` module: zstd (+ TotK dicts via `ZsDic.pack.zs`) decode **byte-identical to Python 3.14 `compression.zstd`**; native Yaz0/Yaz1; verbs `decompress`/`compress`/`archive-extract`; compression-aware `layout-audit --dict/--romfs`. Re-compression is lossless, not container-identical (expected). |
 | BYML canonical (from-scratch) writer | Resolved | `write_byml_canonical` emits sorted/deduped string tables + BFS node layout with back-patched offsets; **semantically lossless** on the real corpus (both endians, ≤12.7 MB). Not byte-identical to Nintendo by contract (writer-specific layout), though it matches several files' exact size. `byml-diff` added. Mutation-by-path (`byml-set`) is a future follow-up. |
+| BOTW `RSTB` (older magic) | Not implemented | Only TotK `RESTBL` v1 is implemented (read/write/update byte-identical, real fixtures). BOTW's `RSTB` header differs (no version / `string_block_size`; 128-byte names) — a follow-up when BOTW fixtures are available. |
 | In-game runtime validation on Switch hardware | High value | Untestable without hardware. |
 | v9 BFLYT 60-byte material extension (flag bit 19) | Low | Captured verbatim; can't construct from scratch (unspec'd). User accepted this gap. |
 | `flags_untrusted` materials can't safely re-encode after sub-section count changes | Resolved in TODO #4 | `Material::assert_flags_trusted()` + `clear_untrusted_flag()` API; writer `debug_assert!` catches misuse via `original_section_size` snapshot. |
@@ -358,12 +379,11 @@ src/
 ## TODO / roadmap
 
 The **live, prioritized backlog lives in `todo.md`** — read it first for
-current work. Status snapshot: `origin/main` is at **bff4757** (a doc-sync on
-top of **14e5991**, the PNG-import RGBA8 format option), itself on top of
-**f46788c** (BNTX `0x00040100` + ASTC/low-bpp) and the earlier compression
-(bd454c7) + SARC-hardening (a36c07c) commits — all pushed. The current
-session adds BYML (read + inspect + verbatim round-trip in 686ad53, then the
-canonical writer + `byml-diff`) — see the top two Session log entries:
+current work. Status snapshot: `origin/main` is at **aa7d166** (BYML canonical
+writer + `byml-diff`), on top of `686ad53` (BYML read/inspect/round-trip),
+`bff4757`, `14e5991`, `f46788c`, `bd454c7`, `a36c07c` — all pushed. This
+session also adds **RESTBL** (read/write/update) on top — see the top three
+Session log entries:
 
 - ✅ **Prior 7-item handoff** (bntx export-png/all, format-preserving
   replace, DDS export/import/replace, layout-apply-arc, layout-diff,
@@ -392,13 +412,17 @@ canonical writer + `byml-diff`) — see the top two Session log entries:
   reports 0 unsupported BNTX. `filename_offset` writer now locates the
   container name by value (fixes non-slot-1 string pools).
 - ✅ **BYAML/BYML** (this session): read + `byml-inspect` + verbatim
-  byte-identical round-trip (Stage A, 686ad53) **plus** the from-scratch
-  canonical writer (semantically lossless) + `byml-diff` (Stage B). Only
-  mutation-by-path (`byml-set`) is left as a future follow-up.
-- ▶️ **Next** (see `todo.md`, recommended order): RSTB/RESTBL → MSBT →
-  AAMP → BFLYT advanced mutations → layout-repair → BFRES inspect-only →
-  project workflow. (ASTC/low-bpp **encode** is a smaller follow-up under
-  Hardening; BYML `byml-set` mutation is another.)
+  byte-identical round-trip (686ad53) **plus** the from-scratch canonical
+  writer (semantically lossless) + `byml-diff` (aa7d166). Only mutation-by-
+  path (`byml-set`) is left as a future follow-up.
+- ✅ **RSTB/RESTBL** (this session): TotK `RESTBL` v1 read/write
+  (byte-identical) + CRC-32 path lookup + size update/insert; verbs
+  `restbl-inspect`/`restbl-roundtrip-test`/`restbl-set`. BOTW `RSTB` (older
+  magic) is a follow-up.
+- ▶️ **Next** (see `todo.md`, recommended order): MSBT → AAMP → BFLYT
+  advanced mutations → layout-repair → BFRES inspect-only → project
+  workflow. (Smaller follow-ups under Hardening: ASTC/low-bpp **encode**,
+  BYML `byml-set` mutation, BOTW `RSTB`.)
 
 Standing backlog (no owner):
 
@@ -407,6 +431,39 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-05-31 — RESTBL (Resource Size Table) read + write + update
+Roadmap item #3. Lets a mod repack BOTW/TotK without crashing: if a modified
+resource exceeds its recorded size, the game faults, so the size table must be
+updated. TotK ships it as `System/Resource/ResourceSizeTable.Product.NNN
+.rsizetable.zs` (zstd).
+
+**Format (verified on real bytes).** `RESTBL` v1 is a fixed, deterministic
+layout: 22-byte header (magic `RESTBL` + `version` u32=1 + `string_block_size`
+u32=160 + `crc_table_num` u32 + `name_table_num` u32) → CRC table
+(`{hash:u32, size:u32}` × N, **sorted by hash**) → name/collision table
+(`{char[160] name, size:u32}` × M, **sorted by name**). The size math is exact
+(22 + 379715·8 + 32·164 = 3,042,990 = the decompressed `.121`), so the writer
+is **byte-identical**.
+
+**`src/restbl.rs`** (single-file format module, typed `RestblError` via
+`#[from]`): `read_restbl`/`write_restbl` (byte-identical round-trip on the real
+379,715-entry tables, both 1.2.1 + 1.4.3); native standard CRC-32 (reflected,
+`0xEDB88320`; verified against the `0xCBF43926` check value); `Restbl` with
+binary-search `get`/`set`/`insert` by hash, by name, and by resource path
+(`crc32(path)` then name-table fallback), plus a `SetOutcome`. Verbs
+`restbl-inspect` (`--json`, `--lookup <path>`/`--hash`, inflates
+`.rsizetable.zs` via `--dict`/`--romfs`), `restbl-roundtrip-test`, and
+`restbl-set` (update a size by `--path`/`--hash`/`--name`, `--insert` to add).
+
+**Tests/docs.** `tests/restbl_roundtrip.rs` (fixture-gated byte-identical
+round-trip on both real tables; pinned 1.2.1 counts + known lookups; an insert
+into the real table checks +8-byte growth + sortedness + write→read resolve);
+6 fixture-free unit tests in `restbl` (CRC-32 check value, build/parse,
+get/set/insert/path outcomes, bad-input rejection). `cargo test` green (55 lib
+unit + all integration); `clippy --all-targets` clean; `--no-default-features`
+builds. Fixtures (`ResourceSizeTable.Product.121` + `.143`) added to the
+gitignored `tests/fixtures/restbl/`. BOTW `RSTB` (older magic) deferred.
 
 ### 2026-05-31 — BYML canonical writer + structural diff (Stage B)
 Roadmap item #2, Stage B (same session as Stage A 686ad53). Adds the

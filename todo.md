@@ -23,6 +23,20 @@ session immediately after this file was written.
   Fixtures gitignored under `tests/fixtures/byml/`.
   *Follow-up (not done):* `byml-set` mutation by path (edit a leaf / add /
   remove, then `write_byml_canonical`).
+- [x] **RSTB/RESTBL read + update.** Roadmap item #3 (done, committed). New
+  `src/restbl.rs` (typed `RestblError`): TotK `RESTBL` v1 — 22-byte header +
+  CRC table (`{hash,size}` sorted by hash) + 160-byte-name collision table
+  (sorted by name). `write_restbl` is **byte-identical** (verified on the real
+  379,715-entry `ResourceSizeTable.Product.121`/`.143`). Native standard
+  CRC-32 (checked vs `0xCBF43926`); `get`/`set`/`insert` by hash / name /
+  resource path. Verbs `restbl-inspect` (`--json`, `--lookup`/`--hash`,
+  inflates `.rsizetable.zs`), `restbl-roundtrip-test`, `restbl-set`
+  (`--path`/`--hash`/`--name` + `--size` + `--insert`). Tests:
+  `tests/restbl_roundtrip.rs` + 6 fixture-free unit tests. Fixtures gitignored
+  under `tests/fixtures/restbl/`.
+  *Follow-up (not done):* BOTW `RSTB` (older magic — no version /
+  `string_block_size`, 128-byte names); a `restbl-update-dir` that scans a mod
+  folder and bumps every changed resource's size.
 - [x] **Doc scan/refresh** — README, `lib.rs` rustdoc, AGENTSSUMMARY
   brought up to date with the current verb/format/test set.
 - [x] **BFLYT cross-game robustness** — unknown sections no longer fatal;
