@@ -11,6 +11,7 @@
 
 mod aamp_inspect;
 mod aamp_roundtrip_test;
+mod aamp_set;
 mod archive_extract;
 mod bflan_inspect;
 mod bflan_roundtrip_test;
@@ -338,6 +339,10 @@ pub enum Verb {
     /// round-trip is byte-identical.
     AampRoundtripTest(aamp_roundtrip_test::Args),
 
+    /// Edit a parameter's value in an AAMP by name path (/object/param,
+    /// type-preserving), then canonical-write the (uncompressed) result.
+    AampSet(aamp_set::Args),
+
     /// Apply an SGPO skin manifest to a packed `layout.arc` end-to-end:
     /// unpack in memory, apply to the BFLYT+BNTX, validate, and re-pack
     /// every entry into a new archive.
@@ -427,6 +432,7 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::RestblSet(args) => Ok(restbl_set::run(args)?),
         Verb::AampInspect(args) => Ok(aamp_inspect::run(args)?),
         Verb::AampRoundtripTest(args) => Ok(aamp_roundtrip_test::run(args)?),
+        Verb::AampSet(args) => Ok(aamp_set::run(args)?),
         Verb::LayoutApplyArc(args) => Ok(layout_apply_arc::run(args)?),
         Verb::LayoutApplyManifest(args) => Ok(layout_apply_manifest::run(args)?),
         Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),
