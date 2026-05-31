@@ -41,7 +41,7 @@ mod write;
 
 pub use error::{AampError, Result};
 pub use read::read_aamp;
-pub use write::write_aamp;
+pub use write::{write_aamp, write_aamp_canonical};
 
 /// The 4-byte AAMP magic.
 pub const AAMP_MAGIC: &[u8; 4] = b"AAMP";
