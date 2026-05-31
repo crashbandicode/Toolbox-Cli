@@ -46,7 +46,8 @@ src/
 │   ├── sections.rs     Type definitions (incl. PaneKind::Opaque, trailing_sections)
 │   ├── read.rs         Parser (malformed mat1 via flags_untrusted; opaque/unknown sections)
 │   ├── write.rs        Writer (byte-identical round-trip)
-│   └── ops.rs          Mutation ops (clone_pane, add_material_from_template, set_pane…)
+│   ├── ops.rs          Mutation ops (clone/set/remove/move/rename/copy-subtree pane, set-text/-window, add_material…)
+│   └── repair.rs       Cleanup (prune unused materials/textures, clamp dangling refs, dedupe pane names)
 ├── bntx/
 │   ├── mod.rs          BntxFile, Texture, AppendTextureSpec, append/remove
 │   ├── read.rs         Full-fidelity parser (str pool, dict, RLT, BRTD)
@@ -175,7 +176,7 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 74): the `verbs`
+- **Library unit tests** (`cargo test --lib`, 96): the `verbs`
   `--texture-format` alias/`--srgb` resolver, plus `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
@@ -208,7 +209,11 @@ src/
   file). These run with no
   fixtures — the format-code tests are the
   correctness net for the ASTC family / BYML reader we can't fully
-  fixture-cover on CI.
+  fixture-cover on CI. Plus `bflyt::ops` (pane remove/move/rename/
+  copy-subtree with cycle + collision guards, a mutate→write→read structural
+  round-trip, set-text read-back + write/read, set-window border edits) and
+  `bflyt::repair` (material/texture prune index-remap, duplicate-name dedupe,
+  dangling-ref clamp, full `repair()`, prt1-skip).
 - `tests/compression_fixtures.rs` — fixture-gated (skips without
   `tests/fixtures/totk/compression/ZsDic.pack.zs`): loads the 3 TotK
   dictionaries (ids {1,2,3}), decompresses each local `.blarc.zs` to a SARC
@@ -315,6 +320,12 @@ src/
 - `tests/bflyt_real_fixtures.rs` — walks every `*.bflyt` under
   `tests/fixtures/` recursively (**881** in our setup: 508 Smash +
   373 TotK Boot/Common/Title), all byte-identical.
+- `tests/bflyt_pane_ops.rs` — fixture-gated real-bytes guard for the BFLYT
+  editing ops: picks a leaf pane in a real layout and rename/copy/remove +
+  write + re-parse it; repairs a real BFLYT and asserts every material→texture
+  ref is in range with no duplicate pane names; and edits the first real
+  simple `txt1` pane's text and reads it back. (The exhaustive logic lives in
+  the `bflyt::ops` / `bflyt::repair` unit tests.)
 - `tests/bntx_real_fixtures.rs` — walks `tests/fixtures/bntx/`,
   tolerates the known sgpo_one_pane_png_proof RLT diff. Now also covers
   the TotK `totk_title__Combined.bntx` (v`0x00040100`, byte-identical).
@@ -436,11 +447,11 @@ src/
 
 The **live, prioritized backlog lives in `todo.md`** — read it first for
 current work. Status snapshot: `origin/main` is at **e7594cb** (MSBT JSON
-export/import), on top of `3bbdfb3`/`df26ede` (MSBT canonical writer + read),
-`71fe57c` (RESTBL), `aa7d166`/`686ad53` (BYML) — all pushed (the 3 MSBT commits
-the prior handoff flagged as unpushed are now in sync with the remote). This
-session adds **`byml-set`** (BYML scalar mutation-by-path) on top — see the top
-Session log entry:
+export/import) — all BYML / RESTBL / MSBT work is pushed. Local `main` is **4
+commits ahead, unpushed**: `c1ed99e` (BYML `byml-set`), `a50ae76` (BFLYT pane
+remove/move/rename/copy-subtree), `582e493` (BFLYT prune + repair), `d75960a`
+(BFLYT set-text/-window) — see the top Session log entries. **Ask the user
+before pushing.**
 
 - ✅ **Prior 7-item handoff** (bntx export-png/all, format-preserving
   replace, DDS export/import/replace, layout-apply-arc, layout-diff,
@@ -492,14 +503,25 @@ Session log entry:
   `.byml.zs`, writes uncompressed). 11 unit + 3 fixture-gated tests
   (`tests/byml_set.rs`: a real `CookingTable` edit = exactly one structural
   diff). Add/remove-by-path is the remaining BYML follow-up.
-- ▶️ **Next** (see `todo.md`): **AAMP is blocked on fixtures** — TotK is 100%
-  BYML (`.bgyml`); a full romfs extension scan **and** cracking an actor pack
-  (`Pack/Actor/*.pack.zs`) found **zero** AAMP — its actor params are all
-  `YB`/BYML + `.ainb`. AAMP needs a **BOTW** dump (AAMP lives in BOTW actor
-  packs) or a Python `oead` byte oracle before the disciplined read→round-trip
-  pass. Otherwise: BFLYT advanced mutations → layout-repair → BFRES
-  inspect-only → project workflow. (Smaller Hardening follow-ups: ASTC/low-bpp
-  **encode**, BYML add/remove-by-path, BOTW `RSTB`, MSBT `ATR1`/older versions.)
+- ✅ **BFLYT advanced pane mutations** (this session, committed `a50ae76` +
+  `d75960a`): `remove`/`move`/`rename`/`copy-subtree` pane (group-ref-aware,
+  cycle/collision-guarded) + `set-window` (wnd1 borders) + `set-text`/`pane_text`
+  (txt1 single-string layout, UTF-16LE; rejects text-id/per-char/line-width
+  panes). Verbs `pane-remove`/`pane-move`/`pane-rename`/`pane-copy`/
+  `bflyt-set-window`/`bflyt-set-text`.
+- ✅ **BFLYT prune + repair** (this session, committed `582e493`):
+  `src/bflyt/repair.rs` — prune unused materials/textures (index remap), clamp
+  dangling texture refs, dedupe duplicate pane names, `repair()` →
+  `RepairReport`. Verbs `bflyt-prune` + `bflyt-repair` (`--dry-run`). Material
+  pruning skips when prt1 property data is present.
+- ▶️ **Next** (see `todo.md`): **BFRES inspect-only** → **project workflow**
+  (project-init/audit/apply/build + cached corpus audit). **AAMP is deferred to
+  the bottom — blocked on fixtures**: TotK is 100% BYML (`.bgyml`); a full romfs
+  extension scan **and** cracking an actor pack (`Pack/Actor/*.pack.zs`) found
+  **zero** AAMP (`YB`/BYML + `.ainb`). AAMP needs a **BOTW** dump (its actor
+  packs) or a Python `oead` byte oracle first. (Smaller Hardening follow-ups:
+  layout.arc-level `layout-repair`, ASTC/low-bpp **encode**, BYML
+  add/remove-by-path, BOTW `RSTB`, MSBT `ATR1`/older versions.)
 
 Standing backlog (no owner):
 
@@ -508,6 +530,45 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-05-31 — BFLYT advanced pane mutations + prune/repair (roadmap #3 + #4)
+Three committed batches on top of `byml-set`, all green.
+
+**Batch A — pane structural ops (`a50ae76`).** `src/bflyt/ops.rs`:
+`remove_pane` (drop a subtree + scrub the removed names from `grp1` lists,
+refuses the root), `move_pane` (reparent; refuses root/self/own-descendant
+cycle), `rename_pane` (rename + update `grp1` refs; rejects dup/over-length),
+`copy_subtree` (deep-copy children, append a suffix to copied descendant names,
+validate every result name before attaching). Verbs `pane-remove`/`pane-move`/
+`pane-rename`/`pane-copy`. The writer rebuilds all sizes/offsets, so these are
+pure in-memory tree edits. 10 unit tests + `tests/bflyt_pane_ops.rs`.
+
+**Batch B — prune + repair (`582e493`).** `src/bflyt/repair.rs`:
+`prune_unused_textures` (txl1 entries no material references; remap), 
+`prune_unused_materials` (mat1 entries no pic1/txt1/wnd1 references; remap pane
+refs), `fix_dangling_texture_refs` (clamp out-of-range/negative
+material→texture indices into `[0,len)`; drop + rebuild flags when no textures —
+clamping leaves counts unchanged so it's safe for `flags_untrusted` mats),
+`dedupe_pane_names` (rename later dups to `name_2/_3`), and
+`repair(prune_materials) → RepairReport`. Material pruning skips (and flags)
+when `prt1` property data is present (it references an *external* part's mats,
+but the data is opaque to us). Verbs `bflyt-prune` + `bflyt-repair`
+(`--dry-run`). 8 unit tests + a fixture-gated repair round-trip.
+
+**Batch C — set-text / set-window (`d75960a`).** `set_window(pane, WindowEdit)`
+edits wnd1 stretch/frame-size borders. `set_text`/`pane_text` replace/read a
+`txt1` string for the standard single-string layout (string at the canonical
+`0xA8` offset, UTF-16LE + NUL, updates `text_str_bytes`/`text_buf_bytes`); panes
+carrying a text id / per-character transform / line-width table are **rejected**
+rather than corrupted (round-trip discipline). Verbs `bflyt-set-text` +
+`bflyt-set-window`. 4 unit tests + a fixture-gated real-bytes set-text
+round-trip (edits a real layout's first simple `txt1` and reads it back).
+
+Per the user's request, **AAMP is moved to the bottom of `todo.md`** (deferred —
+no dump). `cargo test` green (**96** lib unit + all integration, 34 binaries, 0
+failures); `clippy --all-targets` clean; `--no-default-features` builds.
+**Follow-up:** a layout.arc-level `layout-repair` wrapper (repair every BFLYT in
+a packed archive); `layout-diff` of `wnd1`/`prt1` material bindings.
 
 ### 2026-05-31 — BYML `byml-set` (scalar mutation-by-path) + AAMP fixture finding
 Picked up the AAMP handoff (roadmap #2). **Investigation result that reframes
