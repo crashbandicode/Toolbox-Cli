@@ -357,6 +357,42 @@ mod tests {
     }
 
     #[test]
+    fn from_chunks_inverts_decode() {
+        let bytes = minimal_msbt();
+        let doc = read_msbt(&bytes).expect("parse");
+        // Decoding each message and re-encoding the chunks reproduces the exact
+        // message bytes (tag markers + terminator included).
+        for m in doc.messages().unwrap() {
+            let chunks = m.chunks(doc.encoding, doc.big_endian);
+            let rebuilt = Message::from_chunks(&chunks, doc.encoding, doc.big_endian);
+            assert_eq!(&rebuilt.raw, &m.raw);
+        }
+    }
+
+    #[test]
+    fn set_message_by_label_replaces_text() {
+        let bytes = minimal_msbt();
+        let mut doc = read_msbt(&bytes).expect("parse");
+        let new = Message::from_chunks(
+            &[TextChunk::Text("Bye".into())],
+            doc.encoding,
+            doc.big_endian,
+        );
+        assert!(doc.set_message_by_label("Greeting", new));
+        assert!(!doc.set_message_by_label("NoSuchLabel", Message { raw: vec![0, 0] }));
+        // The edit shows up through the label, and the canonical writer keeps
+        // the document valid + re-readable.
+        let rebuilt = write_msbt_canonical(&doc).expect("write");
+        let doc2 = read_msbt(&rebuilt).expect("re-parse");
+        let greeting = doc2
+            .entries()
+            .into_iter()
+            .find(|(l, _)| *l == "Greeting")
+            .map(|(_, m)| m.to_display(doc2.encoding, doc2.big_endian));
+        assert_eq!(greeting.as_deref(), Some("Bye"));
+    }
+
+    #[test]
     fn rejects_too_small() {
         assert!(matches!(read_msbt(&[0u8; 8]), Err(MsbtError::TooSmall(8))));
     }

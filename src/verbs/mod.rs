@@ -44,6 +44,7 @@ mod layout_diff;
 mod layout_validate_manifest;
 mod mat_rename;
 mod msbt_inspect;
+mod msbt_json;
 mod msbt_roundtrip_test;
 mod pane_clone;
 mod pane_set;
@@ -262,6 +263,14 @@ pub enum Verb {
     /// round-trip is byte-identical (inflating `.msbt.zs` first).
     MsbtRoundtripTest(msbt_roundtrip_test::Args),
 
+    /// Export an MSBT's label→message text to round-trippable JSON (control
+    /// tags preserved as hex). Inflates `.msbt.zs`. For translation editing.
+    MsbtExportJson(msbt_json::ExportArgs),
+
+    /// Patch an MSBT from edited JSON (from `msbt-export-json`) by label and
+    /// re-serialize with the canonical writer. Writes uncompressed `.msbt`.
+    MsbtImportJson(msbt_json::ImportArgs),
+
     /// Print a structured snapshot of a RESTBL (Resource Size Table): version,
     /// table counts, name (collision) table, and optional path/hash lookup.
     /// Inflates `.rsizetable.zs`. Use --json.
@@ -349,6 +358,8 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::BymlDiff(args) => Ok(byml_diff::run(args)?),
         Verb::MsbtInspect(args) => Ok(msbt_inspect::run(args)?),
         Verb::MsbtRoundtripTest(args) => Ok(msbt_roundtrip_test::run(args)?),
+        Verb::MsbtExportJson(args) => Ok(msbt_json::export_run(args)?),
+        Verb::MsbtImportJson(args) => Ok(msbt_json::import_run(args)?),
         Verb::RestblInspect(args) => Ok(restbl_inspect::run(args)?),
         Verb::RestblRoundtripTest(args) => Ok(restbl_roundtrip_test::run(args)?),
         Verb::RestblSet(args) => Ok(restbl_set::run(args)?),

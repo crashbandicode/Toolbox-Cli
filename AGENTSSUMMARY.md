@@ -149,8 +149,15 @@ src/
   re-emits the bytes captured at parse time, so an unmodified file is
   **byte-identical** by construction — verified on **all 1510 USen + 1510
   JPja** `Mals` `.msbt` (every one byte-identical, zero parse errors), so the
-  parser provably walks every section/label/message. JSON export/import + a
-  from-scratch canonical writer (for edits) are the Stage B follow-up.
+  parser provably walks every section/label/message. A from-scratch
+  `write_msbt_canonical` rebuilds an edited document (re-encodes `LBL1` via the
+  verified LMS hash `h=h*0x492+byte` into the original bucket count, `TXT2` from
+  the messages, opaque sections verbatim); it is **semantically lossless** and
+  in fact byte-identical on every local fixture. `msbt-export-json` /
+  `msbt-import-json` give a translation-editing workflow (label→message JSON,
+  control tags preserved as hex; import overlays edits by label then
+  canonical-writes) — verified end-to-end (byte-identical no-edit rebuild; an
+  edit propagates).
 - **Compression**: zstd decode is **byte-identical to Python 3.14's
   `compression.zstd`** on real TotK `Boot.blarc.zs` (id-1 dict) and
   `AI.Global…pack.zs` (id-3 dict, 3.9 MB → 25 MB). Containers can't be
@@ -162,7 +169,7 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 60): the `verbs`
+- **Library unit tests** (`cargo test --lib`, 63): the `verbs`
   `--texture-format` alias/`--srgb` resolver, plus `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
@@ -185,7 +192,10 @@ src/
   hand-built minimal LE/UTF-16 file with a 2-label `LBL1` + 2-message `TXT2`
   — one message carrying a `0x000E` tag — decodes to the right
   labels/messages/chunks and writes back verbatim; bad-magic / bad-BOM /
-  too-small / section-overrun rejection). These run with no
+  too-small / section-overrun rejection; the **canonical writer** semantic
+  round-trips the minimal file, `from_chunks` inverts the decoder, and
+  `set_message_by_label` edits a message then canonical-writes a re-readable
+  file). These run with no
   fixtures — the format-code tests are the
   correctness net for the ASTC family / BYML reader we can't fully
   fixture-cover on CI.
@@ -218,7 +228,9 @@ src/
   "Home on Arrange") and `Npc` (labels == messages, every label index
   resolves). Locally the corpus is the 4 sampled USen files; the full 1510
   USen + 1510 JPja corpus was round-tripped via `msbt-roundtrip-test` (all
-  byte-identical).
+  byte-identical). A `canonical_writer_semantic_round_trips_corpus` test runs
+  `read → write_msbt_canonical → read` over the fixtures (labels/messages/
+  entries preserved; also reports the byte-identical count — 4/4 locally).
 - `tests/restbl_roundtrip.rs` — fixture-gated. Inflates the real TotK
   `ResourceSizeTable.Product.{121,143}.…rsizetable.zs` and asserts each
   re-serializes **byte-identically** with sorted CRC + name tables; pins the
@@ -447,14 +459,17 @@ round-trip on top (committed, unpushed) — see the top Session log entry:
   (byte-identical) + CRC-32 path lookup + size update/insert; verbs
   `restbl-inspect`/`restbl-roundtrip-test`/`restbl-set`. BOTW `RSTB` (older
   magic) is a follow-up.
-- ✅ **MSBT (Stage A)** (this session, committed/unpushed): `src/msbt/` read +
-  verbatim byte-identical round-trip (all 1510 USen + 1510 JPja `Mals` `.msbt`)
-  + verbs `msbt-inspect`/`msbt-roundtrip-test`. Stage B (JSON export/import +
-  canonical writer for edits) is the follow-up.
-- ▶️ **Next** (see `todo.md`, recommended order): MSBT **Stage B** → AAMP →
-  BFLYT advanced mutations → layout-repair → BFRES inspect-only → project
-  workflow. (Smaller follow-ups under Hardening: ASTC/low-bpp **encode**,
-  BYML `byml-set` mutation, BOTW `RSTB`.)
+- ✅ **MSBT (Stages A+B)** (this session, committed/unpushed): `src/msbt/`
+  read + verbatim byte-identical round-trip (all 1510 USen + 1510 JPja `Mals`
+  `.msbt`) + a semantically-lossless canonical writer (LMS-hash `LBL1`
+  rebuild) + `Message::from_chunks`/`set_message_by_label` mutation. Verbs
+  `msbt-inspect`/`msbt-roundtrip-test`/`msbt-export-json`/`msbt-import-json`
+  (translation-editing workflow). BOTW/older versions + `ATR1`/`TSY1`
+  structural decode are follow-ups.
+- ▶️ **Next** (see `todo.md`, recommended order): AAMP → BFLYT advanced
+  mutations → layout-repair → BFRES inspect-only → project workflow. (Smaller
+  follow-ups under Hardening: ASTC/low-bpp **encode**, BYML `byml-set`
+  mutation, BOTW `RSTB`, MSBT `ATR1`/older versions.)
 
 Standing backlog (no owner):
 
@@ -464,7 +479,7 @@ Standing backlog (no owner):
 
 ## Session log
 
-### 2026-05-31 — MSBT (LibMessageStudio message) read + verbatim round-trip (Stage A)
+### 2026-05-31 — MSBT (LibMessageStudio message) read + round-trip + JSON edit (Stages A+B)
 Roadmap item: the text/message format. TotK ships localized text in
 `Mals/<lang>.Product.NNN.sarc.zs` — a zstd SARC of `.msbt` files
 (`archive-extract --romfs <dump>` to get them).
@@ -494,11 +509,27 @@ byte-identically (CJK + control tags + `é`-class UTF-16 all decode correctly).
 Tests: `tests/msbt_roundtrip.rs` (fixture-gated corpus byte-identical + pinned
 `Info_BuildHouse`/`Npc` structure) + 5 fixture-free unit tests (hand-built
 minimal MSBT with a tagged message; bad-magic/BOM/too-small/section-overrun
-rejection). `cargo test` green (60 lib unit + all integration); `clippy
---all-targets` clean; `--no-default-features` builds. Fixtures (4 sampled USen
-files) under the gitignored `tests/fixtures/msbt/`. **Stage B follow-up:** JSON
-export/import (reversible tag escapes) + a from-scratch canonical writer for
-edits.
+rejection). Fixtures (4 sampled USen files) under the gitignored
+`tests/fixtures/msbt/`.
+
+**Stage B — canonical writer + JSON edit.** `write_msbt_canonical` rebuilds a
+document from its decoded sections: `LBL1` re-encoded via the LMS label hash
+(`h = h*0x492 + byte` over the ASCII bytes, bucket = `hash % group_count`;
+**verified against all 47,657 corpus labels** — every one lands in its stored
+bucket) into the original `lbl1_groups` count, `TXT2` from the messages, other
+sections verbatim. Contract is the semantic round-trip (like BYML's), but it
+is byte-identical on all 4 local fixtures. `Message::from_chunks` inverts the
+UTF-16 chunk decoder; `MsbtDocument::set_message_by_label` edits a message in
+place. Verbs `msbt-export-json` (label→message JSON: text runs as strings,
+control tags as `{tag|close}` objects with hex payloads) and `msbt-import-json`
+(overlay edits by label, then canonical-write). Verified end-to-end on real
+`Info_BuildHouse.msbt`: a no-edit export→import rebuild is **byte-identical**,
+and a "Home on Arrange"→"Casa Translated" edit propagates through.
+
+`cargo test` green (63 lib unit + all integration); `clippy --all-targets`
+clean; `--no-default-features` builds. **Follow-ups:** BOTW / non-v3 versions
+(only TotK v3 LE/UTF-16 fixtures locally), `ATR1`/`TSY1` structural decode
+(retained opaque today).
 
 ### 2026-05-31 — RESTBL (Resource Size Table) read + write + update
 Roadmap item #3. Lets a mod repack BOTW/TotK without crashing: if a modified
