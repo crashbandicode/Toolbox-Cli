@@ -175,23 +175,25 @@ session immediately after this file was written.
   `bfres::read` unit tests. Fixtures gitignored under `tests/fixtures/bfres/`.
   *Follow-up (not done):* decode the model/animation sub-resources
   (FMDL/FSKA/vertex/material/shape) beyond the magic scan.
-- [ ] **TotK MeshCodec `.mc` decompression (deep RE; user-approved).** TotK
-  models ship as `Model/*.bfres.mc` = MeshCodec (`MCPK`): magicless zstd needing
-  a **raw-content dictionary embedded in `exefs/main`** (the NSO; *not* in
-  RomFS — confirmed no dict magic / symbol / string blob; dictless decode
-  fails). Custom out-of-band framing; the `FMSH` sub-section is
-  community-unsolved (even reference tools emit **partial, non-editable** BFRES);
-  the only complete reference is GPL. Plan: **(1) DONE** — ported **NSO0 + LZ4**
-  decompress to Rust (`src/nso.rs`, MIT `lz4_flex`; verb `nso-extract`),
-  byte-exact vs the Python-lz4 oracle on `main`'s text/rodata/data; the
-  `MeshCodec` strings are in rodata (`0x56b44`/`0x9130c`/`0x91338`/`0x9ae345`).
-  (2) disassemble `.text` around those xrefs to locate the raw dict pointer/size
-  + the frame params (window log); (3) implement a magicless-zstd(+dict) decode
-  in `compression` and validate **byte-exact against the 12,395-file decompressed
-  oracle** the user produced (`local-assets/mesh-codec-output/`, gitignored).
-  Until then, BFRES consumes already-decompressed `.mc` output (all v10; parse +
-  round-trip verified). The raw dict is the user's own extracted game data —
-  load it at runtime (`--mc-dict`), **never commit it**.
+- [x] **TotK MeshCodec `.mc` extract + repack — DONE (models).** Committed
+  `db746df` (MCPK container inspect + verbatim round-trip; all 12,395 `.mc`
+  byte-identical), `e205718` (extract + repack), `d08d456` (`restbl-update-dir`).
+  **Key finding:** the MCPK inner stream is **plain magicless zstd needing NO
+  dictionary** for model `.bfres.mc` (the executable-dictionary lead was a dead
+  end for models — that disassembly is the secondary FMSH path). `src/mc/`
+  (`mod`/`read`/`write`/`codec`/`error`) uses the `zstd` dep's `experimental`
+  feature for `FrameFormat::Magicless`; decode via the **streaming** API (the
+  frames carry an advisory dict-id the one-shot path rejects). `mc-extract` is
+  byte-identical to the decompressed-`.bfres` oracle (496 Python + 104 Rust);
+  `mc-repack` self-verifies `extract(repack(x))==x` (104/104). Verbs
+  `mc-inspect`/`mc-roundtrip-test`/`mc-extract`/`mc-repack`/`restbl-update-dir`.
+  Workflow: `mc-extract` → edit BFRES → `mc-repack` → `restbl-update-dir`.
+  *Untestable here:* in-game acceptance of repacked `.mc` (no hardware). NSO0+LZ4
+  (`src/nso.rs`) + the RE notes in `local-assets/re/FINDINGS.md` remain for the
+  FMSH/`.txtg` secondary path if ever needed.
+  *Follow-ups:* wider-corpus `mc-extract`-vs-oracle sweep; per-format RESTBL
+  overhead formulas (`restbl-update-dir` over-allocates safely today); BFRES
+  could auto-detect `.mc` and extract inline.
 
 ## Reliability hardening (trust matrix) — DONE this pass
 
