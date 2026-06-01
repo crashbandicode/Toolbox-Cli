@@ -44,6 +44,10 @@ pub enum Error {
     #[error("NSO error: {0}")]
     Nso(#[from] crate::nso::NsoError),
 
+    /// An MC/MCPK (TotK MeshCodec) container parse error.
+    #[error("MC error: {0}")]
+    Mc(#[from] crate::mc::McError),
+
     /// An underlying I/O failure (reading/writing files).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
