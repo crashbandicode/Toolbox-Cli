@@ -193,6 +193,26 @@ session immediately after this file was written.
   round-trip verified). The raw dict is the user's own extracted game data —
   load it at runtime (`--mc-dict`), **never commit it**.
 
+## Reliability hardening (trust matrix) — DONE this pass
+
+See **`TRUST_MATRIX.md`** (tracked) for the per-verb support tier + path to
+Trusted. The hardening pass added: fixture-free malformed-input tests for every
+parser (typed errors, no panic); mutation diff-shape tests for `msbt-import-json`
++ `restbl-set` (joining `byml-set`); canonical-writer idempotency tests
+(`byml`/`msbt`/`aamp`); and the **`corpus-audit`** verb (`src/corpus_audit.rs`:
+per-format byte-identical / semantic / inspect / unsupported / fail tally →
+JSON, recursing into SARC). Promoted to **Trusted**: `bflyt-roundtrip-test`,
+`bntx-roundtrip-test`, `byml-roundtrip-test`, `byml-set`, `aamp-roundtrip-test`,
+`bfres-roundtrip-test`.
+
+*Remaining to move more verbs to Trusted (see the matrix):*
+- [ ] Typed **`BflanError`** (BFLAN uses the crate `Error::Other` today).
+- [ ] **MSBT** BOTW / non-v3 variants: either round-trip or fail as explicitly
+  unsupported; a real-fixture end-to-end `msbt-import-json` mut-diff.
+- [ ] **BOTW `RSTB`** (older magic) for `restbl-roundtrip-test`/`-set`.
+- [ ] **`aamp-set`** exactly-one-diff test (byml-set style).
+- [ ] Record **BOTW + TotK real-romfs `corpus-audit` runs** (local-only manifests).
+
 ## Hardening (small, no new fixtures needed)
 
 - [ ] **`--channel-swizzle` flag for `bntx-import-dds`.** DDS carries no
