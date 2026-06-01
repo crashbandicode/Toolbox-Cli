@@ -56,6 +56,7 @@ mod mat_rename;
 mod msbt_inspect;
 mod msbt_json;
 mod msbt_roundtrip_test;
+mod nso_extract;
 mod pane_clone;
 mod pane_copy;
 mod pane_move;
@@ -377,6 +378,11 @@ pub enum Verb {
     /// BFLYT/BNTX structures and emit a JSON report.
     LayoutAudit(layout_audit::Args),
 
+    /// Parse a Switch NSO (`exefs/main`) and write its inflated
+    /// `.text`/`.rodata`/`.data` segments to a directory (LZ4-decompressing as
+    /// needed). Use `--grep` to locate an ASCII string within a segment.
+    NsoExtract(nso_extract::Args),
+
     /// Extract a SARC archive to a directory tree.
     SarcUnpack(sarc_unpack::Args),
 
@@ -452,6 +458,7 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),
         Verb::LayoutDiff(args) => Ok(layout_diff::run(args)?),
         Verb::LayoutAudit(args) => Ok(layout_audit::run(args)?),
+        Verb::NsoExtract(args) => Ok(nso_extract::run(args)?),
         Verb::SarcUnpack(args) => Ok(sarc_unpack::run(args)?),
         Verb::SarcPack(args) => Ok(sarc_pack::run(args)?),
         Verb::Decompress(args) => Ok(decompress::run(args)?),

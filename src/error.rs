@@ -40,6 +40,10 @@ pub enum Error {
     #[error("BFRES error: {0}")]
     Bfres(#[from] crate::bfres::BfresError),
 
+    /// An NSO (Switch executable) parse or segment-decompression error.
+    #[error("NSO error: {0}")]
+    Nso(#[from] crate::nso::NsoError),
+
     /// An underlying I/O failure (reading/writing files).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

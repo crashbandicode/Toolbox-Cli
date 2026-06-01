@@ -87,6 +87,8 @@ src/
 │   ├── read.rs         Header decode (magic/version/BOM/name/size/RLT) + sub-block magic scan
 │   ├── write.rs        Verbatim writer (byte-identical round-trip)
 │   └── error.rs        BfresError (offset / magic / BOM context)
+├── nso.rs              NSO (Switch exefs/main) read + LZ4 segment inflate (read_nso, NsoError)
+│                       — for inspecting executable contents (e.g. the MeshCodec dict)
 ├── sarc/               Native SARC read+write (no `sarc` crate); crate-extractable
 │   ├── mod.rs          Public API, ArcFile/ArcEntry/UnpackedFile, format constants
 │   ├── read.rs         Reader (header/SFAT/SFNT, bounds-checked) — pure std
@@ -225,7 +227,7 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 108): the `verbs`
+- **Library unit tests** (`cargo test --lib`, 111): the `verbs`
   `--texture-format` alias/`--srgb` resolver, plus `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
@@ -268,7 +270,9 @@ src/
   `aamp::edit` (scalar/string/color set, nested-list descent, hex-hash segments,
   every error path). Plus `bfres::read` (hand-built minimal `FRES` header decode
   + verbatim round-trip; big-endian BOM detection; bad-magic/BOM/too-small
-  rejection; structural block scan).
+  rejection; structural block scan). Plus `nso::read` (NSO0 header parse with
+  uncompressed segments; an LZ4-compressed segment round-trips via `lz4_flex`;
+  bad-magic / too-small / segment-overrun rejection).
 - `tests/compression_fixtures.rs` — fixture-gated (skips without
   `tests/fixtures/totk/compression/ZsDic.pack.zs`): loads the 3 TotK
   dictionaries (ids {1,2,3}), decompresses each local `.blarc.zs` to a SARC
@@ -652,11 +656,17 @@ dict has **no zstd-dict magic, no `ZSTD`/`MeshCodec` symbol, isn't a string blob
 and a dictless magicless decode fails). Framing is custom/out-of-band and the
 `FMSH` sub-section is community-unsolved (reference tools emit **partial,
 non-editable** BFRES); the only complete reference is GPL. Per the user, in-tool
-`.mc` decode is a **future ARM64-RE effort** (port NSO0+LZ4 to Rust via MIT
-`lz4_flex` → disassemble around the MeshCodec xref to locate the dict + frame
-params → validate against the **12,395 decompressed `.bfres` oracle** the user
-produced with Watertoon's tool, in `local-assets/mesh-codec-output/`). BFRES
-already consumes those decompressed `.mc` outputs (all v10, parse + round-trip).
+`.mc` decode is being built as an ARM64-RE effort. **Phase 1 done this session:**
+NSO0 + LZ4 segment decompression ported to Rust (`src/nso.rs`, MIT `lz4_flex`;
+verb `nso-extract`), validated **byte-exact** against the Python-lz4 oracle on all
+three `main` segments (text 45 MB / rodata 10 MB / data 5 MB); the `MeshCodec`
+string lives in `.rodata` (`0x56b44` / `0x9130c` / `0x91338` / `0x9ae345`).
+**Remaining:** disassemble `.text` around those xrefs to locate the raw dict
+pointer/size + frame params (window log), then implement magicless-zstd(+dict)
+decode in `compression` and validate against the **12,395 decompressed `.bfres`
+oracle** the user produced (`local-assets/mesh-codec-output/`). BFRES already
+consumes those decompressed `.mc` outputs (all v10, parse + round-trip); the raw
+dict is the user's own game data — load at runtime (`--mc-dict`), never commit.
 
 ### 2026-05-31 — AAMP (BOTW binary parameter archive) read + round-trip + canonical + set
 The user dumped **BOTW** (`01007EF00011E000`), unblocking AAMP (TotK has none).

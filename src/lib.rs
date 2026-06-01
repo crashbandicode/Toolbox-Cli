@@ -36,6 +36,8 @@
 //!   round-trip + a decoded [`aamp::ParameterList`] tree (inspect).
 //! - [`bfres`] — BFRES (`FRES`, BOTW/TotK 3D-resource container) header
 //!   inspect + verbatim byte-identical round-trip.
+//! - [`nso`] — NSO (Switch `exefs/main`) read + LZ4 segment decompression
+//!   (for inspecting executable contents, e.g. the TotK MeshCodec dictionary).
 //! - [`msbt`] — MSBT (LibMessageStudio message) read + verbatim round-trip +
 //!   decoded label/message tree (inspect).
 //! - [`compression`] — zstd (with TotK dictionaries) and Yaz0/Yaz1
@@ -88,6 +90,7 @@ pub mod diff;
 pub mod layout;
 pub mod manifest;
 pub mod msbt;
+pub mod nso;
 pub mod restbl;
 pub mod sarc;
 pub mod texpipe;
