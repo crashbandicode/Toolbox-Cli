@@ -36,6 +36,11 @@ pub enum McError {
         message: String,
     },
 
+    /// The trailing FMSH mesh-section framing was malformed (bad magic,
+    /// truncated header, or inconsistent sizes).
+    #[error("MeshCodec FMSH framing: {0}")]
+    MeshFraming(String),
+
     /// Repack was given an edited BFRES of a different size than the original;
     /// the mesh tail references the original layout, so a resize would break it
     /// (pass `allow_resize` to override at your own risk).

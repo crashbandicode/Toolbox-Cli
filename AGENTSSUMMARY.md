@@ -104,8 +104,9 @@ src/
 │   ├── read.rs         MCPK header parser (magic/flags/reserved/size descriptor)
 │   ├── write.rs        Verbatim writer (byte-identical no-op round-trip)
 │   ├── codec.rs        Magicless-zstd extract + repack (streaming decode; no dict)
-│   └── error.rs        McError (magic/flags/reserved/size/zstd context)
-├── meshopt/            Pure-Rust meshoptimizer 0.15 codec (MeshCodec mesh geometry; crate-extractable, std+thiserror)
+│   ├── mesh.rs         FMSH mesh-section framing parser (has-mesh flag, header, chunk, sizes); geometry NOT decoded
+│   └── error.rs        McError (magic/flags/reserved/size/zstd/mesh-framing context)
+├── meshopt/            Pure-Rust meshoptimizer 0.15 codec (reference + encoder; MeshCodec uses a custom entropy backend)
 │   ├── mod.rs          Public encode/decode_{vertex_buffer,index_buffer,index_sequence} + read_indices
 │   ├── vertex.rs       Vertex codec (0xa0): byte-group planes, zigzag deltas, tail
 │   ├── index.rs        Index buffer (0xe0 v0/v1, vertex/edge FIFOs) + index sequence (0xd0)
@@ -647,6 +648,42 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-01 — MeshCodec: FMSH framing parser (`src/mc/mesh.rs`) + custom-entropy correction
+Continued Stage 1b. Two outcomes: a committable framing parser, and an important
+RE correction about the inner codec.
+
+**RE correction (the inner entropy is CUSTOM, not stock meshopt byte-groups).**
+Disassembling the actual decode path — `0x6c71e0` (super-block driver: validates
+`ctx[0x38]+ctx[0x3c]`, reads two LSB-first LEB128 next-block sizes `(0,0)`=last,
+hands the decoder forward+reverse cursors for sub-stream A=`payload[2..sizeA]`
+and B=`payload[sizeA..]`) and the inner kernel `0x10fa980` — shows a **`clz`-based
+variable-length bitstream** with a 64-bit bit reader, `×3`/`÷3` triangle counts,
+and raw/zstd-block windows (`0x5ffb30`). Stock meshopt 0.15 has no `clz`/unary
+(it uses fixed 0/2/4/8-bit byte groups), so `NintendoWare_Meshoptimizer_For_
+MeshCodec` keeps meshopt's **geometry transforms** but swaps in a **custom
+entropy backend**. Net: `src/meshopt/` is a correct reference codec + encoder,
+but the full decode needs that custom backend ported (larger than last entry
+implied). Doc claims softened accordingly.
+
+**Committable increment: `src/mc/mesh.rs`** — the FMSH **framing** parser (the
+verified container layer the decoder will plug into): `has_mesh_flag`
+(`bfres[0xEE]&8`), `read_mesh_section` → `MeshSection`/`MeshChunk` (FMSH 34-byte
+header: version, workspace hint, compressed payload size, bufA/bufB decoded
+sizes, aligns; first-chunk descriptor `kind=u16&3`/`val=u16>>2` + two u24
+sub-stream sizes; payload offset). Detection by FMSH magic at the 4-aligned
+position after the BFRES frame; returns `None` for mesh-less resources. Surfaced
+via `mc-inspect --mesh` (text + JSON). **Verified on all 3 real `.mc`** (Bass/
+Bear/Dragonfly: `sub_a+sub_b==comp_sz`; `sub_a→vertex bufB`, `sub_b→index bufA`;
+`kind=2`,`val=33` constant) + 3 fixture-free tests (synthetic frame+FMSH parse,
+no-FMSH→None, inconsistent-sizes→typed error). `cargo test` = **154 lib unit +
+all integration, 0 failures**; `clippy --all-targets` clean; `--no-default-
+features` builds.
+
+**NEXT:** port the custom entropy decoder (`0x10f8aa0` 8-state machine + kernels
+`0x10fa980/ab60/acf0` + `0x10fae60`/`0x110ca30`/`0x110c280` + dual fwd/rev bit
+readers + zstd-block windows) → decode sub_a→vertex / sub_b→index, apply meshopt
+transforms, assemble `[info][bufA][bufB]`+pad, validate FULL decode == oracle.
+
 ### 2026-06-01 — MeshCodec mesh codec is **meshoptimizer 0.15**; built `src/meshopt/` (Stage 1b primitive)
 Continuing the mesh-geometry decode. **Key discovery (corrects the Stage-1b
 roadmap):** the FMSH chunk codec is **not** "the Huff0/raw/RLE primitives in
@@ -669,8 +706,10 @@ MSB-first var-int window sizes + a 64-bit bit reader + raw/zstd-block windows vi
 index][bufB=vertex]` + zero pad (re-confirmed on Bear: `[17536][131072]`).
 
 **Built `src/meshopt/`** — a clean-room, crate-extractable (std + `thiserror`
-only) port of the **stock meshopt 0.15** codecs (the inner algorithm both decode
-layers need): `vertex` (`encode/decode_vertex_buffer`, `0xa0`: byte-group planes,
+only) port of the **stock meshopt 0.15** codecs (a reference codec + encoder;
+see the next session-log entry — TotK's actual decode uses a *custom* entropy
+backend, so this is a foundation, not a drop-in): `vertex`
+(`encode/decode_vertex_buffer`, `0xa0`: byte-group planes,
 zigzag deltas, first-vertex tail), `index` (`encode/decode_index_buffer`, `0xe0`
 v0/v1: vertex/edge FIFOs + codeaux table; and `encode/decode_index_sequence`,
 `0xd0`), `read_indices`. **Validated:** exact-format vectors anchored to the spec

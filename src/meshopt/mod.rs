@@ -21,11 +21,15 @@
 //! * [`decode_index_sequence`] / [`encode_index_sequence`] — index sequence
 //!   codec (`0xd0`).
 //!
-//! TotK additionally wraps these streams in a **custom Nintendo container** (the
-//! `FMSH` chunk list, whose byte-planes are carried in zstd-block-framed
-//! windows). That outer streaming framing is decoded elsewhere (see
-//! `local-assets/re/FINDINGS.md`); this module is the inner meshopt algorithm
-//! both layers rely on.
+//! **Scope / caveat.** TotK's MeshCodec does *not* use this stock byte-group
+//! entropy layer directly: its `FMSH` geometry is decoded by a **custom Nintendo
+//! entropy codec** (a `clz`-based variable-length bitstream with forward+reverse
+//! readers and zstd-compressed windows — see `local-assets/re/FINDINGS.md`),
+//! which almost certainly reuses meshopt's *geometry transforms* (vertex
+//! delta/zig-zag, index FIFO) but replaces the byte-group entropy. So this
+//! module is a faithful **reference codec + encoder foundation**, validated in
+//! its own right; it is not yet a drop-in decoder for the game's streams (that
+//! requires porting the custom entropy backend).
 //!
 //! Encode + decode are mutual inverses (`decode(encode(x)) == x`), validated by
 //! round-trip on synthetic and real vertex/index data plus hand-computed format
