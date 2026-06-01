@@ -54,6 +54,8 @@ mod layout_audit;
 mod layout_diff;
 mod layout_validate_manifest;
 mod mat_rename;
+mod mc_inspect;
+mod mc_roundtrip_test;
 mod msbt_inspect;
 mod msbt_json;
 mod msbt_roundtrip_test;
@@ -390,6 +392,15 @@ pub enum Verb {
     /// needed). Use `--grep` to locate an ASCII string within a segment.
     NsoExtract(nso_extract::Args),
 
+    /// Print a structured snapshot of a TotK MeshCodec (`MCPK`) container:
+    /// version, flags, decompressed-size descriptor, compressed-stream size.
+    /// Read-only (does not decompress). Use --json.
+    McInspect(mc_inspect::Args),
+
+    /// Internal: read an MCPK container, write it back, and report whether the
+    /// round-trip is byte-identical. `--dir` sweeps every `.mc` under a tree.
+    McRoundtripTest(mc_roundtrip_test::Args),
+
     /// Extract a SARC archive to a directory tree.
     SarcUnpack(sarc_unpack::Args),
 
@@ -467,6 +478,8 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::LayoutAudit(args) => Ok(layout_audit::run(args)?),
         Verb::CorpusAudit(args) => Ok(corpus_audit::run(args)?),
         Verb::NsoExtract(args) => Ok(nso_extract::run(args)?),
+        Verb::McInspect(args) => Ok(mc_inspect::run(args)?),
+        Verb::McRoundtripTest(args) => Ok(mc_roundtrip_test::run(args)?),
         Verb::SarcUnpack(args) => Ok(sarc_unpack::run(args)?),
         Verb::SarcPack(args) => Ok(sarc_pack::run(args)?),
         Verb::Decompress(args) => Ok(decompress::run(args)?),

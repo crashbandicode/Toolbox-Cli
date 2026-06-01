@@ -38,6 +38,8 @@
 //!   inspect + verbatim byte-identical round-trip.
 //! - [`nso`] — NSO (Switch `exefs/main`) read + LZ4 segment decompression
 //!   (for inspecting executable contents, e.g. the TotK MeshCodec dictionary).
+//! - [`mc`] — MC/MCPK (TotK MeshCodec) container inspect + verbatim
+//!   byte-identical round-trip (decompression/repack are in progress).
 //! - [`msbt`] — MSBT (LibMessageStudio message) read + verbatim round-trip +
 //!   decoded label/message tree (inspect).
 //! - [`compression`] — zstd (with TotK dictionaries) and Yaz0/Yaz1
@@ -93,6 +95,7 @@ pub mod dds;
 pub mod diff;
 pub mod layout;
 pub mod manifest;
+pub mod mc;
 pub mod msbt;
 pub mod nso;
 pub mod restbl;
