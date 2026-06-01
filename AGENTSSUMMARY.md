@@ -670,11 +670,24 @@ input profiles × levels {1,3,9,19} + empty/tiny + a content-checksum frame (10
 lib unit tests); and `tests/zstd_pure_bfres.rs` decodes the **real** BFRES frame
 of every `tests/fixtures/mc/*.mc` identically to libzstd (bytes + consumed
 length). `cargo test` = **143 lib unit + all integration, 0 failures**; `clippy
---all-targets` clean; `--no-default-features` builds. **Next (Stage 1b):** the
-custom MeshCodec outer framing (FMSH header + the block assembly that libzstd
-can't follow) driving these primitives → full mesh decode == the
-`mesh-codec-output` oracle. Then re-encode via RAW blocks. RE notes in
-`local-assets/re/FINDINGS.md`.
+--all-targets` clean; `--no-default-features` builds.
+
+**Mesh container framing — also RE'd this session (not yet ported; full detail
+in `local-assets/re/FINDINGS.md`):** orchestrator `0x6c6334` decodes the BFRES
+frame, then checks **bit 3 of BFRES byte `+0xEE`** (the has-mesh "external
+flags" byte). The **FMSH header** is **34 bytes**, 4-aligned after the BFRES
+(0-3 bytes of `00` pad): `'FMSH'` + u32 version + u32(?) + u32 compressed-
+payload-size (`+0x0C`) + u32 buffer-A size (`+0x10`) + u32 buffer-B size
+(`+0x14`) + align bytes + an 8-byte first-chunk descriptor. The decoded mesh =
+`[~288-byte info header][buffer A][buffer B]` then zero-pad to capacity (proved:
+Bear `mesh_out[0..8]` = `[17248+288][131072]`, and 288+16664+93600 = 110552 =
+the non-pad mesh length). Mesh decode = `0x6c6bf0` → per-chunk `0x6c6cd0` (u16
+header `type=u16&3`/`val=u16>>2`, two 24-bit sizes) → **polymorphic dispatcher
+`0x10f8860`** (factory `0x10f8920` by type → vtable decode), almost certainly
+the same Huff0/raw/RLE primitives now in `zstd_pure`. **Next (Stage 1b):**
+follow the type→decoder vtables (`0x110bab0` …), decode each chunk with
+`zstd_pure`, place at aligned offsets, validate the FULL decode == the
+`mesh-codec-output` oracle and sweep the corpus; then re-encode via RAW blocks.
 
 ### 2026-06-01 — TotK MeshCodec (`.mc`/MCPK) extract + repack pipeline (SOLVED for models)
 The user asked for a cautious, test-driven attempt at a trusted TotK model
