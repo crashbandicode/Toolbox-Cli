@@ -41,7 +41,7 @@ semantic-diff test. ✓ = present, ~ = partial, ✗ = absent, n/a = not applicab
 
 ## Validation status (last full run)
 
-`cargo test` = **132 lib unit + 223 total across all binaries, 0 failures**;
+`cargo test` = **133 lib unit + 224 total across all binaries, 0 failures**;
 `cargo clippy --all-targets` = clean; `cargo build --no-default-features` = ok.
 The hardening pass landed: fixture-free malformed-input tests for every parser,
 mutation diff-shape tests for the setters, canonical-writer idempotency tests,
@@ -159,18 +159,20 @@ Byte-exact LZ4 segment inflate vs a Python-lz4 oracle on the real 35 MB TotK
 
 ## MC / MCPK (TotK MeshCodec) — `src/mc`
 
-The MCPK inner stream is magicless zstd needing **no dictionary** for model
-`.bfres.mc`. `mc-extract` is byte-identical to the decompressed-`.bfres`
-reference; `mc-repack` is lossless through our own codec (`extract(repack(x))==x`)
-but not byte-identical to Nintendo's encoder. **In-game acceptance of repacked
-`.mc` is untestable here (no hardware).**
+A model `.mc` = `[BFRES frame: magicless zstd, no dict] + [mesh vertex/index
+buffers: a CUSTOM MeshCodec encoding, NOT zstd]`. `mc-extract` decodes the first
+frame = the BFRES **structure** (byte-identical to the reference decompressor's
+BFRES portion); it does **not** decode the geometry (custom mesh codec, unsolved).
+`mc-repack` re-encodes the BFRES and preserves the original mesh tail verbatim
+(edited structure + original geometry; same-BFRES-size edits only).
+**In-game acceptance of repacked `.mc` is untestable here (no hardware).**
 
 | Verb | Kind | Contract | corpus / unit / neg / mut-diff | Tier | → Trusted |
 |---|---|---|---|---|---|
 | `mc-inspect` | R | inspect | ✓(12,395) / ✓ / ✓ / n/a | Inspect-only | (header decode corpus-trusted; read-only) |
 | `mc-roundtrip-test` | R | byte-identical (verbatim) | ✓(12,395) / ✓ / ✓ / n/a | **Trusted** | — (all 12,395 `.mc` parse + verbatim round-trip) |
-| `mc-extract` | R | inspect (decompress) | ✓(496+104 vs oracle) / ✓ / ✓ / n/a | Validated | wider-corpus oracle sweep → Trusted |
-| `mc-repack` | W | mutate (lossless-recompress; NOT byte-identical) | ✓(104 self-RT) / ✓ / ~ / ✓(extract∘repack=id) | Experimental | in-game acceptance (no hardware) + wider corpus |
+| `mc-extract` | R | inspect (decompress BFRES structure) | ✓(496+104 vs BFRES oracle) / ✓ / ✓ / n/a | Validated | mesh-geometry decode (custom codec); then full-model Trusted |
+| `mc-repack` | W | mutate (BFRES re-encode + mesh tail preserved; NOT byte-identical) | ✓(self-RT + tail-preserve) / ✓ / ✓(resize-guard) / ✓(extract∘repack=id) | Experimental | in-game acceptance (no hardware) + geometry-edit support |
 
 ## SARC archive — `src/sarc`
 
