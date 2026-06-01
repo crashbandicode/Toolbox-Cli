@@ -82,6 +82,11 @@ src/
 │   ├── write.rs        Verbatim writer + from-scratch canonical writer (semantically lossless)
 │   ├── edit.rs         set_by_path (type-preserving scalar mutation by name/hash path)
 │   └── error.rs        AampError (offset / type / edit context)
+├── bfres/              BFRES (FRES, BOTW/TotK 3D-resource container) inspect + verbatim round-trip
+│   ├── mod.rs          BfresDocument, DetectedBlock, version constants, embedded-BNTX accessor
+│   ├── read.rs         Header decode (magic/version/BOM/name/size/RLT) + sub-block magic scan
+│   ├── write.rs        Verbatim writer (byte-identical round-trip)
+│   └── error.rs        BfresError (offset / magic / BOM context)
 ├── sarc/               Native SARC read+write (no `sarc` crate); crate-extractable
 │   ├── mod.rs          Public API, ArcFile/ArcEntry/UnpackedFile, format constants
 │   ├── read.rs         Reader (header/SFAT/SFNT, bounds-checked) — pure std
@@ -190,6 +195,25 @@ src/
   (`--json`, `--names` to resolve hashes), `aamp-roundtrip-test` (`--canonical`),
   `aamp-set`. *Follow-ups:* a name table for readable inspect by default;
   decoding curve control points (kept as raw bytes today); add/remove params.
+- **BFRES** (`FRES`, Binary caFe RESource): Nintendo's 3D-resource container —
+  models (`FMDL`), skeletal/material/visibility/scene animations, embedded
+  textures (a `BNTX` block), the shared `_STR`/`_DIC`/`_RLT` tables. BOTW ships
+  it as `Model/*.sbfres` (Yaz0, **v `0x00050003`**); TotK as `Model/*.bfres.zs`
+  (plain zstd, **v `0x000A0000`**) + `Model/*.bfres.mc` (MeshCodec — see the gap
+  table). Both little-endian on Switch (BOM-detected). The reader decodes the
+  header (magic, version, endianness, embedded file name, file size,
+  relocation-table offset) and structurally scans the well-known sub-block
+  magics; like BNTX/AAMP, the byte layout is offset/relocation-heavy so the
+  parser is **inspect-only** and `write_bfres` re-emits the captured bytes →
+  **byte-identical** for an unmodified document. Verified across **424** real
+  files (BOTW v5 `.sbfres`, TotK v10 `.bfres.zs`, and the decompressed v10 model
+  corpus), 0 parse errors. A BOTW `.Tex.bfres` embeds a full BNTX; `bfres-inspect`
+  surfaces it via the existing BNTX reader (bytes bounded by the BNTX's own
+  `file_size`) — e.g. `Animal_Bass.Tex` reports its 8 textures (`Bass_Alb`
+  BC1_UNORM_SRGB 128×128 mips=8, …). Verbs `bfres-inspect` (`--json`) +
+  `bfres-roundtrip-test`. *Follow-ups:* decode the model/animation sub-resources
+  (FMDL/FSKA/…) beyond the structural scan; MeshCodec `.mc` decompression (a
+  dedicated RE effort — see the gap table).
 - **Compression**: zstd decode is **byte-identical to Python 3.14's
   `compression.zstd`** on real TotK `Boot.blarc.zs` (id-1 dict) and
   `AI.Global…pack.zs` (id-3 dict, 3.9 MB → 25 MB). Containers can't be
@@ -201,7 +225,7 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 105): the `verbs`
+- **Library unit tests** (`cargo test --lib`, 108): the `verbs`
   `--texture-format` alias/`--srgb` resolver, plus `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
@@ -242,7 +266,9 @@ src/
   minimal AAMP decode + verbatim round-trip; bad-magic/version/too-small
   rejection), `aamp::write` (canonical semantic round-trip of a nested doc), and
   `aamp::edit` (scalar/string/color set, nested-list descent, hex-hash segments,
-  every error path).
+  every error path). Plus `bfres::read` (hand-built minimal `FRES` header decode
+  + verbatim round-trip; big-endian BOM detection; bad-magic/BOM/too-small
+  rejection; structural block scan).
 - `tests/compression_fixtures.rs` — fixture-gated (skips without
   `tests/fixtures/totk/compression/ZsDic.pack.zs`): loads the 3 TotK
   dictionaries (ids {1,2,3}), decompresses each local `.blarc.zs` to a SARC
@@ -290,6 +316,15 @@ src/
   param via `set_by_path` (hex-hash path) → canonical-write → re-read. The full
   418-file BOTW sweep (verbatim + `--canonical`) was run via
   `aamp-roundtrip-test`.
+- `tests/bfres_roundtrip.rs` — fixture-gated (skips without
+  `tests/fixtures/bfres/`, gitignored game data: decompressed BOTW v5 `.sbfres`
+  + TotK v10 models/animations). Asserts every `.bfres` fixture `write_bfres`-
+  round-trips **byte-identically** and that the corpus spans both games (a v5 +
+  a v10); a `surfaces_embedded_bntx` test parses each `.Tex.bfres`'s embedded
+  BNTX via `read_bntx` (every texture name resolves, dims > 0); and pins
+  `Animal_Bass` (v5, `FMDL`×2) + `Animal_Bass.Tex` (8 embedded textures). The
+  full 424-file sweep (BOTW `.sbfres` + TotK `.bfres.zs` + decompressed v10
+  models) was run via `bfres-roundtrip-test` (0 parse errors).
 - `tests/restbl_roundtrip.rs` — fixture-gated. Inflates the real TotK
   `ResourceSizeTable.Product.{121,143}.…rsizetable.zs` and asserts each
   re-serializes **byte-identically** with sorted CRC + name tables; pins the
@@ -459,6 +494,8 @@ src/
 | In-tool ZSTD+dict / Yaz0 decompression | Resolved | `compression` module: zstd (+ TotK dicts via `ZsDic.pack.zs`) decode **byte-identical to Python 3.14 `compression.zstd`**; native Yaz0/Yaz1; verbs `decompress`/`compress`/`archive-extract`; compression-aware `layout-audit --dict/--romfs`. Re-compression is lossless, not container-identical (expected). |
 | BYML canonical (from-scratch) writer | Resolved | `write_byml_canonical` emits sorted/deduped string tables + BFS node layout with back-patched offsets; **semantically lossless** on the real corpus (both endians, ≤12.7 MB). Not byte-identical to Nintendo by contract (writer-specific layout), though it matches several files' exact size. `byml-diff` + `byml-set` (scalar mutation-by-path → canonical write) added. Add/remove-by-path remains a follow-up. |
 | BOTW `RSTB` (older magic) | Not implemented | Only TotK `RESTBL` v1 is implemented (read/write/update byte-identical, real fixtures). BOTW's `RSTB` header differs (no version / `string_block_size`; 128-byte names) — a follow-up when BOTW fixtures are available. |
+| BFRES model/animation sub-resources | Inspect-only | `read_bfres` decodes the header + scans sub-block magics; FMDL/FSKA/vertex/material payloads aren't decoded. Verbatim round-trip is byte-identical; full decode is a follow-up. |
+| TotK MeshCodec `.mc` (`MCPK`) decompression | Not implemented (deep RE) | TotK models ship as `.bfres.mc` = MeshCodec: magicless zstd needing a **raw-content dictionary embedded in the game executable** (`exefs/main` NSO, not RomFS — confirmed: no dict magic/symbol/string blob; dictless decode fails). Custom out-of-band framing; the `FMSH` sub-section is community-unsolved (even reference tools produce **partial, non-editable** BFRES). The only complete reference is GPL (Switch-Toolbox). BFRES support covers `.sbfres`/`.bfres.zs` + already-decompressed `.mc` output; in-tool `.mc` decode is a user-approved future ARM64-RE effort (NSO0+LZ4 Rust port → locate dict/framing → validate vs the decompressed-output oracle). |
 | In-game runtime validation on Switch hardware | High value | Untestable without hardware. |
 | v9 BFLYT 60-byte material extension (flag bit 19) | Low | Captured verbatim; can't construct from scratch (unspec'd). User accepted this gap. |
 | `flags_untrusted` materials can't safely re-encode after sub-section count changes | Resolved in TODO #4 | `Material::assert_flags_trusted()` + `clear_untrusted_flag()` API; writer `debug_assert!` catches misuse via `original_section_size` snapshot. |
@@ -484,12 +521,13 @@ src/
 ## TODO / roadmap
 
 The **live, prioritized backlog lives in `todo.md`** — read it first for
-current work. Status snapshot: `origin/main` is at **e7594cb** (MSBT) — all
-BYML / RESTBL / MSBT work is pushed. Local `main` is **9 commits ahead,
-unpushed**: `c1ed99e` (BYML `byml-set`); `a50ae76` / `582e493` / `d75960a`
-(BFLYT pane ops / prune+repair / set-text+window); `ab6b86f` (docs); `ef11b4c`
-/ `6ad1ee6` / `cf9f257` (AAMP read / canonical / set); plus this doc update —
-see the top Session log entries. **Ask the user before pushing.**
+current work. Status snapshot: `origin/main` was at **c08f765** (AAMP docs) at
+the start of this session — all BYML / RESTBL / MSBT / BFLYT-ops / AAMP work is
+pushed. This session adds **BFRES inspect-only** (header inspect + verbatim
+byte-identical round-trip; embedded-BNTX surfacing) on top — see the top Session
+log entry. **Ask the user before pushing.** (MeshCodec `.mc` decompression was
+investigated and deferred to a user-approved deep-RE follow-up — see the gap
+table + the session log.)
 
 - ✅ **Prior 7-item handoff** (bntx export-png/all, format-preserving
   replace, DDS export/import/replace, layout-apply-arc, layout-diff,
@@ -559,11 +597,19 @@ see the top Session log entries. **Ask the user before pushing.**
   mutation. Verbs `aamp-inspect` / `aamp-roundtrip-test` / `aamp-set`. Fixtures
   (32 files across 18 extensions, from a BOTW dump) under the gitignored
   `tests/fixtures/aamp/`.
-- ▶️ **Next** (see `todo.md`): **BFRES inspect-only** → **project workflow**
-  (project-init/audit/apply/build + cached corpus audit). (Smaller Hardening
-  follow-ups: AAMP name table for readable inspect + curve-control-point decode
-  + add/remove params; layout.arc-level `layout-repair`; ASTC/low-bpp
-  **encode**; BYML add/remove-by-path; BOTW `RSTB`; MSBT `ATR1`/older versions.)
+- ✅ **BFRES inspect-only** (this session): `src/bfres/` header inspect
+  (magic/version/BOM/name/size/RLT + sub-block magic scan) + verbatim
+  byte-identical round-trip across **424** real files (BOTW v5 `.sbfres`, TotK
+  v10 `.bfres.zs`, decompressed v10 models); `bfres-inspect` surfaces a BOTW
+  `.Tex.bfres`'s embedded BNTX via the existing reader. Verbs `bfres-inspect` /
+  `bfres-roundtrip-test`.
+- ▶️ **Next** (see `todo.md`): **MeshCodec `.mc` deep RE** (user-approved:
+  NSO0+LZ4 Rust port → locate raw dict + framing in `exefs/main` → validate vs
+  the decompressed-output oracle) and/or **BFRES sub-resource decode**
+  (FMDL/FSKA) → **project workflow** (project-init/audit/apply/build + cached
+  corpus audit). (Smaller follow-ups: AAMP name table + curve decode +
+  add/remove; layout.arc `layout-repair`; ASTC/low-bpp **encode**; BYML
+  add/remove-by-path; BOTW `RSTB`; MSBT `ATR1`/older versions.)
 
 Standing backlog (no owner):
 
@@ -572,6 +618,45 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-05-31 — BFRES (FRES) inspect + verbatim round-trip; MeshCodec `.mc` investigated/deferred
+Roadmap item #2 (BFRES inspect-only). Done in the disciplined order:
+read/inspect + byte-identical round-trip FIRST, no mutation.
+
+**New `src/bfres/`** (`mod`/`read`/`write`/`error`, typed `BfresError` via
+`#[from]`). The `FRES` ResHeader was pinned against real bytes and is consistent
+across **BOTW v5 (`0x00050003`)** and **TotK v10 (`0x000A0000`)**, little-endian
+(BOM at 0x0C): `0x08` version, `0x10` fileNameOffset (→ name chars, u16 len at
+-2), `0x18` relocationTableOffset (→ `_RLT`), `0x1C` fileSize. The reader decodes
+those + structurally scans the well-known sub-block magics (FMDL/FSKA/FMAA/FSHP/
+FMAT/FVTX/FSKL/BNTX/`_STR`/`_DIC`/`_RLT`/…; 4-byte magics ~never false-positive).
+Like BNTX/AAMP the byte layout is offset/relocation-heavy, so the parser is
+**inspect-only** and `write_bfres` re-emits the captured bytes → **byte-identical**
+by construction. **Verified across 424 real files** (BOTW `.sbfres`, TotK
+`.bfres.zs`, and the decompressed v10 model corpus), 0 parse errors / 0 diffs.
+**Stage B:** a BOTW `.Tex.bfres` embeds a full BNTX; `BfresDocument::
+embedded_bntx_bytes` bounds it by the BNTX's own `file_size` and `bfres-inspect`
+surfaces its textures via the existing `read_bntx` (e.g. `Animal_Bass.Tex` → 8
+textures: `Bass_Alb` BC1_UNORM_SRGB 128×128 mips=8, …). Verbs `bfres-inspect`
+(`--json`, inflates `.sbfres`/`.bfres.zs`) + `bfres-roundtrip-test`. Tests:
+`tests/bfres_roundtrip.rs` (fixture-gated: corpus byte-identical + spans both
+games + embedded-BNTX parse + pinned `Animal_Bass`/`Animal_Bass.Tex`) + 3
+fixture-free `bfres::read` unit tests. `cargo test` green (**108** lib unit + all
+integration); `clippy --all-targets` clean; `--no-default-features` builds.
+
+**MeshCodec `.mc` (TotK models) — investigated, deferred (user-approved deep RE).**
+TotK ships models as `Model/*.bfres.mc` = MeshCodec (`MCPK`): magicless zstd that
+needs a **raw-content dictionary embedded in the game executable** (the user
+provided `exefs`; I LZ4-decompressed the 35 MB `NSO0` `main` and confirmed the
+dict has **no zstd-dict magic, no `ZSTD`/`MeshCodec` symbol, isn't a string blob**,
+and a dictless magicless decode fails). Framing is custom/out-of-band and the
+`FMSH` sub-section is community-unsolved (reference tools emit **partial,
+non-editable** BFRES); the only complete reference is GPL. Per the user, in-tool
+`.mc` decode is a **future ARM64-RE effort** (port NSO0+LZ4 to Rust via MIT
+`lz4_flex` → disassemble around the MeshCodec xref to locate the dict + frame
+params → validate against the **12,395 decompressed `.bfres` oracle** the user
+produced with Watertoon's tool, in `local-assets/mesh-codec-output/`). BFRES
+already consumes those decompressed `.mc` outputs (all v10, parse + round-trip).
 
 ### 2026-05-31 — AAMP (BOTW binary parameter archive) read + round-trip + canonical + set
 The user dumped **BOTW** (`01007EF00011E000`), unblocking AAMP (TotK has none).

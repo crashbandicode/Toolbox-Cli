@@ -34,6 +34,8 @@
 //!   + CRC-32 path lookup / size update.
 //! - [`aamp`] — AAMP (binary parameter archive, BOTW) read + verbatim
 //!   round-trip + a decoded [`aamp::ParameterList`] tree (inspect).
+//! - [`bfres`] — BFRES (`FRES`, BOTW/TotK 3D-resource container) header
+//!   inspect + verbatim byte-identical round-trip.
 //! - [`msbt`] — MSBT (LibMessageStudio message) read + verbatim round-trip +
 //!   decoded label/message tree (inspect).
 //! - [`compression`] — zstd (with TotK dictionaries) and Yaz0/Yaz1
@@ -77,6 +79,7 @@ pub mod aamp;
 pub mod audit;
 pub mod bflan;
 pub mod bflyt;
+pub mod bfres;
 pub mod bntx;
 pub mod byml;
 pub mod compression;
@@ -110,6 +113,7 @@ pub mod prelude {
     };
     pub use crate::manifest::{SkinElement, SkinManifest};
     pub use crate::aamp::{read_aamp, write_aamp, AampDocument, ParameterList, Value};
+    pub use crate::bfres::{read_bfres, write_bfres, BfresDocument, DetectedBlock};
     pub use crate::msbt::{read_msbt, write_msbt, write_msbt_canonical, MsbtDocument, TextChunk};
     pub use crate::restbl::{read_restbl, write_restbl, Restbl, SetOutcome};
     pub use crate::texpipe::Bc7Quality;

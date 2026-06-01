@@ -26,6 +26,8 @@ mod bflyt_roundtrip_test;
 mod bflyt_section_diff;
 mod bflyt_set_text;
 mod bflyt_set_window;
+mod bfres_inspect;
+mod bfres_roundtrip_test;
 mod bntx_dict_test;
 mod bntx_export_all;
 mod bntx_export_dds;
@@ -229,6 +231,16 @@ pub enum Verb {
     /// Edit a wnd1 window pane's stretch / frame-size borders.
     BflytSetWindow(bflyt_set_window::Args),
 
+    /// Print a structured snapshot of a BFRES (`FRES`, BOTW/TotK 3D-resource
+    /// container): version, endianness, name, size, relocation offset, and a
+    /// structural scan of sub-block magics (plus any embedded BNTX textures).
+    /// Inflates `.sbfres` (Yaz0) / `.bfres.zs` (zstd). Use --json.
+    BfresInspect(bfres_inspect::Args),
+
+    /// Internal: read a BFRES, write it back, and report whether the
+    /// round-trip is byte-identical (inflating `.sbfres`/`.bfres.zs` first).
+    BfresRoundtripTest(bfres_roundtrip_test::Args),
+
     /// Print a structured snapshot of a BNTX. Use --json for tool consumption.
     BntxInspect(bntx_inspect::Args),
 
@@ -406,6 +418,8 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::BflytRepair(args) => Ok(bflyt_repair::run(args)?),
         Verb::BflytSetText(args) => Ok(bflyt_set_text::run(args)?),
         Verb::BflytSetWindow(args) => Ok(bflyt_set_window::run(args)?),
+        Verb::BfresInspect(args) => Ok(bfres_inspect::run(args)?),
+        Verb::BfresRoundtripTest(args) => Ok(bfres_roundtrip_test::run(args)?),
         Verb::BntxInspect(args) => Ok(bntx_inspect::run(args)?),
         Verb::BntxExportPng(args) => Ok(bntx_export_png::run(args)?),
         Verb::BntxExportAll(args) => Ok(bntx_export_all::run(args)?),

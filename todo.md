@@ -160,6 +160,37 @@ session immediately after this file was written.
   *Follow-up (not done):* a default BOTW name table for readable inspect (CRC-32
   keys shown as hex unless `--names` given); decode curve control points (kept
   as raw bytes today); AAMP add/remove params (only scalar set so far).
+- [x] **BFRES (FRES) inspect-only — DONE.** Roadmap #2. New `src/bfres/`
+  (`mod`/`read`/`write`/`error`, typed `BfresError`): header decode (magic /
+  version / BOM-endianness / embedded file name / file size / relocation-table
+  offset), consistent across **BOTW v5 `0x00050003`** + **TotK v10 `0x000A0000`**
+  (both LE), plus a structural scan of the well-known sub-block magics
+  (FMDL/FSKA/FMAA/FSHP/FMAT/FVTX/FSKL/BNTX/`_STR`/`_DIC`/`_RLT`). `write_bfres`
+  re-emits captured bytes → **byte-identical** (inspect-only parser; offsets
+  not rebuilt). Verified across **424** real files (BOTW `.sbfres`, TotK
+  `.bfres.zs`, decompressed v10 models), 0 errors. `bfres-inspect` surfaces a
+  BOTW `.Tex.bfres`'s embedded BNTX via `read_bntx` (bytes bounded by the BNTX's
+  own `file_size`). Verbs `bfres-inspect` (`--json`) + `bfres-roundtrip-test`.
+  Tests: `tests/bfres_roundtrip.rs` (fixture-gated) + 3 fixture-free
+  `bfres::read` unit tests. Fixtures gitignored under `tests/fixtures/bfres/`.
+  *Follow-up (not done):* decode the model/animation sub-resources
+  (FMDL/FSKA/vertex/material/shape) beyond the magic scan.
+- [ ] **TotK MeshCodec `.mc` decompression (deep RE; user-approved).** TotK
+  models ship as `Model/*.bfres.mc` = MeshCodec (`MCPK`): magicless zstd needing
+  a **raw-content dictionary embedded in `exefs/main`** (the NSO; *not* in
+  RomFS — confirmed no dict magic / symbol / string blob; dictless decode
+  fails). Custom out-of-band framing; the `FMSH` sub-section is
+  community-unsolved (even reference tools emit **partial, non-editable** BFRES);
+  the only complete reference is GPL. Plan: (1) port **NSO0 + LZ4** decompress
+  to Rust (MIT `lz4_flex`) as a shipped capability; (2) disassemble `main`
+  around the MeshCodec xref (the `MeshCodecDecompresionThread` string is in
+  rodata) to locate the raw dict pointer/size + the frame params (window log);
+  (3) implement a magicless-zstd(+dict) decode in `compression` and validate
+  **byte-exact against the 12,395-file decompressed oracle** the user produced
+  (`local-assets/mesh-codec-output/`, gitignored). Until then, BFRES consumes
+  already-decompressed `.mc` output (all v10; parse + round-trip verified). The
+  raw dict is the user's own extracted game data — load it at runtime
+  (`--mc-dict`), **never commit it**.
 
 ## Hardening (small, no new fixtures needed)
 
