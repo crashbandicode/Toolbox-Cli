@@ -65,6 +65,7 @@ walkdir = "2.5"
 # module); the library API uses the typed `thiserror`-based error types.
 anyhow = { version = "1.0", optional = true }
 thiserror = "1.0"
+lz4_flex = "0.13.1"
 
 [dev-dependencies]
 # Temp directories for layout-apply-arc / DDS round-trip integration tests.

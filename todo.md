@@ -181,16 +181,17 @@ session immediately after this file was written.
   RomFS — confirmed no dict magic / symbol / string blob; dictless decode
   fails). Custom out-of-band framing; the `FMSH` sub-section is
   community-unsolved (even reference tools emit **partial, non-editable** BFRES);
-  the only complete reference is GPL. Plan: (1) port **NSO0 + LZ4** decompress
-  to Rust (MIT `lz4_flex`) as a shipped capability; (2) disassemble `main`
-  around the MeshCodec xref (the `MeshCodecDecompresionThread` string is in
-  rodata) to locate the raw dict pointer/size + the frame params (window log);
-  (3) implement a magicless-zstd(+dict) decode in `compression` and validate
-  **byte-exact against the 12,395-file decompressed oracle** the user produced
-  (`local-assets/mesh-codec-output/`, gitignored). Until then, BFRES consumes
-  already-decompressed `.mc` output (all v10; parse + round-trip verified). The
-  raw dict is the user's own extracted game data — load it at runtime
-  (`--mc-dict`), **never commit it**.
+  the only complete reference is GPL. Plan: **(1) DONE** — ported **NSO0 + LZ4**
+  decompress to Rust (`src/nso.rs`, MIT `lz4_flex`; verb `nso-extract`),
+  byte-exact vs the Python-lz4 oracle on `main`'s text/rodata/data; the
+  `MeshCodec` strings are in rodata (`0x56b44`/`0x9130c`/`0x91338`/`0x9ae345`).
+  (2) disassemble `.text` around those xrefs to locate the raw dict pointer/size
+  + the frame params (window log); (3) implement a magicless-zstd(+dict) decode
+  in `compression` and validate **byte-exact against the 12,395-file decompressed
+  oracle** the user produced (`local-assets/mesh-codec-output/`, gitignored).
+  Until then, BFRES consumes already-decompressed `.mc` output (all v10; parse +
+  round-trip verified). The raw dict is the user's own extracted game data —
+  load it at runtime (`--mc-dict`), **never commit it**.
 
 ## Hardening (small, no new fixtures needed)
 
