@@ -35,6 +35,15 @@ pub enum McError {
         stage: &'static str,
         message: String,
     },
+
+    /// Repack was given an edited BFRES of a different size than the original;
+    /// the mesh tail references the original layout, so a resize would break it
+    /// (pass `allow_resize` to override at your own risk).
+    #[error(
+        "mc-repack: edited BFRES is {edited} bytes but the original is {original}; \
+         resizing would break the mesh-buffer layout (use --allow-resize to force)"
+    )]
+    ResizeNotAllowed { original: usize, edited: usize },
 }
 
 /// Convenience alias for the MC module's fallible operations.

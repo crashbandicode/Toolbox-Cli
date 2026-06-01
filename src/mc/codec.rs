@@ -18,7 +18,7 @@
 use zstd::zstd_safe::{self, CCtx, CParameter, DCtx, DParameter, FrameFormat, InBuffer, OutBuffer};
 
 use super::error::{McError, Result};
-use super::{McFile, McpkHeader, MC_HEADER_LEN, MC_MAGIC};
+use super::{McFile, MC_HEADER_LEN, MC_MAGIC};
 
 /// Window-log ceiling for decode (covers every model size in the corpus).
 const WINDOW_LOG_MAX: u32 = 27;
@@ -30,15 +30,20 @@ fn zstd_err(stage: &'static str, code: usize) -> McError {
     }
 }
 
-/// Decompress a magicless zstd stream into a buffer of `dest_capacity` bytes,
-/// returning exactly the decompressed bytes (the frame's content).
+/// Decompress the **leading magicless zstd frame** of a stream, returning the
+/// decompressed bytes and the number of input bytes the frame consumed.
+///
+/// A TotK model `.mc` stream is `[BFRES frame (magicless zstd)] [mesh buffers
+/// (custom MeshCodec encoding — NOT zstd)]`. This decodes only the first frame
+/// (the BFRES); the returned `consumed` marks where the untouched mesh tail
+/// begins.
 ///
 /// Uses the **streaming** decode (`ZSTD_decompressStream`), not the one-shot
 /// path: the game's frames carry an advisory dictionary id that libzstd's
 /// one-shot decode rejects ("Dictionary mismatch") even though no dictionary is
 /// actually referenced; the streaming path tolerates it (matching the reference
-/// decompressor's behavior, verified byte-identical against the oracle).
-pub fn decompress_stream(stream: &[u8], dest_capacity: usize) -> Result<Vec<u8>> {
+/// decompressor; verified byte-identical against the BFRES oracle).
+pub fn decompress_first_frame(stream: &[u8], dest_capacity: usize) -> Result<(Vec<u8>, usize)> {
     let mut dctx = DCtx::create();
     dctx.set_parameter(DParameter::Format(FrameFormat::Magicless))
         .map_err(|c| zstd_err("set magicless", c))?;
@@ -46,7 +51,7 @@ pub fn decompress_stream(stream: &[u8], dest_capacity: usize) -> Result<Vec<u8>>
         .map_err(|c| zstd_err("set window-log-max", c))?;
     let cap = dest_capacity.max(1);
     let mut out = vec![0u8; cap];
-    let n = {
+    let (n, consumed) = {
         let mut output = OutBuffer::around(&mut out[..]);
         let mut input = InBuffer::around(stream);
         loop {
@@ -56,7 +61,7 @@ pub fn decompress_stream(stream: &[u8], dest_capacity: usize) -> Result<Vec<u8>>
                 .decompress_stream(&mut output, &mut input)
                 .map_err(|c| zstd_err("decompress", c))?;
             if hint == 0 {
-                break; // frame complete
+                break; // end of the first frame
             }
             if output.pos() == cap {
                 break; // destination filled to the declared capacity
@@ -65,10 +70,15 @@ pub fn decompress_stream(stream: &[u8], dest_capacity: usize) -> Result<Vec<u8>>
                 break; // no progress (truncated/garbage tail) — stop cleanly
             }
         }
-        output.pos()
+        (output.pos(), input.pos())
     };
     out.truncate(n);
-    Ok(out)
+    Ok((out, consumed))
+}
+
+/// Decompress the leading magicless zstd frame, returning just the bytes.
+pub fn decompress_stream(stream: &[u8], dest_capacity: usize) -> Result<Vec<u8>> {
+    decompress_first_frame(stream, dest_capacity).map(|(b, _)| b)
 }
 
 /// Compress `data` as a magicless zstd frame with the content size pledged
@@ -89,8 +99,15 @@ pub fn compress_stream(data: &[u8], level: i32) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Decompress an MCPK container to its BFRES bytes (the real, unpadded BFRES —
-/// the zstd frame's content size, not the alignment-padded allocation size).
+/// Extract the **BFRES structure** from an MCPK container — the leading
+/// magicless zstd frame, byte-identical to the reference decompressor's BFRES.
+///
+/// IMPORTANT: a TotK model `.mc` continues with a trailing **mesh** section
+/// (vertex / index buffers) in a *custom* MeshCodec encoding (not zstd) that
+/// this does NOT decode. The returned BFRES is the model's *structure*
+/// (FMDL / FSKL / FMAT / FSHP headers + vertex-attribute defs + `_STR` / `_RLT`)
+/// — it is a complete, valid BFRES file, but the geometry buffers live in the
+/// undecoded tail. For round-tripping, [`repack`] preserves that tail verbatim.
 pub fn extract(mc: &McFile) -> Result<Vec<u8>> {
     decompress_stream(mc.compressed_stream(), mc.decompressed_size())
 }
@@ -104,41 +121,56 @@ pub fn size_descriptor(decompressed_size: usize, shift: u32) -> u32 {
     ((mantissa as u32) << 5) | (shift & 0xf)
 }
 
-/// Repack an (edited) BFRES into a `.mc`, copying the version/flags and
-/// alignment shift from the original container. The result decodes back to
-/// `bfres` exactly via [`extract`]; it is not byte-identical to Nintendo's
-/// encoder.
-pub fn repack(original: &McFile, bfres: &[u8], level: i32) -> Result<Vec<u8>> {
+/// Repack an (edited) BFRES into a `.mc`, **preserving the original's mesh
+/// tail** (the custom-coded vertex/index buffers we don't decode).
+///
+/// The output is `MCPK header + [new BFRES magicless frame] + [original mesh
+/// tail, byte-for-byte]`, so the model keeps its original geometry and only the
+/// BFRES structure changes. `extract` decodes back to `bfres` exactly.
+///
+/// Because the BFRES references the mesh by layout, an edit that changes the
+/// BFRES byte-size would shift those references; such a resize is **rejected**
+/// unless `allow_resize` is set (then it's best-effort and likely needs the
+/// real mesh codec). Geometry edits are not supported (the mesh tail is opaque).
+/// Not byte-identical to Nintendo's encoder.
+pub fn repack(original: &McFile, bfres: &[u8], level: i32, allow_resize: bool) -> Result<Vec<u8>> {
+    // Decode the original BFRES frame: its length + where the mesh tail starts.
+    let (orig_bfres, frame_len) =
+        decompress_first_frame(original.compressed_stream(), original.decompressed_size())?;
+    if bfres.len() != orig_bfres.len() && !allow_resize {
+        return Err(McError::ResizeNotAllowed {
+            original: orig_bfres.len(),
+            edited: bfres.len(),
+        });
+    }
+    let tail = &original.compressed_stream()[frame_len..];
     let compressed = compress_stream(bfres, level)?;
-    // Preserve the original allocation size when the edit fits (the game
-    // allocates this buffer); only grow it if the edit is larger.
-    let descriptor = if bfres.len() <= original.decompressed_size() {
-        original.header.size_descriptor
-    } else {
-        size_descriptor(bfres.len(), original.header.alignment_shift())
-    };
-    let mut out = Vec::with_capacity(MC_HEADER_LEN + compressed.len());
+    let mut out = Vec::with_capacity(MC_HEADER_LEN + compressed.len() + tail.len());
     out.extend_from_slice(MC_MAGIC);
     out.push(original.header.version);
     out.push(original.header.flags);
     out.extend_from_slice(&0u16.to_le_bytes()); // reserved
-    out.extend_from_slice(&descriptor.to_le_bytes());
+    // Preserve the original allocation (the mesh layout is unchanged).
+    out.extend_from_slice(&original.header.size_descriptor.to_le_bytes());
     out.extend_from_slice(&compressed);
+    out.extend_from_slice(tail); // custom-coded mesh buffers, byte-preserved
     Ok(out)
 }
 
-/// Build an [`McpkHeader`]-consistent `.mc` from scratch (no source container)
-/// using a default alignment shift of 12 (`0x1000`, the corpus norm).
+/// Build a *structure-only* `.mc` from a BFRES with no source container (no mesh
+/// tail). Used for synthetic tests / non-model BFRES; real models must use
+/// [`repack`] so their mesh tail is preserved.
 pub fn repack_default(bfres: &[u8], version: u8, flags: u8, level: i32) -> Result<Vec<u8>> {
-    let dummy = McFile {
-        header: McpkHeader {
-            version,
-            flags,
-            size_descriptor: size_descriptor(bfres.len(), 12),
-        },
-        raw: Vec::new(),
-    };
-    repack(&dummy, bfres, level)
+    let compressed = compress_stream(bfres, level)?;
+    let descriptor = size_descriptor(bfres.len(), 12);
+    let mut out = Vec::with_capacity(MC_HEADER_LEN + compressed.len());
+    out.extend_from_slice(MC_MAGIC);
+    out.push(version);
+    out.push(flags);
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&descriptor.to_le_bytes());
+    out.extend_from_slice(&compressed);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -161,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn repack_then_extract_is_identity() {
+    fn repack_default_then_extract_is_identity() {
         let bfres: Vec<u8> = b"FRES    "
             .iter()
             .copied()
@@ -173,6 +205,46 @@ mod tests {
         assert!(mc.decompressed_size() >= bfres.len());
         let extracted = extract(&mc).expect("extract");
         assert_eq!(extracted, bfres, "extract(repack(x)) must equal x");
+    }
+
+    /// Repack must preserve the original mesh tail byte-for-byte and reject a
+    /// size-changing edit (which would break the mesh layout).
+    #[test]
+    fn repack_preserves_mesh_tail_and_guards_resize() {
+        let bfres: Vec<u8> = b"FRES    "
+            .iter()
+            .copied()
+            .chain((0..1024u32).flat_map(|i| (i % 53).to_le_bytes()))
+            .collect();
+        // Build a synthetic .mc = [BFRES frame] + [fake custom-coded mesh tail].
+        let frame = compress_stream(&bfres, 5).unwrap();
+        let mesh_tail = vec![0xABu8; 777]; // opaque "mesh" bytes (not zstd)
+        let mut raw = Vec::new();
+        raw.extend_from_slice(MC_MAGIC);
+        raw.push(1);
+        raw.push(1);
+        raw.extend_from_slice(&0u16.to_le_bytes());
+        raw.extend_from_slice(&size_descriptor(bfres.len(), 12).to_le_bytes());
+        raw.extend_from_slice(&frame);
+        raw.extend_from_slice(&mesh_tail);
+        let mc = super::super::read_mc(&raw).expect("read synthetic .mc");
+
+        // Same-size edit: tail preserved, extract == edited.
+        let mut edited = bfres.clone();
+        edited[8] ^= 0xFF; // flip a structure byte, same length
+        let repacked = repack(&mc, &edited, 5, false).expect("repack same-size");
+        assert!(repacked.ends_with(&mesh_tail), "mesh tail must be byte-preserved");
+        let mc2 = super::super::read_mc(&repacked).unwrap();
+        assert_eq!(extract(&mc2).unwrap(), edited, "extract(repack)=edited");
+
+        // Size change without --allow-resize is rejected.
+        let bigger = [edited.as_slice(), b"extra"].concat();
+        assert!(matches!(
+            repack(&mc, &bigger, 5, false),
+            Err(McError::ResizeNotAllowed { .. })
+        ));
+        // With allow_resize it proceeds (best-effort).
+        assert!(repack(&mc, &bigger, 5, true).is_ok());
     }
 
     #[test]
