@@ -648,6 +648,35 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-01 — MeshCodec mesh decode SOLVED via emulation (ground-truth oracle + confirmed architecture)
+Major RE milestone. Built a Unicorn ARM64 harness (`local-assets/re/emu.py`,
+gitignored — runs game code, not shippable) that executes the **real** mesh
+decoder (`0x6c6bf0`) from the NSO and reproduces the `mesh-codec-output` oracle
+**byte-perfectly** for all 3 fixtures (bufA+bufB exact). Setup: map the 3 NSO
+segments, parse MOD0/`.dynamic` (MOD0 VA at `text[4]`), apply R_AARCH64_RELATIVE
+relocs, resolve `.rela.plt` imports to Python sentinels (stub `memcpy`/`memmove`/
+`memset` for real; `nn::util::ReferSymbol` + FPCR `mrs/msr` as no-ops); the
+decoder's allocator is a self-contained bump allocator on a caller-provided
+workspace (size = FMSH `+0x08`), so no alloc stub is needed.
+
+**Architecture CONFIRMED (this is the corrected, final picture):** the geometry
+codecs are **stock meshoptimizer 0.15** wrapped in a **custom Huff0-windowed
+transport**. Instrumentation proved it: the index decoder `0x110c280(out, count,
+&code, &data, mode=1)` gets a **code stream of all `0xf0`** + a var-int **data
+stream**, with per-sub-mesh `count`s all `%3==0` (Bear 6606/1662/60/…) — textbook
+`meshopt_decodeIndexBuffer` with split code/data streams. The transport
+decompresses the FMSH sub_a/sub_b into workspace streams via **zstd Huff0 literals
+windows** (`0x5ffb90`, = `zstd_pure::literals`; ~7 windows for Bear) under the
+6-state machine (`0x10f8aa0`) + sub-block headers (`0x10f9570`, `w27`≈14 blocks).
+
+**So the shippable pure-Rust port reuses both existing primitives** — `zstd_pure`
+(Huff0 windows) + `src/meshopt` (geometry; index needs a split-(code,data)-stream
+entry) — plus the transport framing/state-machine, **validated step-by-step
+against `emu.py`** (which can dump every intermediate). Full RE map + the
+emulator recipe in `local-assets/re/FINDINGS.md` (UPDATE #6). No code committed
+this milestone (RE/validation only); the Rust transport port is the remaining
+(now fully de-risked) deliverable.
+
 ### 2026-06-01 — MeshCodec: FMSH framing parser (`src/mc/mesh.rs`) + custom-entropy correction
 Continued Stage 1b. Two outcomes: a committable framing parser, and an important
 RE correction about the inner codec.
