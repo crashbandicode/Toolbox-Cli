@@ -46,6 +46,7 @@ mod byml_inspect;
 mod byml_roundtrip_test;
 mod byml_set;
 mod compress;
+mod corpus_audit;
 mod decompress;
 mod layout_apply_arc;
 mod layout_apply_manifest;
@@ -378,6 +379,12 @@ pub enum Verb {
     /// BFLYT/BNTX structures and emit a JSON report.
     LayoutAudit(layout_audit::Args),
 
+    /// Measure real-corpus confidence: scan a romfs/root, run the safest op
+    /// per format (recursing into SARC, inflating `.zs`/`.szs`), and write a
+    /// per-format byte-identical / semantic / inspect / unsupported / fail
+    /// tally to JSON. Read-only. Use --romfs/--input --game --formats --json.
+    CorpusAudit(corpus_audit::Args),
+
     /// Parse a Switch NSO (`exefs/main`) and write its inflated
     /// `.text`/`.rodata`/`.data` segments to a directory (LZ4-decompressing as
     /// needed). Use `--grep` to locate an ASCII string within a segment.
@@ -458,6 +465,7 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::LayoutValidateManifest(args) => Ok(layout_validate_manifest::run(args)?),
         Verb::LayoutDiff(args) => Ok(layout_diff::run(args)?),
         Verb::LayoutAudit(args) => Ok(layout_audit::run(args)?),
+        Verb::CorpusAudit(args) => Ok(corpus_audit::run(args)?),
         Verb::NsoExtract(args) => Ok(nso_extract::run(args)?),
         Verb::SarcUnpack(args) => Ok(sarc_unpack::run(args)?),
         Verb::SarcPack(args) => Ok(sarc_pack::run(args)?),
