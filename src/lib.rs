@@ -96,6 +96,7 @@ pub mod diff;
 pub mod layout;
 pub mod manifest;
 pub mod mc;
+pub mod meshopt;
 pub mod msbt;
 pub mod nso;
 pub mod restbl;

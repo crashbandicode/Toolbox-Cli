@@ -174,6 +174,27 @@ BFRES portion); it does **not** decode the geometry (custom mesh codec, unsolved
 | `mc-extract` | R | inspect (decompress BFRES structure) | ✓(496+104 vs BFRES oracle) / ✓ / ✓ / n/a | Validated | mesh-geometry decode (custom codec); then full-model Trusted |
 | `mc-repack` | W | mutate (BFRES re-encode + mesh tail preserved; NOT byte-identical) | ✓(self-RT + tail-preserve) / ✓ / ✓(resize-guard) / ✓(extract∘repack=id) | Experimental | in-game acceptance (no hardware) + geometry-edit support |
 
+## meshopt (meshoptimizer 0.15 codec) — `src/meshopt`
+
+Clean-room (MIT) port of the stock meshoptimizer 0.15 vertex (`0xa0`) /
+index-buffer (`0xe0` v0/v1) / index-sequence (`0xd0`) codecs — the inner
+algorithm of the TotK MeshCodec mesh geometry (the exe links
+`NintendoWare_Meshoptimizer_For_MeshCodec-0_15_0`). Library only (no CLI verb
+yet). Encode + decode are mutual inverses; std + `thiserror` only.
+
+| API | Kind | Contract | corpus / unit / neg / mut-diff | Tier | → Trusted |
+|---|---|---|---|---|---|
+| `encode/decode_vertex_buffer` | lib | lossless round-trip | ~ / ✓ / ✓ / n/a | Validated | end-to-end vs the `mesh-codec-output` oracle (needs the Nintendo streaming framing) |
+| `encode/decode_index_buffer` | lib | lossless round-trip | ~ / ✓ / ✓ / n/a | Validated | same (oracle end-to-end) |
+| `encode/decode_index_sequence` | lib | lossless round-trip | ~ / ✓ / ✓ / n/a | Validated | same (oracle end-to-end) |
+
+`unit` = exact-format vectors (anchored to the meshopt 0.15 byte layout) +
+synthetic multi-block/grid/random round-trips; `corpus (~)` = `decode(encode(x))
+== x` verified locally on the oracle's decoded vertex/index buffers for all 3
+`tests/fixtures/mc` models (real TotK bytes; not a committed fixture). Reaching
+Trusted requires decoding the **real game-encoded** streams (i.e. solving the
+Nintendo streaming framing) and matching the oracle end-to-end.
+
 ## SARC archive — `src/sarc`
 
 Native reader + per-file-alignment writer; `info_melee.layout.arc` (344 entries)
