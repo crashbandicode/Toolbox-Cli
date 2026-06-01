@@ -36,6 +36,10 @@ pub enum Error {
     #[error("AAMP error: {0}")]
     Aamp(#[from] crate::aamp::AampError),
 
+    /// A BFRES (Binary caFe RESource) parse or write error.
+    #[error("BFRES error: {0}")]
+    Bfres(#[from] crate::bfres::BfresError),
+
     /// An underlying I/O failure (reading/writing files).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
