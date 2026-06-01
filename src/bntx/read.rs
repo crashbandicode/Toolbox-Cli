@@ -490,3 +490,21 @@ fn read_c_string(data: &[u8], offset: usize) -> Result<String, Error> {
         .unwrap_or(data.len());
     Ok(String::from_utf8_lossy(&data[offset..end]).into_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Malformed input must fail loudly with a typed [`Error`] (never panic,
+    /// never accept garbage). Fixture-free so CI exercises the fail-safe path.
+    #[test]
+    fn read_bntx_rejects_garbage() {
+        // Smaller than the combined BNTX+NX header -> Truncated.
+        assert!(matches!(read_bntx(&[]), Err(Error::Truncated(_))));
+        assert!(matches!(read_bntx(&[0u8; 0x20]), Err(Error::Truncated(_))));
+        // Header-sized but wrong leading magic -> BadMagic.
+        let mut bad = vec![0u8; 0x48];
+        bad[0..4].copy_from_slice(b"NOPE");
+        assert!(matches!(read_bntx(&bad), Err(Error::BadMagic(_))));
+    }
+}

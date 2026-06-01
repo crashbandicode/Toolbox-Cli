@@ -392,6 +392,67 @@ mod tests {
         assert_eq!(greeting.as_deref(), Some("Bye"));
     }
 
+    /// Mutation diff-shape: editing one message must leave every *other*
+    /// label/message byte-stable and add/remove no sections.
+    #[test]
+    fn set_message_only_changes_target() {
+        let bytes = minimal_msbt();
+        let mut doc = read_msbt(&bytes).expect("parse");
+        let labels_before: Vec<(String, u32)> = doc
+            .labels()
+            .unwrap()
+            .iter()
+            .map(|l| (l.name.clone(), l.index))
+            .collect();
+        let reply_before = doc
+            .entries()
+            .into_iter()
+            .find(|(l, _)| *l == "Reply")
+            .map(|(_, m)| m.raw.clone())
+            .unwrap();
+        let section_count = doc.sections.len();
+
+        let new = Message::from_chunks(&[TextChunk::Text("Bye".into())], doc.encoding, doc.big_endian);
+        assert!(doc.set_message_by_label("Greeting", new));
+        let doc2 = read_msbt(&write_msbt_canonical(&doc).unwrap()).expect("re-parse");
+
+        // Target changed...
+        let greeting = doc2
+            .entries()
+            .into_iter()
+            .find(|(l, _)| *l == "Greeting")
+            .map(|(_, m)| m.to_display(doc2.encoding, doc2.big_endian));
+        assert_eq!(greeting.as_deref(), Some("Bye"));
+        // ...the unrelated message did NOT (byte-for-byte raw)...
+        let reply_after = doc2
+            .entries()
+            .into_iter()
+            .find(|(l, _)| *l == "Reply")
+            .map(|(_, m)| m.raw.clone())
+            .unwrap();
+        assert_eq!(reply_after, reply_before, "unrelated message changed");
+        // ...labels are stable and no sections were added/removed.
+        let labels_after: Vec<(String, u32)> = doc2
+            .labels()
+            .unwrap()
+            .iter()
+            .map(|l| (l.name.clone(), l.index))
+            .collect();
+        assert_eq!(labels_after, labels_before, "label table changed");
+        assert_eq!(doc2.sections.len(), section_count, "section set changed");
+    }
+
+    /// The canonical writer is idempotent: re-encoding its own output yields
+    /// byte-identical bytes (stable across repeated writes).
+    #[test]
+    fn canonical_write_is_idempotent() {
+        let doc = read_msbt(&minimal_msbt()).expect("parse");
+        let c1 = write_msbt_canonical(&doc).expect("canonical 1");
+        let d1 = read_msbt(&c1).expect("re-parse 1");
+        let c2 = write_msbt_canonical(&d1).expect("canonical 2");
+        assert_eq!(c2, c1, "canonical writer must be byte-stable across re-writes");
+    }
+
     #[test]
     fn rejects_too_small() {
         assert!(matches!(read_msbt(&[0u8; 8]), Err(MsbtError::TooSmall(8))));
