@@ -71,6 +71,7 @@ mod pane_set;
 mod restbl_inspect;
 mod restbl_roundtrip_test;
 mod restbl_set;
+mod restbl_update_dir;
 mod sarc_pack;
 mod sarc_unpack;
 
@@ -348,6 +349,11 @@ pub enum Verb {
     /// crashing the game.
     RestblSet(restbl_set::Args),
 
+    /// Scan a mod folder and bump every changed resource's RESTBL entry to fit
+    /// its (decompressed) size — only ever growing. With --romfs-base, scales
+    /// the original overhead ratio (accurate); else over-estimates safely.
+    RestblUpdateDir(restbl_update_dir::Args),
+
     /// Print a structured snapshot of an AAMP (binary parameter archive,
     /// BOTW): header + decoded list/object/parameter tree. Keys are CRC-32
     /// hashes; pass --names to resolve them. Use --json.
@@ -478,6 +484,7 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::RestblInspect(args) => Ok(restbl_inspect::run(args)?),
         Verb::RestblRoundtripTest(args) => Ok(restbl_roundtrip_test::run(args)?),
         Verb::RestblSet(args) => Ok(restbl_set::run(args)?),
+        Verb::RestblUpdateDir(args) => Ok(restbl_update_dir::run(args)?),
         Verb::AampInspect(args) => Ok(aamp_inspect::run(args)?),
         Verb::AampRoundtripTest(args) => Ok(aamp_roundtrip_test::run(args)?),
         Verb::AampSet(args) => Ok(aamp_set::run(args)?),
