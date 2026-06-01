@@ -105,6 +105,11 @@ src/
 │   ├── write.rs        Verbatim writer (byte-identical no-op round-trip)
 │   ├── codec.rs        Magicless-zstd extract + repack (streaming decode; no dict)
 │   └── error.rs        McError (magic/flags/reserved/size/zstd context)
+├── meshopt/            Pure-Rust meshoptimizer 0.15 codec (MeshCodec mesh geometry; crate-extractable, std+thiserror)
+│   ├── mod.rs          Public encode/decode_{vertex_buffer,index_buffer,index_sequence} + read_indices
+│   ├── vertex.rs       Vertex codec (0xa0): byte-group planes, zigzag deltas, tail
+│   ├── index.rs        Index buffer (0xe0 v0/v1, vertex/edge FIFOs) + index sequence (0xd0)
+│   └── error.rs        MeshoptError (std + thiserror only)
 ├── sarc/               Native SARC read+write (no `sarc` crate); crate-extractable
 │   ├── mod.rs          Public API, ArcFile/ArcEntry/UnpackedFile, format constants
 │   ├── read.rs         Reader (header/SFAT/SFNT, bounds-checked) — pure std
@@ -641,6 +646,47 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-06-01 — MeshCodec mesh codec is **meshoptimizer 0.15**; built `src/meshopt/` (Stage 1b primitive)
+Continuing the mesh-geometry decode. **Key discovery (corrects the Stage-1b
+roadmap):** the FMSH chunk codec is **not** "the Huff0/raw/RLE primitives in
+`zstd_pure`" — it is **meshoptimizer 0.15**. The executable embeds the version
+string `SDK MW+Nintendo+NintendoWare_Meshoptimizer_For_MeshCodec-0_15_0-Release`
+(rodata `0x3568316`). So the trailing geometry is meshopt (MIT, `zeux/
+meshoptimizer`) vertex/index buffers wrapped in a **custom Nintendo streaming
+container**; zstd is the *transport* for the meshopt byte-planes, not the
+geometry codec.
+
+**RE'd the full decode call graph** (in `local-assets/re/FINDINGS.md`):
+`0x6c6bf0` (driver: bufA@out_dest, bufB@align_up) → `0x6c6cd0` (u16 chunk header
+`type=u16&3`,`val=u16>>2`) → dispatcher `0x10f8860` (returns sizeA+sizeB, the two
+u24 sub-stream lengths) → factory `0x10f8920` (type 1→`0x110bab0`, 2→`0x10f8950`,
+0→`0x110b9e0`) → type-2 vtable `[0x10]`=`0x10f897c` INIT (allocates a **zstd
+DCtx**, `0x276d0` ws) and `[0x18]`=`0x10f8aa0` DECODE (a streaming coroutine:
+MSB-first var-int window sizes + a 64-bit bit reader + raw/zstd-block windows via
+**`0x5ffb30`**, the same zstd family as `zstd_pure`, fed through meshopt transform
+`0x10f9690`). Output = `[288-byte info header = [abs bufA off][capacity]][bufA=
+index][bufB=vertex]` + zero pad (re-confirmed on Bear: `[17536][131072]`).
+
+**Built `src/meshopt/`** — a clean-room, crate-extractable (std + `thiserror`
+only) port of the **stock meshopt 0.15** codecs (the inner algorithm both decode
+layers need): `vertex` (`encode/decode_vertex_buffer`, `0xa0`: byte-group planes,
+zigzag deltas, first-vertex tail), `index` (`encode/decode_index_buffer`, `0xe0`
+v0/v1: vertex/edge FIFOs + codeaux table; and `encode/decode_index_sequence`,
+`0xd0`), `read_indices`. **Validated:** exact-format vectors anchored to the spec
+byte layout + synthetic round-trips (multi-block vertex, grid+random index both
+versions, sequence) + **real-data round-trips on the oracle's decoded vertex/
+index buffers for all 3 `mc` fixtures** (`decode(encode(x))==x` losslessly on
+real TotK bytes; `dump_bufs.py`). `cargo test` = **151 lib unit + all integration,
+0 failures**; `clippy --all-targets` clean; `--no-default-features` builds.
+
+**NEXT (Stage 1b, next session):** crack the Nintendo streaming framing
+(`0x10f8aa0`) to reconstruct the stock meshopt streams from the FMSH chunk
+payload, run `src/meshopt/` on them, assemble `[info][bufA][bufB]+pad`, validate
+the FULL decode == the `mesh-codec-output` oracle, sweep the 12,395 corpus; then
+re-encode (Stage 2). Open Qs: `val`→vertex_size/index_size/count mapping; whether
+Nintendo modified the meshopt kernels vs stock (confirm by decoding a real
+reconstructed stream).
 
 ### 2026-06-01 — Pure-Rust Zstandard decoder (`src/zstd_pure/`) — MeshCodec mesh-codec Stage 1a
 Start of the **MeshCodec mesh-geometry** codec (the big open item). RE of the

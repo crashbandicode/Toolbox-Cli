@@ -7,16 +7,24 @@ session immediately after this file was written.
 ## In progress / next
 
 - [ ] **TotK MeshCodec mesh-geometry codec** (decode + re-encode the trailing
-  vertex/index buffers; the community-unsolved part). RE'd: the mesh stream is
-  Nintendo's own zstd reimplementation (state machine `0x6c6da0`, Huff0/FSE
-  entropy). **Stage 1a DONE (this session):** built `src/zstd_pure/` — a
-  from-scratch, crate-extractable pure-Rust **zstd decoder** (RFC 8478; FSE +
-  Huff0 + sequences + frame + checksum), validated byte-for-byte vs libzstd
-  (levels 1-19) and on every real BFRES frame in `tests/fixtures/mc/`. **Next:**
-  Stage 1b — the custom MeshCodec outer framing (FMSH header + block assembly)
-  on top of these primitives → full mesh decode == the `mesh-codec-output`
-  oracle; then re-encode via RAW/stored blocks + extend `mc-repack`. Notes in
-  `local-assets/re/FINDINGS.md`.
+  vertex/index buffers; the community-unsolved part).
+  - **Stage 1a DONE:** `src/zstd_pure/` — pure-Rust zstd decoder (the `.mc`
+    BFRES frame + the mesh byte-plane transport use this family).
+  - **Stage 1b discovery DONE (this session):** the FMSH chunk codec is
+    **meshoptimizer 0.15** (NOT zstd-Huff0 primitives) — the exe embeds
+    `NintendoWare_Meshoptimizer_For_MeshCodec-0_15_0`. Built **`src/meshopt/`**:
+    a clean-room crate-extractable port of the stock meshopt vertex (`0xa0`) /
+    index-buffer (`0xe0` v0/v1) / index-sequence (`0xd0`) codecs (encode+decode),
+    validated by exact-format vectors + synthetic round-trips + **real-data
+    round-trips on the oracle's decoded vertex/index buffers**. Full decode call
+    graph RE'd in `local-assets/re/FINDINGS.md`.
+  - **Stage 1b REMAINING:** crack the Nintendo **streaming framing** (`0x10f8aa0`:
+    var-int window sizes + bit-reader headers + raw/zstd-block windows via
+    `0x5ffb30`) to reconstruct the stock meshopt streams from the FMSH chunk
+    payload → run `src/meshopt/` → assemble `[info][bufA][bufB]+pad` → validate
+    FULL decode == `mesh-codec-output` oracle; sweep the 12,395 corpus.
+  - **Stage 2:** re-encode (meshopt encoders are already in `src/meshopt/`) +
+    extend `mc-repack` for geometry edits. Notes in `local-assets/re/FINDINGS.md`.
 
 - [x] **BFLYT advanced pane mutations.** Roadmap #3 (done, committed a50ae76 +
   d75960a). `src/bflyt/ops.rs`: `remove_pane` (drop subtree + scrub groups),

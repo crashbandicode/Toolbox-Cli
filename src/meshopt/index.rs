@@ -1,0 +1,603 @@
+//! meshoptimizer 0.15 **index buffer** + **index sequence** codecs, reimplemented
+//! from the MIT specification (`zeux/meshoptimizer` `indexcodec.cpp`) — no GPL.
+//!
+//! * Index buffer (`0xe0`): triangle-list compression using vertex/edge FIFOs
+//!   (Giesen/Stokes). Supports format versions 0 and 1.
+//! * Index sequence (`0xd0`): a generic dual-baseline delta var-int stream.
+//!
+//! Indices are decoded as little-endian `u16` (`index_size == 2`) or `u32`
+//! (`index_size == 4`).
+
+use super::error::{MeshoptError, Result};
+
+const INDEX_HEADER: u8 = 0xe0;
+const SEQUENCE_HEADER: u8 = 0xd0;
+
+const CODE_AUX_ENCODING_TABLE: [u8; 16] = [
+    0x00, 0x76, 0x87, 0x56, 0x67, 0x78, 0xa9, 0x86, 0x65, 0x89, 0x68, 0x98, 0x01, 0x69, 0, 0,
+];
+
+const TRIANGLE_INDEX_ORDER: [[usize; 3]; 3] = [[0, 1, 2], [1, 2, 0], [2, 0, 1]];
+
+// ---------------------------------------------------------------------------
+// Var-byte / index primitives
+// ---------------------------------------------------------------------------
+
+fn decode_vbyte(data: &[u8], p: &mut usize) -> u32 {
+    let lead = data[*p];
+    *p += 1;
+    if lead < 128 {
+        return lead as u32;
+    }
+    let mut result = (lead & 127) as u32;
+    let mut shift = 7u32;
+    for _ in 0..4 {
+        let group = data[*p];
+        *p += 1;
+        result |= ((group & 127) as u32) << shift;
+        shift += 7;
+        if group < 128 {
+            break;
+        }
+    }
+    result
+}
+
+fn encode_vbyte(data: &mut Vec<u8>, mut v: u32) {
+    loop {
+        data.push(((v & 127) as u8) | if v > 127 { 128 } else { 0 });
+        v >>= 7;
+        if v == 0 {
+            break;
+        }
+    }
+}
+
+fn decode_index(data: &[u8], p: &mut usize, last: u32) -> u32 {
+    let v = decode_vbyte(data, p);
+    let d = (v >> 1) ^ (0u32.wrapping_sub(v & 1));
+    last.wrapping_add(d)
+}
+
+fn encode_index(data: &mut Vec<u8>, index: u32, last: u32) {
+    let d = index.wrapping_sub(last);
+    let v = (d << 1) ^ (((d as i32) >> 31) as u32);
+    encode_vbyte(data, v);
+}
+
+#[inline]
+fn put_index(out: &mut [u8], idx: usize, index_size: usize, val: u32) {
+    let pos = idx * index_size;
+    if index_size == 2 {
+        out[pos..pos + 2].copy_from_slice(&(val as u16).to_le_bytes());
+    } else {
+        out[pos..pos + 4].copy_from_slice(&val.to_le_bytes());
+    }
+}
+
+#[inline]
+fn write_triangle(out: &mut [u8], i: usize, index_size: usize, a: u32, b: u32, c: u32) {
+    put_index(out, i, index_size, a);
+    put_index(out, i + 1, index_size, b);
+    put_index(out, i + 2, index_size, c);
+}
+
+// ---------------------------------------------------------------------------
+// FIFOs
+// ---------------------------------------------------------------------------
+
+type EdgeFifo = [[u32; 2]; 16];
+type VertexFifo = [u32; 16];
+
+fn get_edge_fifo(fifo: &EdgeFifo, a: u32, b: u32, c: u32, offset: usize) -> i32 {
+    for i in 0..16 {
+        let index = (offset.wrapping_sub(1).wrapping_sub(i)) & 15;
+        let e0 = fifo[index][0];
+        let e1 = fifo[index][1];
+        if e0 == a && e1 == b {
+            return (i as i32) << 2;
+        }
+        if e0 == b && e1 == c {
+            return ((i as i32) << 2) | 1;
+        }
+        if e0 == c && e1 == a {
+            return ((i as i32) << 2) | 2;
+        }
+    }
+    -1
+}
+
+fn push_edge_fifo(fifo: &mut EdgeFifo, a: u32, b: u32, offset: &mut usize) {
+    fifo[*offset][0] = a;
+    fifo[*offset][1] = b;
+    *offset = (*offset + 1) & 15;
+}
+
+fn get_vertex_fifo(fifo: &VertexFifo, v: u32, offset: usize) -> i32 {
+    for i in 0..16 {
+        let index = (offset.wrapping_sub(1).wrapping_sub(i)) & 15;
+        if fifo[index] == v {
+            return i as i32;
+        }
+    }
+    -1
+}
+
+fn push_vertex_fifo(fifo: &mut VertexFifo, v: u32, offset: &mut usize, cond: usize) {
+    fifo[*offset] = v;
+    *offset = (*offset + cond) & 15;
+}
+
+fn get_code_aux_index(v: u8, table: &[u8]) -> i32 {
+    table
+        .iter()
+        .take(16)
+        .position(|&x| x == v)
+        .map_or(-1, |i| i as i32)
+}
+
+fn rotate_triangle(_a: u32, b: u32, c: u32, next: u32) -> usize {
+    if b == next {
+        1
+    } else if c == next {
+        2
+    } else {
+        0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Index buffer decode
+// ---------------------------------------------------------------------------
+
+/// Decode a meshoptimizer index buffer (triangle list) of `index_count`
+/// indices (`index_count % 3 == 0`), each `index_size` (2 or 4) bytes.
+pub fn decode_index_buffer(index_count: usize, index_size: usize, buffer: &[u8]) -> Result<Vec<u8>> {
+    if !index_count.is_multiple_of(3) {
+        return Err(MeshoptError::Invalid(format!(
+            "index_count {index_count} must be a multiple of 3"
+        )));
+    }
+    if index_size != 2 && index_size != 4 {
+        return Err(MeshoptError::Invalid(format!(
+            "index_size {index_size} must be 2 or 4"
+        )));
+    }
+    let need = 1 + index_count / 3 + 16;
+    if buffer.len() < need {
+        return Err(MeshoptError::Truncated {
+            what: "index buffer",
+            have: buffer.len(),
+            need,
+        });
+    }
+    if (buffer[0] & 0xf0) != INDEX_HEADER {
+        return Err(MeshoptError::BadHeader {
+            what: "index",
+            byte: buffer[0],
+        });
+    }
+    let version = buffer[0] & 0x0f;
+    if version > 1 {
+        return Err(MeshoptError::BadHeader {
+            what: "index",
+            byte: buffer[0],
+        });
+    }
+
+    let mut edgefifo: EdgeFifo = [[u32::MAX; 2]; 16];
+    let mut vertexfifo: VertexFifo = [u32::MAX; 16];
+    let mut edgefifooffset = 0usize;
+    let mut vertexfifooffset = 0usize;
+    let mut next = 0u32;
+    let mut last = 0u32;
+    let fecmax: i32 = if version >= 1 { 13 } else { 15 };
+
+    let mut out = vec![0u8; index_count * index_size];
+
+    let mut code = 1usize;
+    let mut data = 1 + index_count / 3;
+    let data_safe_end = buffer.len() - 16;
+    let codeaux_table = &buffer[data_safe_end..data_safe_end + 16];
+
+    let mut i = 0;
+    while i < index_count {
+        if data > data_safe_end {
+            return Err(MeshoptError::ExtraBytes {
+                what: "index buffer (data overrun)",
+                leftover: data - data_safe_end,
+            });
+        }
+        let codetri = buffer[code];
+        code += 1;
+
+        if codetri < 0xf0 {
+            let fe = (codetri >> 4) as usize;
+            let a = edgefifo[(edgefifooffset.wrapping_sub(1).wrapping_sub(fe)) & 15][0];
+            let b = edgefifo[(edgefifooffset.wrapping_sub(1).wrapping_sub(fe)) & 15][1];
+            let fec = (codetri & 15) as i32;
+
+            if fec < fecmax {
+                let cf = vertexfifo[(vertexfifooffset.wrapping_sub(1).wrapping_sub(fec as usize)) & 15];
+                let c = if fec == 0 { next } else { cf };
+                let fec0 = (fec == 0) as u32;
+                next = next.wrapping_add(fec0);
+
+                write_triangle(&mut out, i, index_size, a, b, c);
+                push_vertex_fifo(&mut vertexfifo, c, &mut vertexfifooffset, fec0 as usize);
+                push_edge_fifo(&mut edgefifo, c, b, &mut edgefifooffset);
+                push_edge_fifo(&mut edgefifo, a, c, &mut edgefifooffset);
+            } else {
+                let c = if fec != 15 {
+                    last = last.wrapping_add((fec - (fec ^ 3)) as u32);
+                    last
+                } else {
+                    last = decode_index(buffer, &mut data, last);
+                    last
+                };
+                write_triangle(&mut out, i, index_size, a, b, c);
+                push_vertex_fifo(&mut vertexfifo, c, &mut vertexfifooffset, 1);
+                push_edge_fifo(&mut edgefifo, c, b, &mut edgefifooffset);
+                push_edge_fifo(&mut edgefifo, a, c, &mut edgefifooffset);
+            }
+        } else if codetri < 0xfe {
+            let codeaux = codeaux_table[(codetri & 15) as usize];
+            let feb = (codeaux >> 4) as usize;
+            let fec = (codeaux & 15) as usize;
+
+            let a = next;
+            next = next.wrapping_add(1);
+
+            let bf = vertexfifo[(vertexfifooffset.wrapping_sub(feb)) & 15];
+            let b = if feb == 0 { next } else { bf };
+            let feb0 = (feb == 0) as u32;
+            next = next.wrapping_add(feb0);
+
+            let cf = vertexfifo[(vertexfifooffset.wrapping_sub(fec)) & 15];
+            let c = if fec == 0 { next } else { cf };
+            let fec0 = (fec == 0) as u32;
+            next = next.wrapping_add(fec0);
+
+            write_triangle(&mut out, i, index_size, a, b, c);
+            push_vertex_fifo(&mut vertexfifo, a, &mut vertexfifooffset, 1);
+            push_vertex_fifo(&mut vertexfifo, b, &mut vertexfifooffset, feb0 as usize);
+            push_vertex_fifo(&mut vertexfifo, c, &mut vertexfifooffset, fec0 as usize);
+            push_edge_fifo(&mut edgefifo, b, a, &mut edgefifooffset);
+            push_edge_fifo(&mut edgefifo, c, b, &mut edgefifooffset);
+            push_edge_fifo(&mut edgefifo, a, c, &mut edgefifooffset);
+        } else {
+            let codeaux = buffer[data];
+            data += 1;
+            let fea = if codetri == 0xfe { 0usize } else { 15 };
+            let feb = (codeaux >> 4) as usize;
+            let fec = (codeaux & 15) as usize;
+
+            if codeaux == 0 {
+                next = 0;
+            }
+
+            let mut a = if fea == 0 {
+                let t = next;
+                next = next.wrapping_add(1);
+                t
+            } else {
+                0
+            };
+            let mut b = if feb == 0 {
+                let t = next;
+                next = next.wrapping_add(1);
+                t
+            } else {
+                vertexfifo[(vertexfifooffset.wrapping_sub(feb)) & 15]
+            };
+            let mut c = if fec == 0 {
+                let t = next;
+                next = next.wrapping_add(1);
+                t
+            } else {
+                vertexfifo[(vertexfifooffset.wrapping_sub(fec)) & 15]
+            };
+
+            if fea == 15 {
+                last = decode_index(buffer, &mut data, last);
+                a = last;
+            }
+            if feb == 15 {
+                last = decode_index(buffer, &mut data, last);
+                b = last;
+            }
+            if fec == 15 {
+                last = decode_index(buffer, &mut data, last);
+                c = last;
+            }
+
+            write_triangle(&mut out, i, index_size, a, b, c);
+            push_vertex_fifo(&mut vertexfifo, a, &mut vertexfifooffset, 1);
+            push_vertex_fifo(
+                &mut vertexfifo,
+                b,
+                &mut vertexfifooffset,
+                ((feb == 0) || (feb == 15)) as usize,
+            );
+            push_vertex_fifo(
+                &mut vertexfifo,
+                c,
+                &mut vertexfifooffset,
+                ((fec == 0) || (fec == 15)) as usize,
+            );
+            push_edge_fifo(&mut edgefifo, b, a, &mut edgefifooffset);
+            push_edge_fifo(&mut edgefifo, c, b, &mut edgefifooffset);
+            push_edge_fifo(&mut edgefifo, a, c, &mut edgefifooffset);
+        }
+        i += 3;
+    }
+
+    if data != data_safe_end {
+        return Err(MeshoptError::ExtraBytes {
+            what: "index buffer",
+            leftover: data_safe_end.abs_diff(data),
+        });
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Index buffer encode
+// ---------------------------------------------------------------------------
+
+/// Encode a triangle-list index buffer (`indices`, `index_count % 3 == 0`)
+/// with format `version` (0 or 1). Returns the meshoptimizer index stream.
+pub fn encode_index_buffer(indices: &[u32], index_count: usize, version: u8) -> Result<Vec<u8>> {
+    if !index_count.is_multiple_of(3) {
+        return Err(MeshoptError::Invalid(format!(
+            "index_count {index_count} must be a multiple of 3"
+        )));
+    }
+    if version > 1 {
+        return Err(MeshoptError::Invalid(format!("index version {version} > 1")));
+    }
+    if indices.len() < index_count {
+        return Err(MeshoptError::Truncated {
+            what: "index source",
+            have: indices.len(),
+            need: index_count,
+        });
+    }
+
+    let mut edgefifo: EdgeFifo = [[u32::MAX; 2]; 16];
+    let mut vertexfifo: VertexFifo = [u32::MAX; 16];
+    let mut edgefifooffset = 0usize;
+    let mut vertexfifooffset = 0usize;
+    let mut next = 0u32;
+    let mut last = 0u32;
+    let fecmax: i32 = if version >= 1 { 13 } else { 15 };
+    let table = &CODE_AUX_ENCODING_TABLE;
+
+    let mut code: Vec<u8> = Vec::with_capacity(index_count / 3);
+    let mut data: Vec<u8> = Vec::new();
+
+    let mut i = 0;
+    while i < index_count {
+        let fer = get_edge_fifo(
+            &edgefifo,
+            indices[i],
+            indices[i + 1],
+            indices[i + 2],
+            edgefifooffset,
+        );
+
+        if fer >= 0 && (fer >> 2) < 15 {
+            let order = TRIANGLE_INDEX_ORDER[(fer & 3) as usize];
+            let a = indices[i + order[0]];
+            let b = indices[i + order[1]];
+            let c = indices[i + order[2]];
+
+            let fe = fer >> 2;
+            let fc = get_vertex_fifo(&vertexfifo, c, vertexfifooffset);
+            let mut fec = if (1..fecmax).contains(&fc) {
+                fc
+            } else if c == next {
+                next = next.wrapping_add(1);
+                0
+            } else {
+                15
+            };
+
+            if fec == 15 && version >= 1 {
+                if c.wrapping_add(1) == last {
+                    fec = 13;
+                    last = c;
+                }
+                if c == last.wrapping_add(1) {
+                    fec = 14;
+                    last = c;
+                }
+            }
+
+            code.push(((fe << 4) | fec) as u8);
+
+            if fec == 15 {
+                encode_index(&mut data, c, last);
+                last = c;
+            }
+            if fec == 0 || fec >= fecmax {
+                push_vertex_fifo(&mut vertexfifo, c, &mut vertexfifooffset, 1);
+            }
+            push_edge_fifo(&mut edgefifo, c, b, &mut edgefifooffset);
+            push_edge_fifo(&mut edgefifo, a, c, &mut edgefifooffset);
+        } else {
+            let rotation = rotate_triangle(indices[i], indices[i + 1], indices[i + 2], next);
+            let order = TRIANGLE_INDEX_ORDER[rotation];
+            let a = indices[i + order[0]];
+            let b = indices[i + order[1]];
+            let c = indices[i + order[2]];
+
+            let mut reset = false;
+            if a == 0 && b == 1 && c == 2 && next > 0 && version >= 1 {
+                reset = true;
+                next = 0;
+                vertexfifo = [u32::MAX; 16];
+            }
+
+            let fb = get_vertex_fifo(&vertexfifo, b, vertexfifooffset);
+            let fc = get_vertex_fifo(&vertexfifo, c, vertexfifooffset);
+
+            let fea = if a == next {
+                next = next.wrapping_add(1);
+                0i32
+            } else {
+                15
+            };
+            let feb = if (0..14).contains(&fb) {
+                fb + 1
+            } else if b == next {
+                next = next.wrapping_add(1);
+                0
+            } else {
+                15
+            };
+            let fec = if (0..14).contains(&fc) {
+                fc + 1
+            } else if c == next {
+                next = next.wrapping_add(1);
+                0
+            } else {
+                15
+            };
+
+            let codeaux = ((feb << 4) | fec) as u8;
+            let codeauxindex = get_code_aux_index(codeaux, table);
+
+            if fea == 0 && (0..14).contains(&codeauxindex) && !reset {
+                code.push(((15 << 4) | codeauxindex) as u8);
+            } else {
+                code.push(((15 << 4) | 14 | fea) as u8);
+                data.push(codeaux);
+            }
+
+            if fea == 15 {
+                encode_index(&mut data, a, last);
+                last = a;
+            }
+            if feb == 15 {
+                encode_index(&mut data, b, last);
+                last = b;
+            }
+            if fec == 15 {
+                encode_index(&mut data, c, last);
+                last = c;
+            }
+
+            if fea == 0 || fea == 15 {
+                push_vertex_fifo(&mut vertexfifo, a, &mut vertexfifooffset, 1);
+            }
+            if feb == 0 || feb == 15 {
+                push_vertex_fifo(&mut vertexfifo, b, &mut vertexfifooffset, 1);
+            }
+            if fec == 0 || fec == 15 {
+                push_vertex_fifo(&mut vertexfifo, c, &mut vertexfifooffset, 1);
+            }
+            push_edge_fifo(&mut edgefifo, b, a, &mut edgefifooffset);
+            push_edge_fifo(&mut edgefifo, c, b, &mut edgefifooffset);
+            push_edge_fifo(&mut edgefifo, a, c, &mut edgefifooffset);
+        }
+        i += 3;
+    }
+
+    let mut out = Vec::with_capacity(1 + code.len() + data.len() + 16);
+    out.push(INDEX_HEADER | version);
+    out.extend_from_slice(&code);
+    out.extend_from_slice(&data);
+    out.extend_from_slice(table);
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Index sequence
+// ---------------------------------------------------------------------------
+
+/// Decode a meshoptimizer index *sequence* (`0xd0`) of `index_count` indices.
+pub fn decode_index_sequence(index_count: usize, index_size: usize, buffer: &[u8]) -> Result<Vec<u8>> {
+    if index_size != 2 && index_size != 4 {
+        return Err(MeshoptError::Invalid(format!(
+            "index_size {index_size} must be 2 or 4"
+        )));
+    }
+    let need = 1 + index_count + 4;
+    if buffer.len() < need {
+        return Err(MeshoptError::Truncated {
+            what: "index sequence",
+            have: buffer.len(),
+            need,
+        });
+    }
+    if (buffer[0] & 0xf0) != SEQUENCE_HEADER {
+        return Err(MeshoptError::BadHeader {
+            what: "index sequence",
+            byte: buffer[0],
+        });
+    }
+    if (buffer[0] & 0x0f) > 1 {
+        return Err(MeshoptError::BadHeader {
+            what: "index sequence",
+            byte: buffer[0],
+        });
+    }
+
+    let mut out = vec![0u8; index_count * index_size];
+    let data_safe_end = buffer.len() - 4;
+    let mut last = [0u32; 2];
+    let mut p = 1usize;
+    for i in 0..index_count {
+        if p >= data_safe_end {
+            return Err(MeshoptError::Truncated {
+                what: "index sequence (data underrun)",
+                have: data_safe_end,
+                need: p + 1,
+            });
+        }
+        let mut v = decode_vbyte(buffer, &mut p);
+        let current = (v & 1) as usize;
+        v >>= 1;
+        let d = (v >> 1) ^ (0u32.wrapping_sub(v & 1));
+        let index = last[current].wrapping_add(d);
+        last[current] = index;
+        put_index(&mut out, i, index_size, index);
+    }
+    if p != data_safe_end {
+        return Err(MeshoptError::ExtraBytes {
+            what: "index sequence",
+            leftover: data_safe_end.abs_diff(p),
+        });
+    }
+    Ok(out)
+}
+
+/// Encode an index sequence (`version` 0 or 1).
+pub fn encode_index_sequence(indices: &[u32], index_count: usize, version: u8) -> Result<Vec<u8>> {
+    if version > 1 {
+        return Err(MeshoptError::Invalid(format!("sequence version {version} > 1")));
+    }
+    if indices.len() < index_count {
+        return Err(MeshoptError::Truncated {
+            what: "index sequence source",
+            have: indices.len(),
+            need: index_count,
+        });
+    }
+    let mut data = Vec::with_capacity(1 + index_count + 4);
+    data.push(SEQUENCE_HEADER | version);
+
+    let mut last = [0u32; 2];
+    let mut current = 0usize;
+    for &index in indices.iter().take(index_count) {
+        let cd = index.wrapping_sub(last[current]) as i32;
+        current ^= (cd.unsigned_abs() >= 30) as usize;
+        let d = index.wrapping_sub(last[current]);
+        let v = (d << 1) ^ (((d as i32) >> 31) as u32);
+        encode_vbyte(&mut data, (v << 1) | current as u32);
+        last[current] = index;
+    }
+    data.extend_from_slice(&[0u8; 4]);
+    Ok(data)
+}
