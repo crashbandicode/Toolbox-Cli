@@ -54,7 +54,9 @@ mod layout_audit;
 mod layout_diff;
 mod layout_validate_manifest;
 mod mat_rename;
+mod mc_extract;
 mod mc_inspect;
+mod mc_repack;
 mod mc_roundtrip_test;
 mod msbt_inspect;
 mod msbt_json;
@@ -401,6 +403,14 @@ pub enum Verb {
     /// round-trip is byte-identical. `--dir` sweeps every `.mc` under a tree.
     McRoundtripTest(mc_roundtrip_test::Args),
 
+    /// Decompress a TotK MeshCodec (`MCPK`) container to its inner BFRES
+    /// (magicless zstd; no dictionary needed for model `.bfres.mc`).
+    McExtract(mc_extract::Args),
+
+    /// Re-compress an edited BFRES into a `.mc` the game decodes (copies the
+    /// original's version/flags/alignment). Self-verifies the round-trip.
+    McRepack(mc_repack::Args),
+
     /// Extract a SARC archive to a directory tree.
     SarcUnpack(sarc_unpack::Args),
 
@@ -480,6 +490,8 @@ pub fn dispatch(verb: Verb) -> Result<ExitCode> {
         Verb::NsoExtract(args) => Ok(nso_extract::run(args)?),
         Verb::McInspect(args) => Ok(mc_inspect::run(args)?),
         Verb::McRoundtripTest(args) => Ok(mc_roundtrip_test::run(args)?),
+        Verb::McExtract(args) => Ok(mc_extract::run(args)?),
+        Verb::McRepack(args) => Ok(mc_repack::run(args)?),
         Verb::SarcUnpack(args) => Ok(sarc_unpack::run(args)?),
         Verb::SarcPack(args) => Ok(sarc_pack::run(args)?),
         Verb::Decompress(args) => Ok(decompress::run(args)?),

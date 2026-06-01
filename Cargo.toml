@@ -56,7 +56,9 @@ texture2ddecoder = "0.1"
 # BSD-3-Clause (we do not take its optional GPLv2 grant), so this stays a
 # GPL-free dependency. Yaz0/Yaz1 (`.szs`) is implemented natively in
 # `compression::yaz0`. SARC read + write are native (see `sarc.rs`).
-zstd = "0.13"
+# `experimental` exposes the magicless frame format + advanced params used by
+# the TotK MeshCodec (`MCPK`) codec in `src/mc/codec.rs`.
+zstd = { version = "0.13", features = ["experimental"] }
 
 # Walk directories for SARC packing
 walkdir = "2.5"

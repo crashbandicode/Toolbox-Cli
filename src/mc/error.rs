@@ -28,6 +28,13 @@ pub enum McError {
     /// The decoded decompressed-size descriptor is implausible (0 or absurd).
     #[error("MCPK decompressed-size descriptor 0x{descriptor:08x} -> {size} bytes is implausible")]
     BadSize { descriptor: u32, size: usize },
+
+    /// A zstd (magicless) decompress/compress operation failed.
+    #[error("MeshCodec zstd {stage}: {message}")]
+    Zstd {
+        stage: &'static str,
+        message: String,
+    },
 }
 
 /// Convenience alias for the MC module's fallible operations.

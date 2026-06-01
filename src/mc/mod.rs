@@ -31,10 +31,12 @@
 //! files: the computed size equals the (alignment-padded) decompressed length
 //! (the real BFRES `fileSize` is `<=` it; the remainder is zero padding).
 
+mod codec;
 mod error;
 mod read;
 mod write;
 
+pub use codec::{compress_stream, decompress_stream, extract, repack, repack_default, size_descriptor};
 pub use error::{McError, Result};
 pub use read::read_mc;
 pub use write::write_mc;
