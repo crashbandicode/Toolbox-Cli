@@ -99,6 +99,8 @@ src/
 ├── diff.rs             Structured BFLYT+BNTX before/after diff (name-keyed)
 ├── audit.rs            Recursive unsupported/suspicious-structure scan → JSON
 │                       (compression-aware: inflates .zs/.szs, then recurses)
+├── corpus_audit.rs     Multi-format real-corpus confidence audit → JSON
+│                       (magic-dispatch + safest op per format; recurses SARC)
 ├── manifest.rs         SGPO skin manifest schema (serde)
 └── verbs/              One file per CLI verb (~35 verbs)
 ```
@@ -227,7 +229,7 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 111): the `verbs`
+- **Library unit tests** (`cargo test --lib`, 125): the `verbs`
   `--texture-format` alias/`--srgb` resolver, plus `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
@@ -622,6 +624,46 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-05-31 — Reliability hardening pass (trust matrix + invariants + negatives + corpus-audit)
+A quality/reliability pass (no new format features) to make each CLI verb earn
+an explicit support tier. Five phases, committed in batches; all green.
+
+**Phase 1 — `TRUST_MATRIX.md` (new, tracked).** Inventories all 57 verbs by
+format: read-only vs writing, the output contract (byte-identical / semantic /
+inspect / mutate / lossless-recompress), current coverage (corpus / fixture-free
+unit / negative / mutation diff-shape), a trust tier (Trusted / Validated /
+Experimental / Inspect-only / Lossless-not-byte-identical), and a concrete
+"to reach Trusted" checklist. **This is the source of truth for trust status.**
+
+**Phases 2–3 — invariants + negatives (8 new lib tests).** Fixture-free
+malformed-input tests for the parsers that lacked them (`bntx`/`bflyt`/`bflan`
+→ typed errors, no panic). Mutation **diff-shape** tests for `msbt`
+(`set_message_by_label` leaves unrelated messages/labels/sections byte-stable)
+and `restbl` (`set_by_hash` changes only the target; name table + order stable;
+miss = no-op) — joining the existing `byml-set` exactly-one-diff. **Canonical
+idempotency** tests for `byml`/`msbt`/`aamp` (`read→canonical→read→canonical`
+is byte-stable).
+
+**Phase 4 — `corpus-audit` (new module + verb).** `src/corpus_audit.rs` walks a
+romfs/root (recursing into SARC, inflating `.zs`/`.szs`), classifies by content
+magic, runs the safest op per format, and tallies per-format byte-identical /
+semantic / inspect / expected-unsupported / unexpected-fail → a JSON manifest
+(tool_version, git_commit, ISO-8601 times, versions/endian/encoding, failures[]).
+Read-only; nonzero exit on any unexpected failure. 6 fixture-free unit tests +
+smoke-tested on `tests/fixtures/{bfres,restbl,aamp}` (42 files, all
+byte-identical).
+
+**Phase 5 — promotions.** **Trusted:** `bflyt-roundtrip-test`,
+`bntx-roundtrip-test` (documented C#-tool exceptions), `byml-roundtrip-test`
+(TotK), `byml-set`, `aamp-roundtrip-test` (BOTW), `bfres-roundtrip-test`.
+**Validated** (concrete gaps noted in the matrix): `msbt-import-json` (was
+Experimental), `corpus-audit`, the bflan/restbl/msbt round-trips. Inspect verbs
+stay **Inspect-only** (their parsers are corpus-trusted). `cargo test` =
+**125 lib unit + 212 total across all binaries, 0 failures**; `clippy
+--all-targets` clean; `--no-default-features` builds. Remaining for more Trusted
+verbs: typed `BflanError`; BOTW `RSTB`; MSBT BOTW/non-v3 unsupported-or-pass;
+`aamp-set` exactly-one-diff; recorded real-romfs `corpus-audit` runs.
 
 ### 2026-05-31 — BFRES (FRES) inspect + verbatim round-trip; MeshCodec `.mc` investigated/deferred
 Roadmap item #2 (BFRES inspect-only). Done in the disciplined order:

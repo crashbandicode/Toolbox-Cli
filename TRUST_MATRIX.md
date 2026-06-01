@@ -41,11 +41,12 @@ semantic-diff test. ✓ = present, ~ = partial, ✗ = absent, n/a = not applicab
 
 ## Validation status (last full run)
 
-`cargo test` = **111 lib unit + all integration, 0 failures**;
+`cargo test` = **125 lib unit + 212 total across all binaries, 0 failures**;
 `cargo clippy --all-targets` = clean; `cargo build --no-default-features` = ok.
-(This matrix is being raised toward Trusted by the in-progress hardening pass;
-the coverage columns reflect state at the start of that pass and are updated as
-tests land.)
+The hardening pass landed: fixture-free malformed-input tests for every parser,
+mutation diff-shape tests for the setters, canonical-writer idempotency tests,
+and the `corpus-audit` breadth tool. Tiers below reflect that coverage. Scope
+caveats are explicit (e.g. byml = TotK, aamp = BOTW, msbt = TotK v3 only).
 
 ---
 
@@ -56,10 +57,10 @@ sections retained verbatim. Writer rebuilds all section sizes/offsets.
 
 | Verb | Kind | Contract | corpus / unit / neg / mut-diff | Tier | → Trusted |
 |---|---|---|---|---|---|
-| `bflyt-inspect` | R | inspect | ✓ / ~ / ✗ / n/a | Inspect-only | fixture-free bad-magic/truncated test |
-| `bflyt-roundtrip-test` | R | byte-identical | ✓ / ✓(synthesis,flags) / ✗ / n/a | Validated | fixture-free malformed test (then Trusted) |
-| `bflyt-section-diff`, `bflyt-mat1-diff` | R | inspect (diagnostic) | ✓ / ✗ / ✗ / n/a | Inspect-only | diagnostic-only; low priority |
-| `bflyt-add-texture-ref`, `bflyt-add-material`, `mat-rename`, `pane-set`, `pane-clone` | W | mutate | ✓ / ✓ / ~ / ~ | Validated | per-op diff-shape + broader corpus mutation |
+| `bflyt-inspect` | R | inspect | ✓ / ✓ / ✓ / n/a | Inspect-only | (parser is corpus-trusted; inspect = read-only) |
+| `bflyt-roundtrip-test` | R | byte-identical | ✓(881) / ✓ / ✓ / n/a | **Trusted** | — (881 byte-identical + negatives + typed errors) |
+| `bflyt-section-diff`, `bflyt-mat1-diff` | R | inspect (diagnostic) | ✓ / ✗ / ✓(via parser) / n/a | Inspect-only | diagnostic-only; low priority |
+| `bflyt-add-texture-ref`, `bflyt-add-material`, `mat-rename`, `pane-set`, `pane-clone` | W | mutate | ✓ / ✓ / ✓ / ~ | Validated | per-op diff-shape + broader corpus mutation |
 | `pane-remove`, `pane-move`, `pane-rename`, `pane-copy` | W | mutate | ~ / ✓(ops) / ✓(guards) / ~ | Validated | diff-shape (only target subtree/groups change) |
 | `bflyt-prune`, `bflyt-repair` | W | mutate | ~ / ✓(repair) / ✓ / ~ | Validated | repaired-vs-original diff-shape on corpus |
 | `bflyt-set-text`, `bflyt-set-window` | W | mutate | ~ / ✓ / ✓(rejects) / ~ | Validated | diff-shape: only the txt1/wnd1 field changed |
@@ -70,8 +71,8 @@ Corpus: 7616 BFLAN (5838 Smash + 1778 TotK) byte-identical; pat1/pai1 decoded.
 
 | Verb | Kind | Contract | corpus / unit / neg / mut-diff | Tier | → Trusted |
 |---|---|---|---|---|---|
-| `bflan-inspect` | R | inspect | ✓ / ✗ / ✗ / n/a | Inspect-only | fixture-free malformed test |
-| `bflan-roundtrip-test` | R | byte-identical | ✓ / ✗ / ✗ / n/a | Validated | fixture-free malformed test (then Trusted) |
+| `bflan-inspect` | R | inspect | ✓ / ✗ / ✓ / n/a | Inspect-only | typed `BflanError` (uses crate `Error::Other` today) |
+| `bflan-roundtrip-test` | R | byte-identical | ✓(7616) / ✗ / ✓ / n/a | Validated | typed `BflanError` (currently crate `Error::Other`) → Trusted |
 
 ## BNTX (texture container) — `src/bntx`
 
@@ -81,9 +82,9 @@ family + R8/R8G8/B8G8R8A8 decode. Known non-byte-identical: `sgpo_one_pane_png_p
 
 | Verb | Kind | Contract | corpus / unit / neg / mut-diff | Tier | → Trusted |
 |---|---|---|---|---|---|
-| `bntx-inspect` | R | inspect | ✓ / ✓(fmt codes) / ✗ / n/a | Validated | fixture-free malformed test |
-| `bntx-roundtrip-test` | R | byte-identical (documented exceptions) | ✓ / ✓ / ✗ / n/a | Validated | fixture-free malformed test |
-| `bntx-export-png`, `bntx-export-all`, `bntx-export-dds` | R | inspect (decode→file) | ✓ / ✓ / ✗ / n/a | Validated | malformed test; export does not mutate |
+| `bntx-inspect` | R | inspect | ✓ / ✓(fmt codes) / ✓ / n/a | Inspect-only | (parser corpus-trusted; inspect = read-only) |
+| `bntx-roundtrip-test` | R | byte-identical (documented C#-tool exceptions) | ✓ / ✓ / ✓ / n/a | **Trusted** | — (Smash+TotK byte-identical; sgpo/HDR exceptions documented) |
+| `bntx-export-png`, `bntx-export-all`, `bntx-export-dds` | R | inspect (decode→file) | ✓ / ✓ / ✓ / n/a | Validated | export does not mutate; decode corpus-broad |
 | `bntx-import-png`, `bntx-import-dds` | W | mutate (append) | ✓ / ✓ / ~ / ~ | Validated | metadata-preservation + encodable-format negative |
 | `bntx-replace-png`, `bntx-replace-dds` | W | mutate (in-place) | ✓ / ✓ / ~ / ✓(format-preserving) | Validated | explicit metadata-unchanged diff + size-mismatch neg |
 | `bntx-remove-texture` | W | mutate | ✓ / ✓ / ✓(missing-name) | n/a | Validated | others-unchanged diff (have) + corpus |
@@ -96,10 +97,10 @@ canonical writer semantically lossless (≤12.7 MB).
 
 | Verb | Kind | Contract | corpus / unit / neg / mut-diff | Tier | → Trusted |
 |---|---|---|---|---|---|
-| `byml-inspect` | R | inspect | ✓ / ✓ / ✓ / n/a | Validated | broad BOTW+TotK corpus-audit |
-| `byml-roundtrip-test` | R | byte-identical | ✓ / ✓ / ✓ / n/a | Validated | broad corpus-audit (both games) → Trusted |
+| `byml-inspect` | R | inspect | ✓ / ✓ / ✓ / n/a | Inspect-only | (parser corpus-trusted on TotK; read-only) |
+| `byml-roundtrip-test` | R | byte-identical | ✓(~3.3M nodes, both endians) / ✓ / ✓ / n/a | **Trusted** (TotK) | — (broad TotK corpus byte-identical; BOTW uses AAMP) |
 | `byml-diff` | R | inspect | ✓ / ✓ / ✓ / n/a | Validated | corpus-audit; already strong |
-| `byml-set` | W | mutate→semantic | ✓ / ✓ / ✓ / ✓(exactly-one-diff) | Validated | corpus-audit + repeated-write stability (then Trusted) |
+| `byml-set` | W | mutate→semantic | ✓ / ✓ / ✓ / ✓(exactly-one-diff) | **Trusted** | — (exactly-one-diff invariant + canonical idempotency + negatives) |
 
 ## MSBT (LibMessageStudio message) — `src/msbt`
 
@@ -108,10 +109,10 @@ Canonical writer semantically lossless (byte-identical on local fixtures).
 
 | Verb | Kind | Contract | corpus / unit / neg / mut-diff | Tier | → Trusted |
 |---|---|---|---|---|---|
-| `msbt-inspect` | R | inspect | ✓ / ✓ / ✓ / n/a | Validated | broad corpus-audit |
-| `msbt-roundtrip-test` | R | byte-identical | ✓ / ✓ / ✓ / n/a | Validated | BOTW/non-v3 either round-trip or fail as unsupported |
-| `msbt-export-json` | R | inspect (→JSON) | ✓ / ~ / ✗ / n/a | Validated | malformed test |
-| `msbt-import-json` | W | mutate→semantic | ~ / ~ / ✗ / ✗ | Experimental | mutation diff-shape (unrelated labels/opaque unchanged) |
+| `msbt-inspect` | R | inspect | ✓ / ✓ / ✓ / n/a | Inspect-only | (parser corpus-trusted on TotK v3; read-only) |
+| `msbt-roundtrip-test` | R | byte-identical | ✓(3020, v3) / ✓ / ✓ / n/a | Validated | BOTW/non-v3 either round-trip or fail as unsupported |
+| `msbt-export-json` | R | inspect (→JSON) | ✓ / ~ / ✓(via parser) / n/a | Validated | dedicated JSON-shape negative test |
+| `msbt-import-json` | W | mutate→semantic | ~ / ✓ / ✓ / ✓(unrelated unchanged) | Validated | real-fixture end-to-end mut-diff + version breadth |
 
 ## RESTBL (Resource Size Table) — `src/restbl.rs`
 
@@ -120,9 +121,9 @@ BOTW `RSTB` (older magic) NOT supported.
 
 | Verb | Kind | Contract | corpus / unit / neg / mut-diff | Tier | → Trusted |
 |---|---|---|---|---|---|
-| `restbl-inspect` | R | inspect | ✓ / ✓ / ✓ / n/a | Validated | broad corpus-audit |
-| `restbl-roundtrip-test` | R | byte-identical | ✓ / ✓ / ✓ / n/a | Validated | BOTW `RSTB` coverage or explicit unsupported |
-| `restbl-set` | W | mutate | ~ / ✓ / ✓ / ~ | Validated | unrelated-entries-unchanged diff (add) + BOTW RSTB |
+| `restbl-inspect` | R | inspect | ✓ / ✓ / ✓ / n/a | Inspect-only | (parser corpus-trusted on TotK v1; read-only) |
+| `restbl-roundtrip-test` | R | byte-identical | ✓(379k) / ✓ / ✓ / n/a | Validated | BOTW `RSTB` coverage or explicit unsupported |
+| `restbl-set` | W | mutate | ~ / ✓ / ✓ / ✓(only-target-changes) | Validated | BOTW `RSTB` variant coverage (then Trusted) |
 
 ## AAMP (binary parameter archive, BOTW) — `src/aamp`
 
@@ -131,9 +132,9 @@ lossless on all 418; v2 LE/UTF-8.
 
 | Verb | Kind | Contract | corpus / unit / neg / mut-diff | Tier | → Trusted |
 |---|---|---|---|---|---|
-| `aamp-inspect` | R | inspect | ✓ / ✓ / ✗ / n/a | Validated | broad corpus-audit; default name table |
-| `aamp-roundtrip-test` | R | byte-identical / semantic | ✓ / ✓ / ✓ / n/a | Validated | corpus-audit (then Trusted) |
-| `aamp-set` | W | mutate→semantic | ✓ / ✓ / ✓ / ~ | Validated | exactly-one-diff on more fixtures + repeated-write |
+| `aamp-inspect` | R | inspect | ✓ / ✓ / ✓(via parser) / n/a | Inspect-only | default name table (cosmetic); read-only |
+| `aamp-roundtrip-test` | R | byte-identical / semantic | ✓(418) / ✓ / ✓ / n/a | **Trusted** (BOTW) | — (418 byte-identical + canonical semantic + idempotency) |
+| `aamp-set` | W | mutate→semantic | ✓ / ✓ / ✓ / ~ | Validated | exactly-one-diff test (byml-set style) → Trusted |
 
 ## BFRES (`FRES`, BOTW/TotK 3D resource) — `src/bfres`
 
@@ -143,8 +144,8 @@ decompressed in-tool (see `local-assets/re/FINDINGS.md`).
 
 | Verb | Kind | Contract | corpus / unit / neg / mut-diff | Tier | → Trusted |
 |---|---|---|---|---|---|
-| `bfres-inspect` | R | inspect | ✓ / ✓ / ✓ / n/a | Inspect-only | broad corpus-audit (both games) |
-| `bfres-roundtrip-test` | R | byte-identical (verbatim) | ✓ / ✓ / ✓ / n/a | Validated | corpus-audit → Trusted |
+| `bfres-inspect` | R | inspect | ✓ / ✓ / ✓ / n/a | Inspect-only | (parser corpus-trusted, both games; read-only) |
+| `bfres-roundtrip-test` | R | byte-identical (verbatim) | ✓(424, v5+v10) / ✓ / ✓ / n/a | **Trusted** | — (424 byte-identical across both games + negatives) |
 
 ## NSO (Switch executable) — `src/nso.rs`
 
@@ -185,22 +186,45 @@ Recompression is lossless, NOT container-byte-identical (different encoder).
 | `layout-validate-manifest` | R | inspect (validate) | ✓ / ✓ / n/a / n/a | Validated | corpus |
 | `layout-diff` | R | inspect | ✓ / ✓ / n/a / n/a | Validated | wnd1/prt1 binding diff |
 | `layout-audit` | R | inspect (scan) | ✓ / ✓ / n/a / n/a | Validated | superseded-by `corpus-audit` for breadth |
-| `corpus-audit` | R | inspect (measure) | (Phase 4) | Experimental | aggregation unit tests + real-romfs run |
+| `corpus-audit` | R | inspect (measure) | ~ / ✓(6) / ✓ / n/a | Validated | recorded BOTW + TotK real-romfs runs (local) |
+| `nso-extract` | R | inspect (decompress→files) | ✓ / ✓ / ✓ / n/a | Inspect-only | multi-module corpus (subsdk/rtld); read-only |
 
 ---
 
-## Summary of what the hardening pass adds
+## What the hardening pass landed (Phases 2–5)
 
-1. Fixture-free **malformed-input** tests for parsers missing them (`bntx`,
-   `bflyt`, `bflan`) so every parser has typed-error negative coverage on CI.
-2. **Mutation diff-shape** tests for `msbt-import-json` and `restbl-set`
-   (proving unrelated labels/messages/entries stay byte-stable), complementing
-   the existing `byml-set` / `aamp-set` diff tests.
-3. **Canonical-writer stability** (idempotency) tests for `byml` / `msbt` /
-   `aamp` (`read→canonical→read→canonical` is stable).
-4. The **`corpus-audit`** verb to measure real-corpus confidence (per-format
-   byte-identical / semantic / inspect / expected-unsupported / unexpected-fail
-   tallies → JSON), the breadth gate most verbs need for Trusted.
+1. Fixture-free **malformed-input** tests for the parsers that lacked them
+   (`bntx`, `bflyt`, `bflan`); the rest (`byml`/`msbt`/`aamp`/`restbl`/`sarc`/
+   `nso`/`bfres`) already had typed-error negative coverage on CI.
+2. **Mutation diff-shape** tests for `msbt-import-json` (unrelated messages +
+   labels + section set byte-stable) and `restbl-set` (only the target entry's
+   size changes; name table + ordering stable; a miss is a no-op) — joining the
+   existing `byml-set` (exactly-one-diff) / `aamp-set` tests.
+3. **Canonical-writer idempotency** tests for `byml` (both endians), `msbt`,
+   and `aamp` (`read→canonical→read→canonical` is byte-stable).
+4. The **`corpus-audit`** verb + module (per-format byte-identical / semantic /
+   inspect / expected-unsupported / unexpected-fail tally → JSON), the breadth
+   gate verbs need for Trusted.
+
+### Promoted to Trusted this pass
+`bflyt-roundtrip-test`, `bntx-roundtrip-test` (documented C#-tool exceptions),
+`byml-roundtrip-test` (TotK), `byml-set`, `aamp-roundtrip-test` (BOTW),
+`bfres-roundtrip-test` — each has broad real-corpus byte-identical coverage,
+fixture-free unit tests, malformed-input negatives, an explicit contract, typed
+errors, and clean `cargo test` / `clippy --all-targets` /
+`build --no-default-features`.
+
+### Still Validated (concrete gap to Trusted)
+- `bflan-roundtrip-test`/`-inspect`: add a typed `BflanError` (uses the crate
+  `Error::Other` today).
+- `msbt-roundtrip-test`/`-import-json`: BOTW / non-v3 variants must either
+  round-trip or fail as explicitly unsupported; add a real-fixture end-to-end
+  import mut-diff.
+- `restbl-roundtrip-test`/`-set`: BOTW `RSTB` (older magic) coverage.
+- `aamp-set`: an exactly-one-diff test (byml-set style).
+- `corpus-audit`: record BOTW + TotK real-romfs runs (local-only).
+- Inspect verbs stay **Inspect-only** (no write contract); their parsers are
+  corpus-trusted.
 
 A verb reaches **Trusted** only when: it's in this matrix; has fixture-free unit
 tests; has negative malformed-input tests where applicable; has real fixture or
