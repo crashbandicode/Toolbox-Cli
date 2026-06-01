@@ -52,6 +52,9 @@
 //!   [`layout::validate_manifest`] / [`layout::apply_manifest_to_arc`].
 //! - [`diff`] — structured BFLYT+BNTX before/after diff.
 //! - [`audit`] — recursive scan for unsupported/suspicious structures.
+//! - [`corpus_audit`] — multi-format real-corpus confidence measure
+//!   (per-format byte-identical / semantic / inspect / unsupported / fail
+//!   tally → JSON), recursing into SARC archives.
 //!
 //! Most names you need are re-exported from [`prelude`].
 //!
@@ -85,6 +88,7 @@ pub mod bfres;
 pub mod bntx;
 pub mod byml;
 pub mod compression;
+pub mod corpus_audit;
 pub mod dds;
 pub mod diff;
 pub mod layout;
