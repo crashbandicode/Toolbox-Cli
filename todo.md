@@ -6,6 +6,18 @@ session immediately after this file was written.
 
 ## In progress / next
 
+- [ ] **TotK MeshCodec mesh-geometry codec** (decode + re-encode the trailing
+  vertex/index buffers; the community-unsolved part). RE'd: the mesh stream is
+  Nintendo's own zstd reimplementation (state machine `0x6c6da0`, Huff0/FSE
+  entropy). **Stage 1a DONE (this session):** built `src/zstd_pure/` — a
+  from-scratch, crate-extractable pure-Rust **zstd decoder** (RFC 8478; FSE +
+  Huff0 + sequences + frame + checksum), validated byte-for-byte vs libzstd
+  (levels 1-19) and on every real BFRES frame in `tests/fixtures/mc/`. **Next:**
+  Stage 1b — the custom MeshCodec outer framing (FMSH header + block assembly)
+  on top of these primitives → full mesh decode == the `mesh-codec-output`
+  oracle; then re-encode via RAW/stored blocks + extend `mc-repack`. Notes in
+  `local-assets/re/FINDINGS.md`.
+
 - [x] **BFLYT advanced pane mutations.** Roadmap #3 (done, committed a50ae76 +
   d75960a). `src/bflyt/ops.rs`: `remove_pane` (drop subtree + scrub groups),
   `move_pane` (reparent, cycle-guarded), `rename_pane` (+ group-ref update),
