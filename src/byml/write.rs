@@ -429,4 +429,25 @@ mod tests {
             Err(BymlError::NonContainerRoot("u32"))
         ));
     }
+
+    /// The canonical writer is idempotent: re-encoding its own output (after a
+    /// re-read) yields byte-identical bytes, for both endians.
+    #[test]
+    fn canonical_write_is_idempotent() {
+        let root = Byml::Hash(vec![
+            ("count".into(), Byml::I32(-7)),
+            ("name".into(), Byml::String("hello".into())),
+            ("big".into(), Byml::U64(9_000_000_000)),
+            (
+                "list".into(),
+                Byml::Array(vec![Byml::U32(1), Byml::String("a".into())]),
+            ),
+        ]);
+        for big_endian in [false, true] {
+            let c1 = write_byml_canonical(7, big_endian, &root).expect("write 1");
+            let d1 = read_byml(&c1).expect("read 1");
+            let c2 = write_byml_canonical(d1.version, d1.big_endian, &d1.root).expect("write 2");
+            assert_eq!(c2, c1, "canonical writer must be idempotent (be={big_endian})");
+        }
+    }
 }

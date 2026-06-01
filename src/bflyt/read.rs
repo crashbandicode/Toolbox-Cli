@@ -1052,3 +1052,34 @@ fn read_cstring_until_null<R: Read>(r: &mut R) -> Result<String, BflytError> {
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every malformed-header case must fail loudly with a typed
+    /// [`BflytError`] (never panic, never accept garbage). Fixture-free.
+    #[test]
+    fn read_bflyt_rejects_garbage() {
+        // Too small for the 0x14 header -> Format.
+        assert!(read_bflyt(&[]).is_err());
+        assert!(matches!(read_bflyt(&[0u8; 8]), Err(BflytError::Format(_))));
+        // Header-sized, wrong magic -> BadMagic.
+        let mut bad_magic = vec![0u8; 0x14];
+        bad_magic[0..4].copy_from_slice(b"NOPE");
+        assert!(matches!(read_bflyt(&bad_magic), Err(BflytError::BadMagic(_))));
+        // Right magic, bad byte-order mark (0x0000, not 0xFEFF) -> BadBom.
+        let mut bad_bom = vec![0u8; 0x14];
+        bad_bom[0..4].copy_from_slice(b"FLYT");
+        assert!(matches!(read_bflyt(&bad_bom), Err(BflytError::BadBom(_))));
+        // Right magic + BOM, but a pre-v8 (Wii U / 3DS) version -> Unsupported.
+        let mut old_ver = vec![0u8; 0x14];
+        old_ver[0..4].copy_from_slice(b"FLYT");
+        old_ver[4..6].copy_from_slice(&0xFEFFu16.to_le_bytes());
+        old_ver[8..12].copy_from_slice(&0x0500_0000u32.to_le_bytes()); // major 5
+        assert!(matches!(
+            read_bflyt(&old_ver),
+            Err(BflytError::UnsupportedVersion(_))
+        ));
+    }
+}

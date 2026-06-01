@@ -371,4 +371,15 @@ mod tests {
         assert_eq!(doc.pio_type, doc2.pio_type);
         assert_eq!(doc.pio_version, doc2.pio_version);
     }
+
+    /// The canonical writer is idempotent: re-encoding its own output (after a
+    /// re-read) yields byte-identical bytes.
+    #[test]
+    fn canonical_write_is_idempotent() {
+        let doc = sample_doc();
+        let c1 = write_aamp_canonical(&doc).unwrap();
+        let d1 = read_aamp(&c1).expect("re-parse");
+        let c2 = write_aamp_canonical(&d1).unwrap();
+        assert_eq!(c2, c1, "canonical writer must be byte-stable across re-writes");
+    }
 }

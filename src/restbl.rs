@@ -411,4 +411,29 @@ mod tests {
         bad[0..6].copy_from_slice(b"NOPEZZ");
         assert!(matches!(read_restbl(&bad), Err(RestblError::BadMagic(_))));
     }
+
+    /// Mutation diff-shape: `set_by_hash` changes *only* the targeted entry's
+    /// size; every other CRC entry (hash + size + order) and the whole name
+    /// table stay byte-stable, and a miss is a no-op.
+    #[test]
+    fn set_only_changes_target_entry() {
+        let mut r = sample();
+        let before = r.clone();
+        assert!(r.set_by_hash(0x20, 999));
+        assert_eq!(r.crc_entries.len(), before.crc_entries.len());
+        for (after, orig) in r.crc_entries.iter().zip(&before.crc_entries) {
+            assert_eq!(after.hash, orig.hash, "hash/order must stay stable");
+            if after.hash == 0x20 {
+                assert_eq!((orig.size, after.size), (200, 999), "target updated");
+            } else {
+                assert_eq!(after.size, orig.size, "unrelated entry 0x{:x} changed", after.hash);
+            }
+        }
+        assert_eq!(r.name_entries, before.name_entries, "name table untouched");
+
+        // A set targeting a missing hash mutates nothing at all.
+        let snapshot = r.clone();
+        assert!(!r.set_by_hash(0x9999, 1));
+        assert_eq!(r, snapshot, "a missed set must be a no-op");
+    }
 }

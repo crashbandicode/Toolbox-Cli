@@ -354,3 +354,25 @@ pub fn decode_pai1(payload: &[u8]) -> Option<Pai1Info> {
         entries,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Malformed input must fail loudly (no panic, no silent acceptance).
+    /// BFLAN currently surfaces these via the crate-level `Error::Other`; a
+    /// dedicated typed `BflanError` is a documented hardening follow-up.
+    #[test]
+    fn read_bflan_rejects_garbage() {
+        assert!(read_bflan(&[]).is_err());
+        assert!(read_bflan(&[0u8; 8]).is_err());
+        // Header-sized buffer with the wrong magic.
+        let mut bad = vec![0u8; HEADER_FIXED];
+        bad[0..4].copy_from_slice(b"NOPE");
+        let msg = read_bflan(&bad).unwrap_err().to_string();
+        assert!(
+            msg.contains("BFLAN") || msg.to_lowercase().contains("magic"),
+            "unexpected error message: {msg}"
+        );
+    }
+}
