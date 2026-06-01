@@ -648,6 +648,32 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-01 — MeshCodec INDEX transport framing VALIDATED (prototype) + vertex coder ground truth
+Continued the Stage-1b port. Built a Python framing prototype (gitignored,
+`local-assets/re/decode_proto.py`) and **validated the entire index transport
+framing byte-exact vs the emulator/oracle**: super-block trailer, `w27`, the
+sub-block header, the **custom-Huffman table builder `0x10f8d20` + reverse-A
+`clz` bit reader** (the hard piece — cursor transition `fwd P+3→P+15`,
+`revA P+32825→P+32807`, `bitpos 0→50` all exact), window location via the
+forward srcsize var-ints, and the multi-sub-mesh index decode (count#1=DESC.f,
+count#2+=the transform-loop var-int `v28`). Result: Bear's **`bufA[0:16540]`
+(99.3%) reproduced exactly** via clean-room framing feeding
+`decode_index_buffer_split`. The exact reverse-reader + table-builder algorithm
+is documented in `FINDINGS.md` (UPDATE #7).
+
+Then **mapped + captured ground truth for the remaining piece, the custom vertex
+byte-group coder** (`0x110d7f0` 4-mode symbol reader + `0x10fb2e0` block decoder
++ `0x10fafe0` setup + the `0x10f8d20` table values + states 4/5/2). It's the
+meshopt vertex transform with a canonical-Huffman entropy backend — ~10
+interlocking functions, comparable to/larger than the index side. `vtx_probe.py`
+dumped the table (count=8, the arrays), the 8 `0x10fb2e0` block-decoder calls,
+the 4 width sub-decoders (streams 1267/3583/3583/1285), and saved the staging
+window binaries + oracle `bufB` to `local-assets/re/vtxgt/` (bufB=93600 = 93160
+byte-group-decoded + 440 direct-window tail). This is the concrete spec to port
+`0x10fb2e0` next. No shippable code this session (RE/prototype/docs only; the
+committed `decode_index_buffer_split` from `8daf7b8` remains the artifact);
+`cargo test`/clippy unchanged + green.
+
 ### 2026-06-01 — MeshCodec transport fully mapped; INDEX geometry ported (split streams, **meshopt v0**)
 Drove the emulator (`local-assets/re/emu.py`, gitignored) ground truth into a
 clean-room Rust building block + a precise, validated map of the remaining work.
