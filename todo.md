@@ -183,17 +183,22 @@ session immediately after this file was written.
   end for models — that disassembly is the secondary FMSH path). `src/mc/`
   (`mod`/`read`/`write`/`codec`/`error`) uses the `zstd` dep's `experimental`
   feature for `FrameFormat::Magicless`; decode via the **streaming** API (the
-  frames carry an advisory dict-id the one-shot path rejects). `mc-extract` is
-  byte-identical to the decompressed-`.bfres` oracle (496 Python + 104 Rust);
-  `mc-repack` self-verifies `extract(repack(x))==x` (104/104). Verbs
-  `mc-inspect`/`mc-roundtrip-test`/`mc-extract`/`mc-repack`/`restbl-update-dir`.
-  Workflow: `mc-extract` → edit BFRES → `mc-repack` → `restbl-update-dir`.
-  *Untestable here:* in-game acceptance of repacked `.mc` (no hardware). NSO0+LZ4
-  (`src/nso.rs`) + the RE notes in `local-assets/re/FINDINGS.md` remain for the
-  FMSH/`.txtg` secondary path if ever needed.
-  *Follow-ups:* wider-corpus `mc-extract`-vs-oracle sweep; per-format RESTBL
-  overhead formulas (`restbl-update-dir` over-allocates safely today); BFRES
-  could auto-detect `.mc` and extract inline.
+  frames carry an advisory dict-id the one-shot path rejects). **Scope:** a model
+  `.mc` = `[BFRES frame: magicless zstd] + [mesh buffers: a CUSTOM MeshCodec
+  encoding, NOT zstd]`. `mc-extract` decodes the first frame = the BFRES
+  **structure** (byte-identical to the reference decompressor's BFRES portion;
+  496 Python + 104 Rust) — geometry is in the undecoded tail. `mc-repack`
+  re-encodes the BFRES and **preserves the original mesh tail verbatim** (edited
+  structure + original geometry; same-size edits only, `--allow-resize` to force).
+  Verbs `mc-inspect`/`mc-roundtrip-test`/`mc-extract`/`mc-repack`/
+  `restbl-update-dir`. Workflow: `mc-extract` → edit BFRES *structure* →
+  `mc-repack` → `restbl-update-dir`.
+  *Untestable here:* in-game acceptance of repacked `.mc` (no hardware).
+  *Remaining (hard):* the **custom mesh codec** (decode + encode the vertex/index
+  buffers) — the state machine at `main` `0x6c6da0`/`0x5ffb90` (not zstd);
+  community decodes it only via the game's own code. Needed for geometry editing.
+  *Smaller follow-ups:* wider `mc-extract`-vs-oracle sweep; per-format RESTBL
+  overhead formulas; BFRES auto-detect `.mc`.
 
 ## Reliability hardening (trust matrix) — DONE this pass
 
