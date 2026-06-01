@@ -89,6 +89,12 @@ src/
 │   └── error.rs        BfresError (offset / magic / BOM context)
 ├── nso.rs              NSO (Switch exefs/main) read + LZ4 segment inflate (read_nso, NsoError)
 │                       — for inspecting executable contents (e.g. the MeshCodec dict)
+├── mc/                 MC/MCPK (TotK MeshCodec) container: inspect + verbatim round-trip + extract/repack
+│   ├── mod.rs          McpkHeader, McFile, header/size-descriptor decode
+│   ├── read.rs         MCPK header parser (magic/flags/reserved/size descriptor)
+│   ├── write.rs        Verbatim writer (byte-identical no-op round-trip)
+│   ├── codec.rs        Magicless-zstd extract + repack (streaming decode; no dict)
+│   └── error.rs        McError (magic/flags/reserved/size/zstd context)
 ├── sarc/               Native SARC read+write (no `sarc` crate); crate-extractable
 │   ├── mod.rs          Public API, ArcFile/ArcEntry/UnpackedFile, format constants
 │   ├── read.rs         Reader (header/SFAT/SFNT, bounds-checked) — pure std
@@ -229,7 +235,7 @@ src/
 
 ## Tests
 
-- **Library unit tests** (`cargo test --lib`, 125): the `verbs`
+- **Library unit tests** (`cargo test --lib`, 132): the `verbs`
   `--texture-format` alias/`--srgb` resolver, plus `compression::yaz0`
   (encode→decode lossless on empty/short/RLE/pseudo-random/text + Yaz1
   magic + truncation rejection), `compression::zstd` (plain + raw-dict
@@ -501,7 +507,7 @@ src/
 | BYML canonical (from-scratch) writer | Resolved | `write_byml_canonical` emits sorted/deduped string tables + BFS node layout with back-patched offsets; **semantically lossless** on the real corpus (both endians, ≤12.7 MB). Not byte-identical to Nintendo by contract (writer-specific layout), though it matches several files' exact size. `byml-diff` + `byml-set` (scalar mutation-by-path → canonical write) added. Add/remove-by-path remains a follow-up. |
 | BOTW `RSTB` (older magic) | Not implemented | Only TotK `RESTBL` v1 is implemented (read/write/update byte-identical, real fixtures). BOTW's `RSTB` header differs (no version / `string_block_size`; 128-byte names) — a follow-up when BOTW fixtures are available. |
 | BFRES model/animation sub-resources | Inspect-only | `read_bfres` decodes the header + scans sub-block magics; FMDL/FSKA/vertex/material payloads aren't decoded. Verbatim round-trip is byte-identical; full decode is a follow-up. |
-| TotK MeshCodec `.mc` (`MCPK`) decompression | Not implemented (deep RE) | TotK models ship as `.bfres.mc` = MeshCodec: magicless zstd needing a **raw-content dictionary embedded in the game executable** (`exefs/main` NSO, not RomFS — confirmed: no dict magic/symbol/string blob; dictless decode fails). Custom out-of-band framing; the `FMSH` sub-section is community-unsolved (even reference tools produce **partial, non-editable** BFRES). The only complete reference is GPL (Switch-Toolbox). BFRES support covers `.sbfres`/`.bfres.zs` + already-decompressed `.mc` output; in-tool `.mc` decode is a user-approved future ARM64-RE effort (NSO0+LZ4 Rust port → locate dict/framing → validate vs the decompressed-output oracle). |
+| TotK MeshCodec `.mc` (`MCPK`) extract + repack | Resolved (models) | The MCPK inner stream is a **magicless zstd frame needing NO dictionary** for model `.bfres.mc` (the earlier "executable dictionary" lead was a dead end for models). `mc-extract` is **byte-identical to the decompressed-`.bfres` oracle** (496 files Python-cross-checked, 104 via the Rust exe); `mc-repack` produces a `.mc` that `extract(repack(x))==x` (not byte-identical to Nintendo's encoder, by contract). Needs the `zstd` `experimental` feature (magicless) + the *streaming* decode (the frames carry an advisory dict-id the one-shot path rejects). `src/mc/`. *Untestable here:* in-game acceptance of repacked `.mc` (no hardware). The `FMSH`/`.txtg` secondary path is unexplored (not needed for model BFRES). |
 | In-game runtime validation on Switch hardware | High value | Untestable without hardware. |
 | v9 BFLYT 60-byte material extension (flag bit 19) | Low | Captured verbatim; can't construct from scratch (unspec'd). User accepted this gap. |
 | `flags_untrusted` materials can't safely re-encode after sub-section count changes | Resolved in TODO #4 | `Material::assert_flags_trusted()` + `clear_untrusted_flag()` API; writer `debug_assert!` catches misuse via `original_section_size` snapshot. |
@@ -624,6 +630,46 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-06-01 — TotK MeshCodec (`.mc`/MCPK) extract + repack pipeline (SOLVED for models)
+The user asked for a cautious, test-driven attempt at a trusted TotK model
+repack pipeline (`mc-extract` → edit → `mc-repack` → `restbl-update-dir`). Done,
+in the disciplined order, all green; the key technical question — *is `.mc`
+decompression doable?* — is **yes** for model `.bfres.mc`.
+
+**Phase A — MCPK container inspect + verbatim no-op round-trip (`db746df`).**
+`src/mc/` (`mod`/`read`/`write`/`error`). Header verified vs the oracle on 310
+files: magic `MCPK`; `+5` flags ≤1; `+6` reserved 0; `+8` size descriptor →
+`(d>>5)<<(d&0xf)` = the alignment-padded decompressed size. `write_mc` verbatim.
+Verbs `mc-inspect` + `mc-roundtrip-test` (`--dir`). **All 12,395 TotK `.mc` parse
++ round-trip byte-identically.**
+
+**Phases B+C — extract + repack (`e205718`).** *Breakthrough:* the MCPK inner
+stream is **plain magicless zstd needing NO dictionary** for model `.bfres.mc`
+(decompressing `mc[+0xC..]` with `ZSTD_f_zstd1_magicless` reproduces the BFRES
+exactly). The executable-dictionary lead (a real streaming state machine at
+`main` `0x6c6da0`, custom block parse at `0x5ffb90`) is the *secondary* FMSH/
+external path, NOT the main model payload. Gotcha: the frames carry an advisory
+dict-id that libzstd's **one-shot** decode rejects ("Dictionary mismatch") but
+the **streaming** decode tolerates (use `ZSTD_decompressStream`). `src/mc/codec.rs`
+uses the existing `zstd` dep with the new `experimental` feature (for
+`FrameFormat::Magicless`) — no dictionary, no new deps. `mc-extract` is
+**byte-identical to the decompressed-`.bfres` oracle** (496 Python-cross-checked,
+104 via the Rust exe); `mc-repack` self-verifies `extract(repack(x))==x` (104/104),
+preserving the original's version/flags + allocation size when the edit fits.
+
+**Phase E — `restbl-update-dir` (`d08d456`).** Scans a mod folder, computes each
+resource's decompressed size, bumps the RESTBL **growing-only** (under-allocation
+crashes). RESTBL key = path with the compression ext stripped (`X.bfres.mc` →
+`X.bfres`, verified); sizes carry ~1.9x BFRES overhead, so with `--romfs-base`
+it scales the original entry proportionally (accurate; unchanged files keep
+their size), else over-estimates conservatively. Verified on the real
+379,715-entry table.
+
+`cargo test` = **132 lib unit + 223 total across all binaries, 0 failures**;
+`clippy --all-targets` clean; `--no-default-features` builds. **Untestable here:**
+in-game acceptance of repacked `.mc` (no hardware). RE notes in
+`local-assets/re/FINDINGS.md`.
 
 ### 2026-05-31 — Reliability hardening pass (trust matrix + invariants + negatives + corpus-audit)
 A quality/reliability pass (no new format features) to make each CLI verb earn
