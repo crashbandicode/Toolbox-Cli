@@ -107,9 +107,9 @@ src/
 │   ├── mesh.rs         FMSH mesh-section framing parser (has-mesh flag, header, chunk, sizes); geometry NOT decoded
 │   └── error.rs        McError (magic/flags/reserved/size/zstd/mesh-framing context)
 ├── meshopt/            Pure-Rust meshoptimizer 0.15 codec (reference + encoder; MeshCodec uses a custom entropy backend)
-│   ├── mod.rs          Public encode/decode_{vertex_buffer,index_buffer,index_sequence} + read_indices
+│   ├── mod.rs          Public encode/decode_{vertex_buffer,index_buffer,index_sequence} + decode_index_buffer_split + read_indices
 │   ├── vertex.rs       Vertex codec (0xa0): byte-group planes, zigzag deltas, tail
-│   ├── index.rs        Index buffer (0xe0 v0/v1, vertex/edge FIFOs) + index sequence (0xd0)
+│   ├── index.rs        Index buffer (0xe0 v0/v1, vertex/edge FIFOs) + index sequence (0xd0) + split-(code,data)-stream decode (the MeshCodec form)
 │   └── error.rs        MeshoptError (std + thiserror only)
 ├── sarc/               Native SARC read+write (no `sarc` crate); crate-extractable
 │   ├── mod.rs          Public API, ArcFile/ArcEntry/UnpackedFile, format constants
@@ -647,6 +647,43 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-06-01 — MeshCodec transport fully mapped; INDEX geometry ported (split streams, **meshopt v0**)
+Drove the emulator (`local-assets/re/emu.py`, gitignored) ground truth into a
+clean-room Rust building block + a precise, validated map of the remaining work.
+Built comprehensive **emulator tracers** (`trace.py`/`idx_check.py`/
+`dump_vtxwin.py`, gitignored) that dump the COMPLETE primitive-op sequence the
+real decoder runs: every Huff0/raw **window** (src, srcsize, regen, dst, caller),
+every meshopt call (code/data/out), the state-machine entry/state, and each
+sub-block descriptor.
+
+**Committed increment — `meshopt::decode_index_buffer_split`.** The MeshCodec
+index decoder `0x110c280` is `meshopt_decodeIndexBuffer` fed **split** code/data
+streams (not one contiguous buffer) with the standard codeaux table. Refactored
+`src/meshopt/index.rs` to share a `decode_index_core`, adding the split-stream
+entry. **Correction (was wrong in prior notes):** these streams decode as meshopt
+**version 0** (`fecmax=15`), NOT v1 — proved by a `0x0d`/`fec=13` code being a
+FIFO read, not the v1 `last−1` code. Validated **byte-exact vs the oracle** on
+every index sub-mesh of Bear (6606/1662/60) and Bass (1230/315/48/3) via the
+emulator-dumped real streams; committed fixture-free tests cross-check it against
+`decode_index_buffer`. Per-sub-mesh `count = 3·v` (forward var-int).
+
+**Mapped the transport precisely** (FINDINGS UPDATE #7): the window primitive
+(reverse bit reader picks raw-memmove vs zstd-`0x5ffb30`=`zstd_pure::literals`;
+forward var-int = srcsize; regen ≤ 0x20000) with 3 call sites; the full Bear
+window table; the ctx/workspace layout (`ctx[0xf8]`=bufB base, `ctx[0x100]`=DCtx,
+desc@`ctx[0x1d0]`, state@`ctx[0x320]`, 6-state jump table `0x2cf6950`); the
+single-call state-machine loop (`w27` sub-blocks; header `0x10f9570`).
+
+**Confirmed the VERTEX path is CUSTOM** (answers the open question): no window
+starts with `0xa0`, and the decoder (`0x10fae60`/`0x10fafe0` + table builder
+`0x10f8d20` + symbol reader `0x110d7f0`) is a canonical-Huffman byte-group coder,
+NOT stock meshopt vertex. So `src/meshopt/vertex.rs` is a reference, not a
+drop-in; porting that custom entropy is the bulk of the remaining work. NEXT:
+port the framing loop to drive `decode_index_buffer_split` → reproduce **bufA**
+end-to-end first (fully understood), then the custom vertex coder → **bufB**.
+All green: **156 lib unit** (+2 split-stream) + all integration; clippy clean;
+`--no-default-features` builds.
 
 ### 2026-06-01 — MeshCodec mesh decode SOLVED via emulation (ground-truth oracle + confirmed architecture)
 Major RE milestone. Built a Unicorn ARM64 harness (`local-assets/re/emu.py`,

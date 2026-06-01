@@ -41,7 +41,8 @@ mod vertex;
 
 pub use error::{MeshoptError, Result};
 pub use index::{
-    decode_index_buffer, decode_index_sequence, encode_index_buffer, encode_index_sequence,
+    decode_index_buffer, decode_index_buffer_split, decode_index_sequence, encode_index_buffer,
+    encode_index_sequence,
 };
 pub use vertex::{decode_vertex_buffer, encode_vertex_buffer};
 

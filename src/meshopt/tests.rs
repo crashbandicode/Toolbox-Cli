@@ -115,6 +115,47 @@ fn index_roundtrip_grid_and_random_both_versions() {
 }
 
 #[test]
+fn index_split_stream_matches_buffer_decode() {
+    // The split-(code,data)-stream decoder (the form TotK's MeshCodec hands to
+    // its index decoder) must reproduce the same indices as the contiguous
+    // buffer decoder. We encode version 0 (the MeshCodec streams use fecmax=15),
+    // carve out the code/data sub-slices, and decode them split.
+    let meshes = [grid_indices(18), {
+        let mut seed = 0x0000_BEE5u32;
+        (0..3 * 333).map(|_| lcg(&mut seed) % 4000).collect::<Vec<_>>()
+    }];
+    for indices in &meshes {
+        let n = indices.len();
+        let enc = encode_index_buffer(indices, n, 0).unwrap();
+        // Stock layout: [header][code: n/3][data ..][codeaux: 16].
+        let code = &enc[1..1 + n / 3];
+        let data = &enc[1 + n / 3..enc.len() - 16];
+        for &isz in &[2usize, 4] {
+            let dec = decode_index_buffer_split(n, isz, code, data, 0).unwrap();
+            let want = decode_index_buffer(n, isz, &enc).unwrap();
+            assert_eq!(dec, want, "split vs buffer decode (isz={isz}, n={n})");
+            // For isz=4 also compare the integer indices directly.
+            if isz == 4 {
+                assert_eq!(read_indices(&dec, n, 4).unwrap(), *indices);
+            }
+        }
+    }
+}
+
+#[test]
+fn index_split_stream_single_triangle_vector() {
+    // One fresh triangle {0,1,2}: code byte 0xf0 (codeaux[0]=0 -> b=c=fresh),
+    // empty data stream, standard table. Mirrors the MeshCodec all-0xf0 prefix.
+    let dec = decode_index_buffer_split(3, 4, &[0xf0], &[], 0).unwrap();
+    assert_eq!(read_indices(&dec, 3, 4).unwrap(), vec![0, 1, 2]);
+    // Truncated streams are rejected, not panics.
+    assert!(matches!(
+        decode_index_buffer_split(3, 4, &[], &[], 0),
+        Err(MeshoptError::Truncated { .. })
+    ));
+}
+
+#[test]
 fn sequence_roundtrip_random_both_versions() {
     for version in 0u8..=1 {
         let mut seed = 0x0000_0055u32 ^ version as u32;
