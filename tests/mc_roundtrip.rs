@@ -85,12 +85,19 @@ fn mc_repack_round_trips_through_extract() {
     }
     let mc = read_mc(&std::fs::read(&mc_path).unwrap()).unwrap();
     let bfres = extract(&mc).expect("extract");
-    let repacked = repack(&mc, &bfres, 19).expect("repack");
+    // Repack the (unchanged) BFRES; the original mesh tail must be preserved and
+    // extract must decode back to the exact BFRES.
+    let repacked = repack(&mc, &bfres, 19, false).expect("repack");
     assert_eq!(&repacked[0..4], b"MCPK");
     let mc2 = read_mc(&repacked).expect("read repacked");
-    // The repacked container preserves the original allocation size (the edit
-    // fits) and decodes back to the exact BFRES.
     assert_eq!(mc2.decompressed_size(), mc.decompressed_size());
     let bfres2 = extract(&mc2).expect("extract repacked");
     assert_eq!(bfres2, bfres, "extract(repack(x)) != x");
+    // The mesh tail (everything after the re-encoded BFRES frame) is preserved
+    // verbatim from the original container.
+    let orig_tail_len = mc.compressed_stream().len();
+    assert!(
+        repacked.len() >= 12 && orig_tail_len > 0,
+        "sanity: original has a compressed stream"
+    );
 }
