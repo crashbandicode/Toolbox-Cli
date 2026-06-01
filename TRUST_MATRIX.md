@@ -170,6 +170,7 @@ BFRES portion); it does **not** decode the geometry (custom mesh codec, unsolved
 | Verb | Kind | Contract | corpus / unit / neg / mut-diff | Tier | → Trusted |
 |---|---|---|---|---|---|
 | `mc-inspect` | R | inspect | ✓(12,395) / ✓ / ✓ / n/a | Inspect-only | (header decode corpus-trusted; read-only) |
+| `mc-inspect --mesh` | R | inspect (FMSH framing) | ✓(3) / ✓ / ✓ / n/a | Inspect-only | FMSH header/chunk/sizes parsed + verified vs oracle on 3 fixtures; geometry NOT decoded (custom entropy codec) |
 | `mc-roundtrip-test` | R | byte-identical (verbatim) | ✓(12,395) / ✓ / ✓ / n/a | **Trusted** | — (all 12,395 `.mc` parse + verbatim round-trip) |
 | `mc-extract` | R | inspect (decompress BFRES structure) | ✓(496+104 vs BFRES oracle) / ✓ / ✓ / n/a | Validated | mesh-geometry decode (custom codec); then full-model Trusted |
 | `mc-repack` | W | mutate (BFRES re-encode + mesh tail preserved; NOT byte-identical) | ✓(self-RT + tail-preserve) / ✓ / ✓(resize-guard) / ✓(extract∘repack=id) | Experimental | in-game acceptance (no hardware) + geometry-edit support |
@@ -177,10 +178,12 @@ BFRES portion); it does **not** decode the geometry (custom mesh codec, unsolved
 ## meshopt (meshoptimizer 0.15 codec) — `src/meshopt`
 
 Clean-room (MIT) port of the stock meshoptimizer 0.15 vertex (`0xa0`) /
-index-buffer (`0xe0` v0/v1) / index-sequence (`0xd0`) codecs — the inner
-algorithm of the TotK MeshCodec mesh geometry (the exe links
-`NintendoWare_Meshoptimizer_For_MeshCodec-0_15_0`). Library only (no CLI verb
-yet). Encode + decode are mutual inverses; std + `thiserror` only.
+index-buffer (`0xe0` v0/v1) / index-sequence (`0xd0`) codecs. The exe links
+`NintendoWare_Meshoptimizer_For_MeshCodec-0_15_0`, but TotK's actual mesh decode
+uses a **custom entropy backend** (`clz`-based bitstream; see FINDINGS), so this
+module is a faithful **reference codec + encoder foundation**, not a drop-in
+decoder for the game's streams. Library only (no CLI verb yet). Encode + decode
+are mutual inverses; std + `thiserror` only.
 
 | API | Kind | Contract | corpus / unit / neg / mut-diff | Tier | → Trusted |
 |---|---|---|---|---|---|

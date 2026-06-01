@@ -33,6 +33,7 @@
 
 mod codec;
 mod error;
+pub mod mesh;
 mod read;
 mod write;
 
@@ -41,6 +42,7 @@ pub use codec::{
     size_descriptor,
 };
 pub use error::{McError, Result};
+pub use mesh::{has_mesh_flag, read_mesh_section, MeshChunk, MeshSection};
 pub use read::read_mc;
 pub use write::write_mc;
 
