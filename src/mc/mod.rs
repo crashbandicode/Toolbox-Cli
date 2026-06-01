@@ -36,7 +36,10 @@ mod error;
 mod read;
 mod write;
 
-pub use codec::{compress_stream, decompress_stream, extract, repack, repack_default, size_descriptor};
+pub use codec::{
+    compress_stream, decompress_first_frame, decompress_stream, extract, repack, repack_default,
+    size_descriptor,
+};
 pub use error::{McError, Result};
 pub use read::read_mc;
 pub use write::write_mc;

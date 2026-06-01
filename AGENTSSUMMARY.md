@@ -87,6 +87,16 @@ src/
 │   ├── read.rs         Header decode (magic/version/BOM/name/size/RLT) + sub-block magic scan
 │   ├── write.rs        Verbatim writer (byte-identical round-trip)
 │   └── error.rs        BfresError (offset / magic / BOM context)
+├── zstd_pure/          Pure-Rust Zstandard decoder (RFC 8478; crate-extractable, std+thiserror)
+│   ├── bits.rs         Reverse (BIT_DStream-faithful) + forward bit readers
+│   ├── xxhash.rs       XXH64 (content checksum)
+│   ├── fse.rs          FSE: read_ncount + build_dtable + 2-state decompress + FseDecoder
+│   ├── huff.rs         Huff0: weight decode (FSE/direct) + 1-/4-stream literal decode
+│   ├── literals.rs     Literals section (Raw/RLE/Compressed/Treeless, table cache)
+│   ├── sequences.rs    LL/OF/ML FSE sequences + repeat offsets + LZ execution
+│   ├── block.rs        Block decode (raw/RLE/compressed)
+│   ├── frame.rs        Frame header + block loop + skippable frames + checksum
+│   └── error.rs        ZstdError (std + thiserror only)
 ├── nso.rs              NSO (Switch exefs/main) read + LZ4 segment inflate (read_nso, NsoError)
 │                       — for inspecting executable contents (e.g. the MeshCodec dict)
 ├── mc/                 MC/MCPK (TotK MeshCodec) container: inspect + verbatim round-trip + extract/repack
@@ -631,6 +641,40 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-06-01 — Pure-Rust Zstandard decoder (`src/zstd_pure/`) — MeshCodec mesh-codec Stage 1a
+Start of the **MeshCodec mesh-geometry** codec (the big open item). RE of the
+TotK `main` decoder showed the mesh stream is **Nintendo's own reimplementation
+of Zstandard**: the state machine `0x6c6da0` ≈ `ZSTD_decompressStream` (states:
+0/1 frame header, 2 block header `last|type|size`, 3/4 block decode, 5-7
+finalize); `0x6c7330` checks the real zstd magic `0x28b52ffd`; `0x5ffb90` is the
+literals section (`type=b0&3`, `sizeFormat=(b0>>2)&3`) calling `0x3c880`
+(4-stream Huff0) / `0x3c6f0` (1-stream Huff0) with FSE-coded weights
+(`0x3be80`/`0x3f1f0`, tableLog≤6). So the **entropy layer is standard zstd
+Huff0/FSE** (implementable from the public **RFC 8478** — no GPL). A direct
+libzstd decode of the mesh stream fails (custom outer framing), so the codec
+must be ported; but the BFRES half of every `.mc` *is* standard magicless zstd,
+giving a free real-data validation corpus.
+
+**Built `src/zstd_pure/`** — a from-scratch, crate-extractable (std + `thiserror`
+only) pure-Rust **zstd decoder**, per the user's ask to fill ruzstd's gaps and
+be liftable into its own crate later: `bits` (libzstd-faithful reverse
+`BIT_DStream` + forward reader), `xxhash` (XXH64, content checksum), `fse`
+(`FSE_readNCount` + table build + 2-state `FSE_decompress`), `huff` (Huff0
+weight decode [FSE/direct] + 1-/4-stream), `literals` (Raw/RLE/Compressed/
+Treeless, table caching), `sequences` (LL/OF/ML predefined+RLE+FSE+Repeat modes,
+repeat-offset `ZSTD_updateRep`, LZ execution), `block` + `frame` (header, block
+loop, skippable frames, checksum). Public `decompress` / `decompress_capped` /
+`decompress_magicless`. **Validated:** matches libzstd byte-for-byte across 4
+input profiles × levels {1,3,9,19} + empty/tiny + a content-checksum frame (10
+lib unit tests); and `tests/zstd_pure_bfres.rs` decodes the **real** BFRES frame
+of every `tests/fixtures/mc/*.mc` identically to libzstd (bytes + consumed
+length). `cargo test` = **143 lib unit + all integration, 0 failures**; `clippy
+--all-targets` clean; `--no-default-features` builds. **Next (Stage 1b):** the
+custom MeshCodec outer framing (FMSH header + the block assembly that libzstd
+can't follow) driving these primitives → full mesh decode == the
+`mesh-codec-output` oracle. Then re-encode via RAW blocks. RE notes in
+`local-assets/re/FINDINGS.md`.
 
 ### 2026-06-01 — TotK MeshCodec (`.mc`/MCPK) extract + repack pipeline (SOLVED for models)
 The user asked for a cautious, test-driven attempt at a trusted TotK model

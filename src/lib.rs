@@ -101,6 +101,7 @@ pub mod nso;
 pub mod restbl;
 pub mod sarc;
 pub mod texpipe;
+pub mod zstd_pure;
 
 /// Commonly used imports. `use nx_layout_toolbox::prelude::*;` pulls in the
 /// format read/write entry points, the BNTX import/replace helpers, the
