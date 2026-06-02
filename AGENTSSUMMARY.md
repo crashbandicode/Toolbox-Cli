@@ -105,7 +105,7 @@ src/
 │   ├── write.rs        Verbatim writer (byte-identical no-op round-trip)
 │   ├── codec.rs        Magicless-zstd extract + repack (streaming decode; no dict)
 │   ├── mesh.rs         FMSH mesh-section framing parser (has-mesh flag, header, chunk, sizes)
-│   ├── geometry.rs     FMSH geometry transport: fwd/reverse readers, super-block/sub-block header, state-0 canonical-Huffman table builder (full table, byte-exact), zstd-block + raw windows, first-sub-block index decode (bufA 99.3% from scratch); vertex symbol-reader/transform TODO
+│   ├── geometry.rs     FMSH geometry transport: fwd/reverse readers, super-block/sub-block header, state-0 canonical-Huffman table builder, zstd-block + raw windows, first-sub-block index decode (bufA 99.3%), vertex rANS decode loop + freq reader (`0x110e7b0`); table spread/state init + transform TODO
 │   └── error.rs        McError (magic/flags/reserved/size/zstd/mesh-framing context)
 ├── meshopt/            Pure-Rust meshoptimizer 0.15 codec (reference + encoder; MeshCodec uses a custom entropy backend)
 │   ├── mod.rs          Public encode/decode_{vertex_buffer,index_buffer,index_sequence} + decode_index_buffer_split + read_indices
@@ -648,6 +648,22 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-06-02 — MeshCodec vertex rANS frequency reader ported (`0x110e7b0`)
+**Committed:** `geometry::rans_read_freqs` + `RansFreqReader` / `RansFreqParams` /
+`RansFreqRead` — the adaptive `clz`-prefix frequency decoder that feeds each
+per-segment rANS table build (`0x110de80`). Three validated code paths mapped to
+disasm: slow adaptive loop (`0x110e7f8`), `clz`-coded run length (`0x110e890`/
+`0x110e8e8`), fixed-width run body (`0x110e900`). Subtlety: slow-site top-nbits
+uses `mvn w19,w3` **before** `add w3,#1`; run body uses `(acc>>1)>>~width`, not
+`acc>>(64-n)`; short run-length path (`0x110e8e8`) clears `w18` but must not zero
+`w1` (symbol count). Fixture-free goldens from `trace_freq_all.py` /
+`freq_golden.py`: Bear call #0 M=512 `[95,408,7,1]+rem=1`; Bear call #2 (all
+paths) `[9,496,3,2,1]`; Bass call #21 M=128 `[6,118,3]` — each checks freqs and
+the advanced `(ptr,acc,bitpos)` cursor. **Next:** rANS spread + 4-state init
+(`0x110dfa0`), segment loop, then width combiner + kernel transform.
+All green: **164 lib unit** (incl. `mc::geometry`) + all integration; clippy
+`--all-targets` clean; `--no-default-features` builds.
 
 ### 2026-06-01 — MeshCodec geometry transport ported to Rust (`src/mc/geometry.rs`); bufA 99.3% from scratch + vertex coder mapped
 Turned the validated Python index framing into a **committable clean-room Rust
