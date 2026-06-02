@@ -37,9 +37,9 @@
 //!
 //! ## What is NOT yet ported
 //!
-//! Threading the reverse-A reader through the per-window raw/zstd flag bits and
-//! the kernel (`0x10fa980`), and the custom **vertex** byte-group coder
-//! (`0x10fb2e0` + the transpose/delta transform). Tracked in
+//! Threading the reverse-A reader through the per-window raw/zstd flag bits,
+//! the rANS table build (`0x110de80` spread + state init), and the kernel
+//! (`0x10fa980`) + vertex byte-group transform (`0x10fb2e0`). Tracked in
 //! `local-assets/re/FINDINGS.md`.
 
 use crate::meshopt;
@@ -410,6 +410,235 @@ pub fn rans_decode(
     out
 }
 
+/// Reverse bit-reader state for the vertex frequency decoder (`0x110e7b0`).
+///
+/// `ptr` indexes the stream; `acc` holds the next bits (MSB = next to read);
+/// `bitpos` is how far into `u64_le(buf, ptr)` the window starts. After each
+/// symbol the reader steps `ptr -= (bitpos>>3)^7` and `bitpos = (bitpos|0x38)-nbits`,
+/// matching the game's `x2` struct at `[0]=ptr, [8]=acc, [0x10]=bitpos`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RansFreqReader {
+    pub ptr: usize,
+    pub acc: u64,
+    pub bitpos: u32,
+}
+
+/// Parameters for one `0x110e7b0` invocation (register args at entry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RansFreqParams {
+    /// Number of frequencies to write (`w1` at entry).
+    pub count: u32,
+    /// Initial adaptive-width state (`w3 << 10` at `0x110e7c4`).
+    pub w3_init: u32,
+    /// Width-update shift (`w4` at entry; `w10 = 16 - w4`).
+    pub w4: u32,
+    /// rANS normalization interval `M` (`x5 >> 32`).
+    pub m: u32,
+    /// First-symbol frequency prediction (`x5` low half, typically `M // (count+1)`).
+    pub initfreq: u32,
+}
+
+/// Result of [`rans_read_freqs`]: written frequencies plus the implicit tail symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RansFreqRead {
+    pub freqs: Vec<u16>,
+    /// Last written frequency (`w5` at `0x110e980`).
+    pub last_freq: u16,
+    /// Remaining probability mass -- the `(count+1)`-th symbol's frequency (`w9`).
+    pub rem: u32,
+    pub reader: RansFreqReader,
+}
+
+#[inline]
+fn clz64(x: u64) -> u32 {
+    if x == 0 {
+        64
+    } else {
+        x.leading_zeros()
+    }
+}
+
+#[inline]
+fn clz32(x: u32) -> u32 {
+    if x == 0 {
+        32
+    } else {
+        x.leading_zeros()
+    }
+}
+
+/// Zigzag decode for a 32-bit raw value (`0x110e848` / `0x110e8fc`).
+#[inline]
+fn unzigzag32(v: u32) -> u32 {
+    (v >> 1) ^ (0u32.wrapping_sub(v & 1))
+}
+
+/// Decode adaptive rANS symbol frequencies (`0x110e7b0`).
+///
+/// Three validated code paths (see `local-assets/re/_freqdis.txt`):
+/// * slow adaptive `clz` prefix (`0x110e7f8`),
+/// * `clz`-coded run length (`0x110e890` / `0x110e8e8`),
+/// * fixed-width run body (`0x110e900`; top bits via `(acc>>1)>>~width`).
+pub fn rans_read_freqs(buf: &[u8], reader: RansFreqReader, params: RansFreqParams) -> RansFreqRead {
+    const M32: u32 = 0xffff_ffff;
+    const MASK64: u64 = u64::MAX;
+
+    let mut bitpos = reader.bitpos & M32;
+    let width_mul = 16u32.wrapping_sub(params.w4);
+    let mut width_state = params.w3_init << 10;
+    let mut ptr = reader.ptr;
+    let mut acc = reader.acc & MASK64;
+    let cap_base = 0x8000u32;
+    let count_bitlen_base = 0x20u32;
+    let one = 1u32;
+
+    let mut rem = params.m & M32;
+    let mut freq = params.initfreq & M32;
+    let mut remaining = params.count & M32;
+    let mut prime = 0u32;
+    let mut remaining_after_run = 0u32;
+    let mut out = Vec::with_capacity(remaining as usize);
+    let mut site = FreqSite::SlowClz;
+
+    loop {
+        match site {
+            FreqSite::AfterRun => {
+                // 0x110e7e4 -- `w7 = 1<<width` primes the next slow-path symbol.
+                prime = one << ((width_state >> 10) & 31);
+                if remaining == 0 {
+                    site = FreqSite::Return;
+                } else {
+                    site = FreqSite::SlowClz;
+                }
+            }
+            FreqSite::SlowClz => {
+                // 0x110e7f8
+                let chunk = u64_le(buf, ptr);
+                remaining = remaining.wrapping_sub(1);
+                let at_end = remaining == 0;
+                acc = ((chunk >> (bitpos & 63)) | acc) & MASK64;
+
+                let width = width_state >> 10;
+                let clz = clz64(acc);
+                let mut nbits = width.wrapping_add(clz << 1);
+                let neg_nbits = !nbits; // before `nbits += 1` at 0x110e820
+                nbits = nbits.wrapping_add(1);
+                let val = (acc >> (neg_nbits & 63)) & MASK64;
+                let ptr_step = ((bitpos >> 3) ^ 7) & M32;
+                bitpos = (bitpos | 0x38).wrapping_sub(nbits);
+                acc = (acc << (nbits & 63)) & MASK64;
+                ptr = ptr.wrapping_sub(ptr_step as usize);
+                // `w18 = val - (1<<width) + prime` (`0x110e814`-`0x110e834`).
+                let raw = (val as u32)
+                    .wrapping_sub(one << (width & 31))
+                    .wrapping_add(prime);
+                prime = 0;
+                freq = freq.wrapping_add(unzigzag32(raw));
+                rem = rem.wrapping_sub(freq);
+                out.push(freq as u16);
+
+                if at_end {
+                    site = FreqSite::Return;
+                    continue;
+                }
+
+                width_state = width_state.wrapping_mul(width_mul);
+                let w17h = raw >> (width & 31);
+                width_state = width_state.wrapping_add(
+                    (cap_base.wrapping_sub(clz32(raw) << 10)).wrapping_mul(params.w4),
+                );
+                width_state >>= 4;
+                let cap = cap_base.wrapping_sub(clz32(rem) << 10);
+                if cap < width_state {
+                    width_state = cap;
+                }
+                site = if w17h != 0 {
+                    FreqSite::SlowClz
+                } else {
+                    FreqSite::RunLength
+                };
+            }
+            FreqSite::RunLength => {
+                // 0x110e890
+                let chunk = u64_le(buf, ptr);
+                ptr = ptr.wrapping_sub((((bitpos >> 3) ^ 7) & M32) as usize);
+                acc = ((chunk >> (bitpos & 63)) | acc) & MASK64;
+                let nbits_count = count_bitlen_base.wrapping_sub(clz32(remaining));
+                let clz = clz64(acc);
+                if nbits_count <= clz {
+                    // 0x110e8e8 -- `w18 = 0`; `w1` (remaining) is unchanged.
+                    bitpos = (bitpos | 0x38).wrapping_sub(nbits_count);
+                    acc = (acc << (nbits_count & 63)) & MASK64;
+                    site = FreqSite::RunBody;
+                } else {
+                    let run_nbits = one | (clz << 1);
+                    let top = (acc >> (run_nbits.wrapping_neg() & 63)) & MASK64;
+                    acc = (acc << (run_nbits & 63)) & MASK64;
+                    let run_len = (top as u32).wrapping_sub(1);
+                    bitpos = (bitpos | 0x38).wrapping_sub(run_nbits);
+                    remaining_after_run = remaining.wrapping_sub(run_len);
+                    remaining = run_len;
+                    site = if run_len != 0 {
+                        FreqSite::RunBody
+                    } else {
+                        remaining = remaining_after_run;
+                        FreqSite::AfterRun
+                    };
+                }
+            }
+            FreqSite::RunBody => {
+                // 0x110e900
+                let chunk = u64_le(buf, ptr);
+                remaining = remaining.wrapping_sub(1);
+                let at_end = remaining == 0;
+                ptr = ptr.wrapping_sub((((bitpos >> 3) ^ 7) & M32) as usize);
+                acc = ((chunk >> (bitpos & 63)) | acc) & MASK64;
+                bitpos = (bitpos | 0x38) & M32;
+                let width = width_state >> 10;
+                width_state = width_state.wrapping_mul(width_mul);
+                let top_half = (acc >> 1) & MASK64;
+                acc = (acc << (width & 63)) & MASK64;
+                bitpos = bitpos.wrapping_sub(width);
+                let val = (top_half >> ((!width) & 63)) & MASK64;
+                freq = freq.wrapping_add(unzigzag32(val as u32));
+                rem = rem.wrapping_sub(freq);
+                out.push(freq as u16);
+                width_state = width_state.wrapping_add(
+                    (cap_base.wrapping_sub(clz32(val as u32) << 10)).wrapping_mul(params.w4),
+                );
+                width_state >>= 4;
+                let cap = cap_base.wrapping_sub(clz32(rem) << 10);
+                if cap < width_state {
+                    width_state = cap;
+                }
+                if at_end {
+                    remaining = remaining_after_run;
+                    site = FreqSite::AfterRun;
+                } else {
+                    site = FreqSite::RunBody;
+                }
+            }
+            FreqSite::Return => break,
+        }
+    }
+
+    RansFreqRead {
+        freqs: out,
+        last_freq: freq as u16,
+        rem,
+        reader: RansFreqReader { ptr, acc, bitpos },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreqSite {
+    SlowClz,
+    RunLength,
+    RunBody,
+    AfterRun,
+    Return,
+}
+
 /// Decode a **raw window**: read the forward var-int `srcsize`, then copy
 /// `srcsize` literal bytes. Returns the bytes and the new forward position.
 pub fn decode_raw_window(payload: &[u8], fwd_pos: usize) -> (Vec<u8>, usize) {
@@ -639,6 +868,91 @@ mod tests {
         h.chunks(2)
             .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
             .collect()
+    }
+
+    /// Bear freq call #0 (`trace_freq_all.py` / `freq_golden.py` bear_call0): slow
+    /// path only, M=512 -> [95,408,7,1]+rem=1. Rules out `~nbits` after `nbits+=1`
+    /// and wrong ptr step without `^7`.
+    #[test]
+    fn rans_read_freqs_bear_call0() {
+        const WIN: [u8; 13] = [
+            0x88, 0xff, 0x4f, 0x53, 0x86, 0x0f, 0x38, 0x11, 0x17, 0xed, 0xa7, 0x42, 0x42,
+        ];
+        let r = rans_read_freqs(
+            &WIN,
+            RansFreqReader {
+                ptr: 5,
+                acc: 0x8d82720662f204b8,
+                bitpos: 62,
+            },
+            RansFreqParams {
+                count: 4,
+                w3_init: 7,
+                w4: 15,
+                m: 512,
+                initfreq: 102,
+            },
+        );
+        assert_eq!(r.freqs, [95, 408, 7, 1]);
+        assert_eq!(r.rem, 1);
+        assert_eq!(r.reader.ptr, 0);
+        assert_eq!(r.reader.acc, 0x204b9090a9fb45c0);
+        assert_eq!(r.reader.bitpos, 58);
+    }
+
+    /// Bear freq call #2 (`freq_golden.py` bear_call2_allpaths): exercises slow,
+    /// run-length (`0x110e890`/`0x110e8e8`), and run-body (`0x110e900`) paths.
+    #[test]
+    fn rans_read_freqs_bear_call2_allpaths() {
+        const WIN: [u8; 14] = [
+            0xd9, 0x5d, 0xec, 0x75, 0x69, 0x8b, 0x11, 0x68, 0x2b, 0x87, 0xcb, 0x8b, 0x88, 0xff,
+        ];
+        let r = rans_read_freqs(
+            &WIN,
+            RansFreqReader {
+                ptr: 6,
+                acc: 0x45c44e03e194d3f8,
+                bitpos: 58,
+            },
+            RansFreqParams {
+                count: 5,
+                w3_init: 7,
+                w4: 15,
+                m: 512,
+                initfreq: 85,
+            },
+        );
+        assert_eq!(r.freqs, [9, 496, 3, 2, 1]);
+        assert_eq!(r.rem, 1);
+        assert_eq!(r.reader.ptr, 0);
+        assert_eq!(r.reader.acc, 0x34fff888bcb872b6);
+        assert_eq!(r.reader.bitpos, 60);
+    }
+
+    /// Animal_Bass call #21 (`freq_golden.py` bass_call21): second model, M=128.
+    #[test]
+    fn rans_read_freqs_bass_call21() {
+        const WIN: [u8; 10] = [0xd2, 0xa7, 0x9c, 0x93, 0xcf, 0xb3, 0xe0, 0x9b, 0x61, 0x8b];
+        let r = rans_read_freqs(
+            &WIN,
+            RansFreqReader {
+                ptr: 2,
+                acc: 0x531000ed76178088,
+                bitpos: 60,
+            },
+            RansFreqParams {
+                count: 3,
+                w3_init: 5,
+                w4: 15,
+                m: 128,
+                initfreq: 32,
+            },
+        );
+        assert_eq!(r.freqs, [6, 118, 3]);
+        assert_eq!(r.rem, 1);
+        assert_eq!(r.reader.ptr, 0);
+        assert_eq!(r.reader.acc, 0x76178088b619b000);
+        assert_eq!(r.reader.bitpos, 44);
     }
 
     /// The raw window primitive copies exactly `srcsize` bytes after the var-int.

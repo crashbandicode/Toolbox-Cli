@@ -649,6 +649,27 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-02 — MeshCodec vertex rANS frequency reader ported (`0x110e7b0`)
+Ported `geometry::rans_read_freqs` in `src/mc/geometry.rs`: the adaptive
+`clz`-prefix frequency decoder that feeds each per-segment rANS table build
+(`0x110de80`). The reader preserves the decoder-threaded `(ptr, acc, bitpos)`
+reverse-A cursor and maps the three validated read sites: slow adaptive
+`clz` prefix (`0x110e7f8`), `clz`-coded run length (`0x110e890`/`0x110e8e8`),
+and fixed-width run body (`0x110e900`). Gotchas pinned in code/tests: the
+slow-site top-bit extract uses `~nbits` before `nbits += 1`; the run body uses
+`(acc>>1)>>~width` so width-zero symbols decode as zero; the short run-length
+path keeps the remaining-symbol counter.
+
+Added three fixture-free golden tests with hardcoded minimal reverse-A byte
+windows from `trace_freq_all.py`/`freq_golden.py`: Bear call #0 reproduces
+`[95,408,7,1]+rem=1`; Bear call #2 exercises slow, run-length, rest-run, and
+run-body paths with `[9,496,3,2,1]+rem=1`; Animal_Bass call #21 validates a
+second model / different `M` with `[6,118,3]+rem=1`. Each test also checks the
+advanced `(ptr, acc, bitpos)` cursor byte-exact against the emulator.
+
+All green: **164 lib unit (incl. 8 mc::geometry) + all integration; clippy
+`--all-targets` clean; `--no-default-features` builds.**
+
 ### 2026-06-01 — MeshCodec geometry transport ported to Rust (`src/mc/geometry.rs`); bufA 99.3% from scratch + vertex coder mapped
 Turned the validated Python index framing into a **committable clean-room Rust
 module** and mapped the vertex coder concretely. Two outcomes:
