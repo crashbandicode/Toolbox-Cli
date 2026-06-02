@@ -352,6 +352,64 @@ pub fn decode_zstd_window(
     Ok((state.out, src_start + srcsize))
 }
 
+/// Decode `count` symbols with the vertex coder's **rANS** decoder (`0x110e270`).
+///
+/// The custom vertex byte-group entropy is a standard range-ANS coder: `M =
+/// 1 << log` states, a decode table of `step[idx] = (freq << 16) | (idx -
+/// cumfreq)` and a spread map `sym[idx]` (both length `M`, built by `0x110de80`),
+/// the step `state = (state >> log) * freq + low`, and a 32-bit forward renorm
+/// whenever `state < 2^31`. Four states are interleaved (decoding output
+/// positions `0, stride, 2*stride, 3*stride` per round, where `stride = w8`);
+/// any `count % 4` tail is decoded with state 0. `stream` is read forward as
+/// little-endian `u32`s for renormalization.
+///
+/// Validated byte-exact against the decoder's dumped I/O. The table build,
+/// 3-lane variant (`0x110ef70`), and RLE fill (`0x110f930`) remain.
+pub fn rans_decode(
+    count: usize,
+    log: u32,
+    stride: usize,
+    step: &[u32],
+    sym: &[u16],
+    init_states: [u64; 4],
+    stream: &[u8],
+) -> Vec<u16> {
+    let mask = (1u64 << log) - 1;
+    let mut states = init_states;
+    let mut spos = 0usize;
+    let mut out = vec![0u16; count];
+
+    let decode_lane = |st: u64, spos: &mut usize| -> (u16, u64) {
+        let idx = (st & mask) as usize;
+        let s = sym[idx];
+        let e = step[idx];
+        let mut ns = (st >> log) * (e >> 16) as u64 + (e & 0xffff) as u64;
+        if ns >> 31 == 0 {
+            if let Some(b) = stream.get(*spos..*spos + 4) {
+                ns = (ns << 32) | u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64;
+                *spos += 4;
+            }
+        }
+        (s, ns)
+    };
+
+    let iters = count / 4;
+    for it in 0..iters {
+        let base = it * 4 * stride;
+        for lane in 0..4 {
+            let (s, ns) = decode_lane(states[lane], &mut spos);
+            out[base + lane * stride] = s;
+            states[lane] = ns;
+        }
+    }
+    for k in 0..(count & 3) {
+        let (s, ns) = decode_lane(states[0], &mut spos);
+        out[iters * 4 * stride + k * stride] = s;
+        states[0] = ns;
+    }
+    out
+}
+
 /// Decode a **raw window**: read the forward var-int `srcsize`, then copy
 /// `srcsize` literal bytes. Returns the bytes and the new forward position.
 pub fn decode_raw_window(payload: &[u8], fwd_pos: usize) -> (Vec<u8>, usize) {
@@ -536,6 +594,51 @@ mod tests {
             &bufa[16528..16540],
             &[0x76, 0x04, 0x78, 0x04, 0x7a, 0x04, 0x76, 0x04, 0x7a, 0x04, 0x79, 0x04]
         );
+    }
+
+    /// The rANS decoder reproduces a real decoded symbol stream (the first
+    /// vertex-coder rANS call of Animal_Bear), validated against the emulator.
+    #[test]
+    fn rans_decode_matches_oracle() {
+        // Decode table (step[64] = (freq<<16)|low, sym[64] spread map), log2(M)=6.
+        const STEP: [u32; 64] = [
+            327680, 327681, 327682, 327683, 327684, 65536, 65536, 65536, 65536, 65536, 65536,
+            196608, 196609, 196610, 393216, 393217, 393218, 393219, 393220, 393221, 851968, 851969,
+            851970, 851971, 851972, 851973, 851974, 851975, 851976, 851977, 851978, 851979, 851980,
+            1507328, 1507329, 1507330, 1507331, 1507332, 1507333, 1507334, 1507335, 1507336, 1507337,
+            1507338, 1507339, 1507340, 1507341, 1507342, 1507343, 1507344, 1507345, 1507346, 1507347,
+            1507348, 1507349, 1507350, 524288, 524289, 524290, 524291, 524292, 524293, 524294, 524295,
+        ];
+        const SYM: [u16; 64] = [
+            0, 0, 0, 0, 0, 1, 2, 4, 6, 7, 9, 10, 10, 10, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12, 12,
+            12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13,
+            13, 13, 13, 13, 13, 13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14,
+        ];
+        let states = [
+            0x1670c7fb0e5cc107u64,
+            0x80581303,
+            0x0e1e9623a87cf343,
+            0x01321a08545304,
+        ];
+        let stream = hex_bytes(
+            "44d69beb2784028b6a39382a036f90a250ebc749203fa34e0d60353e5071548d51aa7a26\
+             943ad95a422eea145dab83d860ba542ed7bf85ec1c78e11fedddfb9ceaf8b9031988e12f",
+        );
+        let out = rans_decode(228, 6, 1, &STEP, &SYM, states, &stream);
+        assert_eq!(out.len(), 228);
+        assert_eq!(
+            &out[..24],
+            &[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 4, 2, 12, 13, 12, 10, 13, 10]
+        );
+        assert_eq!(&out[220..], &[14, 13, 13, 14, 14, 13, 14, 13]);
+        assert_eq!(out.iter().map(|&s| s as u32).sum::<u32>(), 2565);
+    }
+
+    fn hex_bytes(s: &str) -> Vec<u8> {
+        let h: Vec<u8> = s.bytes().filter(|b| b.is_ascii_hexdigit()).collect();
+        h.chunks(2)
+            .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
+            .collect()
     }
 
     /// The raw window primitive copies exactly `srcsize` bytes after the var-int.
