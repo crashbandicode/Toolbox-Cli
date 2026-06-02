@@ -2,9 +2,9 @@
 //!
 //! Two codecs cover the real game data:
 //! - **zstd** (with TotK dictionaries) — `.zs`, `.pack.zs`, `.blarc.zs`, …
-//!   Backed by the vendored libzstd (`zstd` crate; BSD-3, GPL-free) plus a
-//!   pure-Rust frame-header parser ([`zstd::frame_dictionary_id`]) so we can
-//!   pick the right dictionary without decompressing first.
+//!   Backed by the pure-Rust `zstd-pure` codec (MIT; no libzstd / C at runtime)
+//!   plus a frame-header parser ([`zstd::frame_dictionary_id`]) so we can pick
+//!   the right dictionary without decompressing first.
 //! - **Yaz0/Yaz1** (`.szs`) — implemented natively in [`yaz0`].
 //!
 //! [`detect`] sniffs the codec from the leading magic; [`decompress`]

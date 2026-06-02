@@ -51,14 +51,12 @@ tegra_swizzle = "0.4"
 # export path (deswizzle + decode every BC format the parser accepts).
 texture2ddecoder = "0.1"
 
-# Compression: zstd (with dictionary + frame APIs) for TotK/BOTW `.zs`
-# assets. The Rust wrapper is MIT; the vendored libzstd is available under
-# BSD-3-Clause (we do not take its optional GPLv2 grant), so this stays a
-# GPL-free dependency. Yaz0/Yaz1 (`.szs`) is implemented natively in
-# `compression::yaz0`. SARC read + write are native (see `sarc.rs`).
-# `experimental` exposes the magicless frame format + advanced params used by
-# the TotK MeshCodec (`MCPK`) codec in `src/mc/codec.rs`.
-zstd = { version = "0.13", features = ["experimental"] }
+# Compression: pure-Rust Zstandard (RFC 8878) — decode + encode of TotK/BOTW
+# `.zs` assets and the MeshCodec (`MCPK`) magicless BFRES frame, with no libzstd
+# (C) at runtime. MIT, `std`+`thiserror` only. Yaz0/Yaz1 (`.szs`) is implemented
+# natively in `compression::yaz0`; SARC read + write are native (see `sarc.rs`).
+# Pinned to a reviewed revision (no crates.io release yet).
+zstd-pure = { git = "https://github.com/crashbandicode/zstd-pure", rev = "fb3b07d883d4cf56ddb563f6d7fb7d564e7986fc" }
 
 # Walk directories for SARC packing
 walkdir = "2.5"
@@ -72,6 +70,11 @@ lz4_flex = "0.13.1"
 [dev-dependencies]
 # Temp directories for layout-apply-arc / DDS round-trip integration tests.
 tempfile = "3"
+# libzstd (vendored C; BSD-3, GPL-free) is the **test oracle only** — never a
+# runtime dependency. Cross-checks the pure-Rust `zstd-pure` codec against
+# libzstd on real assets (the corpus round-trip + BFRES-frame tests).
+# `experimental` exposes the magicless frame format used by the MeshCodec path.
+zstd = { version = "0.13", features = ["experimental"] }
 # (test fixtures live in tests/fixtures/, gitignored)
 
 [profile.release]

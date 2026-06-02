@@ -139,7 +139,8 @@ session immediately after this file was written.
 - [x] **Compression module (zstd+dict, yaz0)** + recursive archive
   (`.blarc.zs`/`.pack.zs`/`.szs`) so TotK assets open in-tool. Done:
   native SARC reader (dropped the `sarc` crate, which pinned an ancient C
-  libzstd 1.4.4); `zstd 0.13` (vendored libzstd, BSD); `compression::{mod,
+  libzstd 1.4.4); `zstd-pure` (pure-Rust Zstandard, no libzstd at runtime;
+  libzstd kept only as a dev test oracle); `compression::{mod,
   zstd,yaz0,dict}` (pure-Rust Yaz0 + frame-header dict-id parser); verbs
   `decompress`/`compress`/`archive-extract`; compression-aware
   `layout-audit --dict/--romfs`. Decode is byte-identical to Python 3.14

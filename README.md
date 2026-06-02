@@ -223,7 +223,7 @@ src/
 │   └── fsutil.rs      Directory pack/unpack (walkdir/std::fs)
 ├── compression/       zstd (+ TotK dict) and Yaz0/Yaz1 codecs + detection
 │   ├── mod.rs         Codec detect + decompress / compress entry points
-│   ├── zstd.rs        libzstd wrapper + pure-Rust frame-header dict-id parser
+│   ├── zstd.rs        Pure-Rust zstd codec (zstd-pure) wrapper + frame-header dict-id parser
 │   ├── yaz0.rs        Pure-Rust Yaz0/Yaz1 decode + encode
 │   └── dict.rs        DictRegistry (ZsDic.pack loader, id-keyed)
 ├── manifest.rs        SGPO skin manifest schema (serde)
@@ -244,7 +244,7 @@ All MIT or MIT/Apache-2.0:
 - [`intel_tex_2`](https://crates.io/crates/intel_tex_2) — BCn encoder via Intel ISPC
 - [`texture2ddecoder`](https://crates.io/crates/texture2ddecoder) — BCn decoder (for PNG/DDS export)
 - [`tegra_swizzle`](https://crates.io/crates/tegra_swizzle) — Tegra X1 block-linear swizzle
-- [`zstd`](https://crates.io/crates/zstd) — zstd (de)compression via vendored libzstd (the Rust wrapper is MIT; libzstd is used under its BSD-3 license — its optional GPLv2 grant is **not** taken). SARC read **and** write are native (no third-party SARC crate); Yaz0/Yaz1 is implemented in `compression::yaz0`.
+- [`zstd-pure`](https://github.com/crashbandicode/zstd-pure) — pure-Rust Zstandard (RFC 8878) (de)compression for `.zs` assets and the MeshCodec magicless BFRES frame; **no libzstd / C at runtime** (MIT, `std`+`thiserror` only). libzstd (the `zstd` crate) is kept only as a **dev-only test oracle**. SARC read **and** write are native (no third-party SARC crate); Yaz0/Yaz1 is implemented in `compression::yaz0`.
 - [`anyhow`](https://crates.io/crates/anyhow), [`thiserror`](https://crates.io/crates/thiserror) — errors
 - [`walkdir`](https://crates.io/crates/walkdir) — directory traversal
 

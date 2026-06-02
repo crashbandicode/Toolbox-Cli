@@ -28,7 +28,7 @@ general-purpose Switch-modding toolkit (live roadmap in `todo.md`).
 ## Build & test
 
 ```bash
-cargo build           # dev (also compiles vendored libzstd via zstd-sys)
+cargo build           # dev (zstd is pure-Rust zstd-pure; libzstd/zstd-sys only builds for tests)
 cargo build --release # release (static-links Intel ISPC, ~3 min from clean)
 cargo test            # ~95 tests across 26 integration binaries + lib unit
                       # tests (compression + sarc) + 1 doctest
@@ -87,23 +87,17 @@ src/
 │   ├── read.rs         Header decode (magic/version/BOM/name/size/RLT) + sub-block magic scan
 │   ├── write.rs        Verbatim writer (byte-identical round-trip)
 │   └── error.rs        BfresError (offset / magic / BOM context)
-├── zstd_pure/          Pure-Rust Zstandard decoder (RFC 8478; crate-extractable, std+thiserror)
-│   ├── bits.rs         Reverse (BIT_DStream-faithful) + forward bit readers
-│   ├── xxhash.rs       XXH64 (content checksum)
-│   ├── fse.rs          FSE: read_ncount + build_dtable + 2-state decompress + FseDecoder
-│   ├── huff.rs         Huff0: weight decode (FSE/direct) + 1-/4-stream literal decode
-│   ├── literals.rs     Literals section (Raw/RLE/Compressed/Treeless, table cache)
-│   ├── sequences.rs    LL/OF/ML FSE sequences + repeat offsets + LZ execution
-│   ├── block.rs        Block decode (raw/RLE/compressed)
-│   ├── frame.rs        Frame header + block loop + skippable frames + checksum
-│   └── error.rs        ZstdError (std + thiserror only)
+├── (zstd_pure)         → external pure-Rust `zstd-pure` crate (RFC 8478 decode + encode,
+│                         dictionaries, magicless frames, block API). No libzstd at runtime;
+│                         re-exported as `nx_layout_toolbox::zstd_pure`. libzstd (`zstd`) is a
+│                         dev-only test oracle. (Was an in-tree decoder; lifted out + completed.)
 ├── nso.rs              NSO (Switch exefs/main) read + LZ4 segment inflate (read_nso, NsoError)
 │                       — for inspecting executable contents (e.g. the MeshCodec dict)
 ├── mc/                 MC/MCPK (TotK MeshCodec) container: inspect + verbatim round-trip + extract/repack
 │   ├── mod.rs          McpkHeader, McFile, header/size-descriptor decode
 │   ├── read.rs         MCPK header parser (magic/flags/reserved/size descriptor)
 │   ├── write.rs        Verbatim writer (byte-identical no-op round-trip)
-│   ├── codec.rs        Magicless-zstd extract + repack (streaming decode; no dict)
+│   ├── codec.rs        Magicless-zstd extract + repack (pure zstd-pure decode/encode; no dict)
 │   ├── mesh.rs         FMSH mesh-section framing parser (has-mesh flag, header, chunk, sizes)
 │   ├── geometry.rs     FMSH geometry transport: fwd/reverse readers, super-block/sub-block header, state-0 canonical-Huffman table builder, zstd-block + raw windows, first-sub-block index decode (bufA 99.3%), vertex rANS decode loop + freq reader (`0x110e7b0`) + contiguous spread (`0x110e6f8`); 4-state init + transform TODO
 │   └── error.rs        McError (magic/flags/reserved/size/zstd/mesh-framing context)
@@ -524,7 +518,7 @@ src/
 | BYML canonical (from-scratch) writer | Resolved | `write_byml_canonical` emits sorted/deduped string tables + BFS node layout with back-patched offsets; **semantically lossless** on the real corpus (both endians, ≤12.7 MB). Not byte-identical to Nintendo by contract (writer-specific layout), though it matches several files' exact size. `byml-diff` + `byml-set` (scalar mutation-by-path → canonical write) added. Add/remove-by-path remains a follow-up. |
 | BOTW `RSTB` (older magic) | Not implemented | Only TotK `RESTBL` v1 is implemented (read/write/update byte-identical, real fixtures). BOTW's `RSTB` header differs (no version / `string_block_size`; 128-byte names) — a follow-up when BOTW fixtures are available. |
 | BFRES model/animation sub-resources | Inspect-only | `read_bfres` decodes the header + scans sub-block magics; FMDL/FSKA/vertex/material payloads aren't decoded. Verbatim round-trip is byte-identical; full decode is a follow-up. |
-| TotK MeshCodec `.mc` (`MCPK`) — BFRES structure | Resolved | A model `.mc` = `[BFRES frame: magicless zstd, NO dict] + [mesh vertex/index buffers: a CUSTOM MeshCodec encoding, NOT zstd]`. `mc-extract` decodes the first frame = the BFRES **structure** (FMDL/FSKL/FVTX-defs/FSHP/FMAT/_STR/_RLT; complete + valid BFRES, ~17 KB for Bear), **byte-identical to the reference decompressor's BFRES portion** (496 Python + 104 Rust). Needs the `zstd` `experimental` feature (magicless) + *streaming* decode (frames carry an advisory dict-id the one-shot path rejects). `src/mc/`. |
+| TotK MeshCodec `.mc` (`MCPK`) — BFRES structure | Resolved | A model `.mc` = `[BFRES frame: magicless zstd, NO dict] + [mesh vertex/index buffers: a CUSTOM MeshCodec encoding, NOT zstd]`. `mc-extract` decodes the first frame = the BFRES **structure** (FMDL/FSKL/FVTX-defs/FSHP/FMAT/_STR/_RLT; complete + valid BFRES, ~17 KB for Bear), **byte-identical to the reference decompressor's BFRES portion** (3 real `.mc` fixtures vs oracle + 12,395-payload round-trip cross-checked against libzstd). Decoded with the pure-Rust `zstd-pure` codec (**no libzstd at runtime**); the decoder ignores the frames' advisory dict-id when no dictionary is supplied. `src/mc/`. |
 | TotK MeshCodec `.mc` — mesh geometry decode/encode | Not implemented | The trailing vertex/index buffers use a **custom MeshCodec codec** (the state machine at `main` `0x6c6da0`/`0x5ffb90`; not zstd) — the genuinely hard, community-decodes-only-via-game-code part. `mc-extract` does NOT decode it (so the extracted BFRES has structure, not geometry). `mc-repack` **preserves the original mesh tail verbatim** → edited structure + original geometry; same-BFRES-size edits only (`--allow-resize` to force); geometry editing unsupported. *Untestable here:* in-game acceptance (no hardware). |
 | In-game runtime validation on Switch hardware | High value | Untestable without hardware. |
 | v9 BFLYT 60-byte material extension (flag bit 19) | Low | Captured verbatim; can't construct from scratch (unspec'd). User accepted this gap. |
@@ -648,6 +642,31 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-06-02 — Pure-Rust zstd: lifted `src/zstd_pure/` out to the external `zstd-pure` crate
+Replaced the in-tree, decoder-only `src/zstd_pure/` with the now-completed
+external **`zstd-pure`** crate (git, pinned `fb3b07d`: decode + encode,
+dictionaries, magicless frames, block API; MIT, `std`+`thiserror`). **No
+libzstd / C at runtime** — `zstd` (libzstd) is demoted to a **dev-only test
+oracle**. Rewired `mc::codec` (magicless BFRES extract/repack via
+`decompress_magicless` / `compress(.., expect_magic=false)`), `compression::zstd`
+(`.zs` + dict via `Dictionary::parse` / `decompress_with_dict` /
+`compress_with_dict`; kept the hand-rolled `frame_dictionary_id`), and
+`lib.rs` (`pub mod zstd_pure` → `pub use ::zstd_pure`, so `crate::zstd_pure`
+paths in `mc::geometry` + tests are unchanged). The game frames' advisory
+dict-id is simply ignored when no dictionary is supplied (the libzstd
+streaming-decode workaround is gone). **Validation (byte-exact):** the 3 real
+`.mc` fixtures decode identically with the pure path, libzstd, AND the
+reference-decompressor oracle (`tests/zstd_pure_bfres.rs`); new
+`tests/zstd_pure_corpus.rs` round-trips the pure codec and cross-checks libzstd
+**both directions** over the full **12,395-file / 2.9 GiB** oracle corpus — all
+byte-identical (heavy → `#[ignore]`d; run `--release --ignored`). Stale
+libzstd / "executable dictionary" docs swept (mc/mod, compression/mod, README,
+todo, TRUST_MATRIX, this file).
+All green: **157 lib unit** (incl. 11 `mc::geometry`; was 167 — the ~10 in-tree
+`zstd_pure` unit tests left with the deleted module, now covered by the external
+crate + the corpus/BFRES integration tests) + all integration; clippy
+`--all-targets` clean; `--no-default-features` builds.
 
 ### 2026-06-02 — MeshCodec vertex rANS contiguous spread ported (`0x110e6f8..0x110e7a4`)
 **Committed:** `geometry::rans_spread` + `RansDecodeTable` — fills `step[M]` and

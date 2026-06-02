@@ -1,20 +1,22 @@
-//! MC / MCPK (TotK **MeshCodec**) container read + verbatim round-trip.
+//! MC / MCPK (TotK **MeshCodec**) container: inspect, verbatim round-trip,
+//! extract, and repack.
 //!
 //! TotK ships model BFRES as `Model/*.bfres.mc` — a MeshCodec (`MCPK`)
-//! container wrapping a **magicless zstd** stream that uses a *raw-content
-//! dictionary embedded in the game executable* (`exefs/main`, not RomFS). This
-//! module is being built in the cautious, test-driven order the project
-//! requires:
+//! container wrapping a **magicless zstd** stream. The leading frame is the
+//! BFRES *structure* and needs **no dictionary** (the community's "executable
+//! dictionary" lead was a dead end for model `.bfres.mc`; see `codec`). The
+//! geometry buffers in the trailing mesh section use a custom MeshCodec
+//! encoding (not zstd), decoded in [`geometry`] (still in progress).
 //!
-//! 1. **Inspect + verbatim byte-identical round-trip** (this module today):
-//!    parse the MCPK header and re-emit the captured bytes unchanged. Safe and
-//!    proven across the real corpus — it never decompresses or mutates.
-//! 2. **Extract** (`mc-extract`): decompress the inner stream to BFRES — needs
-//!    the executable dictionary + the exact framing (a focused RE effort, see
-//!    `local-assets/re/FINDINGS.md`); validated byte-exact against the
-//!    decompressed-`.bfres` oracle.
-//! 3. **Repack** (`mc-repack`): re-compress an edited BFRES into a `.mc` the
-//!    game accepts (byte-identity to Nintendo's encoder is *not* the contract).
+//! 1. **Inspect + verbatim byte-identical round-trip** ([`read_mc`] /
+//!    [`write_mc`]): parse the MCPK header and re-emit the captured bytes
+//!    unchanged — proven across the real corpus (all 12,395 `.mc`).
+//! 2. **Extract** ([`extract`]): decode the inner magicless zstd frame to the
+//!    BFRES structure with the pure-Rust [`zstd_pure`] codec; validated
+//!    byte-exact against the decompressed-`.bfres` oracle.
+//! 3. **Repack** ([`repack`]): re-compress an edited BFRES into a `.mc` the
+//!    game accepts (byte-identity to Nintendo's encoder is *not* the contract;
+//!    the mesh tail is preserved verbatim).
 //!
 //! ## Header (`MCPK`, little-endian)
 //!

@@ -172,7 +172,7 @@ BFRES portion); it does **not** decode the geometry (custom mesh codec, unsolved
 | `mc-inspect` | R | inspect | ✓(12,395) / ✓ / ✓ / n/a | Inspect-only | (header decode corpus-trusted; read-only) |
 | `mc-inspect --mesh` | R | inspect (FMSH framing) | ✓(3) / ✓ / ✓ / n/a | Inspect-only | FMSH header/chunk/sizes parsed + verified vs oracle on 3 fixtures; geometry NOT decoded (custom entropy codec) |
 | `mc-roundtrip-test` | R | byte-identical (verbatim) | ✓(12,395) / ✓ / ✓ / n/a | **Trusted** | — (all 12,395 `.mc` parse + verbatim round-trip) |
-| `mc-extract` | R | inspect (decompress BFRES structure) | ✓(496+104 vs BFRES oracle) / ✓ / ✓ / n/a | Validated | mesh-geometry decode (custom codec); then full-model Trusted |
+| `mc-extract` | R | inspect (decompress BFRES structure) | ✓(3 `.mc` vs oracle + 12,395-payload round-trip vs libzstd, pure `zstd-pure`) / ✓ / ✓ / n/a | Validated | mesh-geometry decode (custom codec); then full-model Trusted |
 | `mc-repack` | W | mutate (BFRES re-encode + mesh tail preserved; NOT byte-identical) | ✓(self-RT + tail-preserve) / ✓ / ✓(resize-guard) / ✓(extract∘repack=id) | Experimental | in-game acceptance (no hardware) + geometry-edit support |
 
 ## meshopt (meshoptimizer 0.15 codec) — `src/meshopt`

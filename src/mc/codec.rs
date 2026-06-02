@@ -1,13 +1,17 @@
 //! MeshCodec (`MCPK`) decompress + repack.
 //!
 //! **Key finding (verified on the real corpus):** the MCPK inner stream is a
-//! *magicless* zstd frame that needs **no dictionary** — decompressing
-//! `mc[+0xC..]` with `ZSTD_f_zstd1_magicless` reproduces the model's BFRES
-//! exactly (validated byte-identical against 496+ decompressed-`.bfres` oracle
-//! files; the full corpus via `mc-extract --dir`). The frame self-describes its
-//! content size (the real BFRES length); the MCPK header's size descriptor is
-//! the alignment-padded allocation size. The community's "executable
-//! dictionary" is not required for these model `.bfres.mc`.
+//! *magicless* zstd frame that needs **no dictionary** — decoding `mc[+0xC..]`
+//! as `ZSTD_f_zstd1_magicless` reproduces the model's BFRES exactly (validated
+//! byte-identical against the decompressed-`.bfres` oracle). The frame
+//! self-describes its content size (the real BFRES length); the MCPK header's
+//! size descriptor is the alignment-padded allocation size. The community's
+//! "executable dictionary" is not required for these model `.bfres.mc`.
+//!
+//! Decode + encode go through the pure-Rust [`zstd_pure`] codec — **no libzstd
+//! (C) at runtime**. The game's frames carry an *advisory* dictionary id but
+//! reference no real dictionary; the pure decoder ignores it when no dictionary
+//! is supplied, matching the reference decompressor.
 //!
 //! Repack mirrors that: compress the (edited) BFRES as a magicless zstd frame
 //! with the content size pledged, then wrap it in an MCPK header (version/flags
@@ -15,18 +19,14 @@
 //! byte-identity with Nintendo's encoder — only a `.mc` that decodes back to the
 //! exact BFRES (`extract(repack(x)) == x`), which is what a mod pipeline needs.
 
-use zstd::zstd_safe::{self, CCtx, CParameter, DCtx, DParameter, FrameFormat, InBuffer, OutBuffer};
-
 use super::error::{McError, Result};
 use super::{McFile, MC_HEADER_LEN, MC_MAGIC};
 
-/// Window-log ceiling for decode (covers every model size in the corpus).
-const WINDOW_LOG_MAX: u32 = 27;
-
-fn zstd_err(stage: &'static str, code: usize) -> McError {
-    McError::Zstd {
+/// Map a [`zstd_pure::ZstdError`] into [`McError::Zstd`] tagged with the stage.
+fn zstd_err(stage: &'static str) -> impl Fn(zstd_pure::ZstdError) -> McError {
+    move |e| McError::Zstd {
         stage,
-        message: zstd_safe::get_error_name(code).to_string(),
+        message: e.to_string(),
     }
 }
 
@@ -36,44 +36,12 @@ fn zstd_err(stage: &'static str, code: usize) -> McError {
 /// A TotK model `.mc` stream is `[BFRES frame (magicless zstd)] [mesh buffers
 /// (custom MeshCodec encoding — NOT zstd)]`. This decodes only the first frame
 /// (the BFRES); the returned `consumed` marks where the untouched mesh tail
-/// begins.
-///
-/// Uses the **streaming** decode (`ZSTD_decompressStream`), not the one-shot
-/// path: the game's frames carry an advisory dictionary id that libzstd's
-/// one-shot decode rejects ("Dictionary mismatch") even though no dictionary is
-/// actually referenced; the streaming path tolerates it (matching the reference
-/// decompressor; verified byte-identical against the BFRES oracle).
+/// begins. `dest_capacity` (the MCPK declared allocation size) is the output
+/// ceiling.
 pub fn decompress_first_frame(stream: &[u8], dest_capacity: usize) -> Result<(Vec<u8>, usize)> {
-    let mut dctx = DCtx::create();
-    dctx.set_parameter(DParameter::Format(FrameFormat::Magicless))
-        .map_err(|c| zstd_err("set magicless", c))?;
-    dctx.set_parameter(DParameter::WindowLogMax(WINDOW_LOG_MAX))
-        .map_err(|c| zstd_err("set window-log-max", c))?;
-    let cap = dest_capacity.max(1);
-    let mut out = vec![0u8; cap];
-    let (n, consumed) = {
-        let mut output = OutBuffer::around(&mut out[..]);
-        let mut input = InBuffer::around(stream);
-        loop {
-            let prev_in = input.pos();
-            let prev_out = output.pos();
-            let hint = dctx
-                .decompress_stream(&mut output, &mut input)
-                .map_err(|c| zstd_err("decompress", c))?;
-            if hint == 0 {
-                break; // end of the first frame
-            }
-            if output.pos() == cap {
-                break; // destination filled to the declared capacity
-            }
-            if input.pos() == prev_in && output.pos() == prev_out {
-                break; // no progress (truncated/garbage tail) — stop cleanly
-            }
-        }
-        (output.pos(), input.pos())
-    };
-    out.truncate(n);
-    Ok((out, consumed))
+    let frame = zstd_pure::decompress_magicless(stream, dest_capacity.max(1))
+        .map_err(zstd_err("decode"))?;
+    Ok((frame.data, frame.consumed))
 }
 
 /// Decompress the leading magicless zstd frame, returning just the bytes.
@@ -83,20 +51,11 @@ pub fn decompress_stream(stream: &[u8], dest_capacity: usize) -> Result<Vec<u8>>
 
 /// Compress `data` as a magicless zstd frame with the content size pledged
 /// (so the frame self-describes its length, matching the game's frames).
+///
+/// `level` selects the `zstd_pure` compression parameters; no content checksum
+/// and no frame magic (magicless), matching the game's BFRES frames.
 pub fn compress_stream(data: &[u8], level: i32) -> Result<Vec<u8>> {
-    let mut cctx = CCtx::create();
-    cctx.set_parameter(CParameter::Format(FrameFormat::Magicless))
-        .map_err(|c| zstd_err("set magicless", c))?;
-    cctx.set_parameter(CParameter::CompressionLevel(level))
-        .map_err(|c| zstd_err("set level", c))?;
-    cctx.set_parameter(CParameter::ContentSizeFlag(true))
-        .map_err(|c| zstd_err("set content-size flag", c))?;
-    cctx.set_pledged_src_size(Some(data.len() as u64))
-        .map_err(|c| zstd_err("pledge src size", c))?;
-    let mut out = Vec::with_capacity(zstd_safe::compress_bound(data.len()));
-    cctx.compress2(&mut out, data)
-        .map_err(|c| zstd_err("compress", c))?;
-    Ok(out)
+    Ok(zstd_pure::compress(data, level, false, false))
 }
 
 /// Extract the **BFRES structure** from an MCPK container — the leading

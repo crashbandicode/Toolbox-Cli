@@ -102,7 +102,11 @@ pub mod nso;
 pub mod restbl;
 pub mod sarc;
 pub mod texpipe;
-pub mod zstd_pure;
+
+/// Re-export of the pure-Rust [`zstd_pure`] Zstandard codec (RFC 8878) that this
+/// crate decodes/encodes `.zs` assets and MeshCodec (`MCPK`) BFRES frames with —
+/// **no libzstd (C) at runtime**. Used by [`compression::zstd`] and [`mc`].
+pub use ::zstd_pure;
 
 /// Commonly used imports. `use nx_layout_toolbox::prelude::*;` pulls in the
 /// format read/write entry points, the BNTX import/replace helpers, the

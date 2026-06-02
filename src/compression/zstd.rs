@@ -1,6 +1,6 @@
-//! Thin wrapper over the `zstd` crate (vendored libzstd, BSD-3 — GPL-free)
-//! plus a small pure-Rust parser for the zstd *frame header* so we can read
-//! the referenced `Dictionary_ID` without decompressing.
+//! zstd codec for TotK/BOTW `.zs` assets, backed by the pure-Rust [`zstd_pure`]
+//! crate (no libzstd / C at runtime) plus a small frame-header parser so we can
+//! read the referenced `Dictionary_ID` without decompressing.
 //!
 //! TotK `.zs` files are single zstd frames; the frame header names which
 //! dictionary (if any) is required (`zs.zsdic` = id 1, `pack.zsdic` = id 3,
@@ -8,13 +8,12 @@
 //! [`crate::compression::dict::DictRegistry`], and decode. Encoding with a
 //! dictionary embeds that id back into the frame so the game can reload it.
 
-use std::io::{Cursor, Read};
-
 use crate::error::{Error, Result};
 
-// Refer to the external crate explicitly to avoid any confusion with this
-// module's own name (`crate::compression::zstd`).
-use ::zstd as libzstd;
+/// Output ceiling for a single decode (decompression-bomb guard). Far above any
+/// real TotK `.zs` decompressed size; a frame that pledges/produces more is
+/// rejected rather than allowed to exhaust memory.
+const MAX_DECOMPRESSED: usize = 1 << 31; // 2 GiB
 
 /// zstd frame magic, little-endian `0xFD2FB528`.
 pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
@@ -66,37 +65,39 @@ pub fn frame_dictionary_id(bytes: &[u8]) -> Result<u32> {
 
 /// Decompress a single zstd frame. `dictionary` must be supplied iff the
 /// frame references one (see [`frame_dictionary_id`]); pass `None` for plain
-/// frames.
+/// frames. Decoded with the pure-Rust [`zstd_pure`] codec.
 pub fn decompress(bytes: &[u8], dictionary: Option<&[u8]>) -> Result<Vec<u8>> {
     match dictionary {
-        None => {
-            libzstd::decode_all(bytes).map_err(|e| Error::Compression(format!("zstd decode: {e}")))
-        }
+        None => zstd_pure::decompress_capped(bytes, MAX_DECOMPRESSED)
+            .map_err(|e| Error::Compression(format!("zstd decode: {e}"))),
         Some(dict) => {
-            let mut decoder =
-                libzstd::stream::read::Decoder::with_dictionary(Cursor::new(bytes), dict)
-                    .map_err(|e| Error::Compression(format!("zstd decode (dict): {e}")))?;
-            let mut out = Vec::new();
-            decoder
-                .read_to_end(&mut out)
-                .map_err(|e| Error::Compression(format!("zstd decode (dict): {e}")))?;
-            Ok(out)
+            // `Dictionary::parse` auto-detects structured (magic `0xEC30A437`,
+            // as TotK's `.zsdic` files are) vs raw content, like libzstd's
+            // `ZSTD_dct_auto`.
+            let dict = zstd_pure::Dictionary::parse(dict)
+                .map_err(|e| Error::Compression(format!("zstd dict parse: {e}")))?;
+            zstd_pure::decompress_with_dict(bytes, &dict, MAX_DECOMPRESSED)
+                .map_err(|e| Error::Compression(format!("zstd decode (dict): {e}")))
         }
     }
 }
 
 /// Compress `payload` into a single zstd frame at `level`. When `dictionary`
-/// is supplied, the frame embeds the dictionary's id so the game (and our
-/// own [`decompress`]) can reselect it.
+/// is supplied, the frame embeds the dictionary's id so the game (and our own
+/// [`decompress`]) can reselect it. Encoded with the pure-Rust [`zstd_pure`]
+/// codec; the contract is `decompress(compress(x)) == x` (not byte-identity
+/// with libzstd's encoder).
 pub fn compress(payload: &[u8], dictionary: Option<&[u8]>, level: i32) -> Result<Vec<u8>> {
-    let mut compressor = match dictionary {
-        None => libzstd::bulk::Compressor::new(level),
-        Some(dict) => libzstd::bulk::Compressor::with_dictionary(level, dict),
+    match dictionary {
+        None => Ok(zstd_pure::compress(payload, level, false, true)),
+        Some(dict) => {
+            let dict = zstd_pure::Dictionary::parse(dict)
+                .map_err(|e| Error::Compression(format!("zstd dict parse: {e}")))?;
+            Ok(zstd_pure::compress_with_dict(
+                payload, &dict, level, false, true,
+            ))
+        }
     }
-    .map_err(|e| Error::Compression(format!("zstd encoder init: {e}")))?;
-    compressor
-        .compress(payload)
-        .map_err(|e| Error::Compression(format!("zstd encode: {e}")))
 }
 
 #[cfg(test)]
