@@ -417,19 +417,32 @@ pub struct RansInitResult {
     pub stream_used: usize,
 }
 
-/// Initialize four interleaved rANS states (`0x110dfa0`, caller `0x110ddc8` mode 0).
+/// Advance four interleaved rANS states by `prod >> 2` rounds (`0x110dfa0`'s
+/// main loop `0x110e010`..`0x110e120`, caller `0x110ddc8` mode 0).
 ///
-/// For `prod >= 4` the main loop (`0x110e010`..`0x110e120`) runs `prod >> 2`
-/// rounds. Each round emits four output bytes (`ldrh` from `table.sym` at
-/// `step+0x2000`, `strb` to the output buffer), applies the range step on the
-/// shifted state (`lsr` by `log`, `mul`/`add` from `table.step`), then
-/// renormalizes lanes 0..3 in cascade order when `state < 2^31` (`0x110e05c`).
+/// Each round, for lanes 0..3: index `state & mask`, take the spread entry, emit
+/// `table.sym[idx]` (`ldrh`/`strb`), apply the range step `state = (state >> log)
+/// * freq + low` (`lsr`/`mul`/`add` from `table.step`), then renormalize lanes
+/// 0..3 in cascade order when `state < 2^31` by pulling a forward `u32`
+/// (`0x110e05c`..`0x110e10c`). States are written back at `0x110e120`. The
+/// `(log, table)` are per-segment data from the freq-reader + spread
+/// (`0x110de80`) — there is no fixed init table.
 ///
-/// NOT ported: nibble bootstrap (`0x110e1bc` when `ctx+0x20 & 0xf != 0`), scalar
-/// `prod < 4` (`0x110e140`), and `prod & 3` tail (`0x110e128`). Animal_Bear's
-/// golden init (`flag=0xf`, stream `P+8044`, `prod=228`, `log=5`) validates on
-/// the interleaved path with unchanged `states_in` (nibble does not affect that
-/// trace's register inputs to the loop).
+/// SCOPE — this ports ONLY the warm main-loop slice and is validated for it:
+/// a state buffer whose four states are ALREADY loaded, reading a stream from
+/// offset 0. That matches Animal_Bear's segment at `P+8044` (`prod=228`,
+/// `log=5`), the one init call on its stream.
+///
+/// NOT ported (verified structure — see `local-assets/re/confirm_init_structure.py`):
+/// * `// TODO(0x110e1bc, FINDINGS #8): cold-start STATE LOADER.` The game takes
+///   `0x110e1bc` when `(flag & 0xf) != 0xf` (e.g. the first call on a buffer,
+///   `flag == 0`) to read the four seed states from the stream, then sets
+///   `flag |= 0xf` (`0x110e264`). Every segment's FIRST init needs this; only a
+///   warm buffer (`flag == 0xf`) skips straight to the loop.
+/// * `// TODO(0x110dfa0): shared forward stream cursor.` The stream offset
+///   (`[x2+12]`) persists ACROSS calls on the same stream and is written back;
+///   continuation calls do not restart at 0. This fn assumes offset 0.
+/// * scalar `prod < 4` (`0x110e140`) and `prod & 3` tail (`0x110e128`).
 pub fn rans_init_states(
     table: &RansDecodeTable,
     stream: &[u8],
@@ -981,12 +994,15 @@ mod tests {
         assert_eq!(t.sym, SYM);
     }
 
-    /// Four-state init for Bear's first rANS segment (M=32, log=5, stream P+8044).
+    /// Warm main-loop slice of the four-state rANS init (`0x110dfa0`).
     ///
-    /// Provenance: `capture_init6.py` / `trace_init_lane0.py` on `0x110dfa0` return
-    /// at `0x110e1b8` (Animal_Bear, `prod=228`, `w11=1`). Init table is
-    /// `rans_spread(5, [28,3,1])`, not the M=64 decode table. Rules out treating
-    /// init as decode-only renorm and using log=6 / uniform M=32 tables.
+    /// Provenance: `capture_init6.py` / `verify_init_invariant.py` on `0x110dfa0`
+    /// return at `0x110e1b8` (Animal_Bear, the segment at stream `P+8044`,
+    /// `prod=228`, `log=5`, already-loaded states). The `(log, freqs)` are this
+    /// segment's own freq-reader+spread output — NOT a fixed table: across the 3
+    /// fixtures `log` ranges 3..11 and the freqs differ every segment (see
+    /// `capture_init_all.py`). `[28,3,1]` is simply Bear's data here. Rules out
+    /// treating init as decode-only renorm and using log=6 / the M=64 decode table.
     #[test]
     fn rans_init_states_bear_first_rans() {
         const INIT_FREQS: [u16; 3] = [28, 3, 1];
