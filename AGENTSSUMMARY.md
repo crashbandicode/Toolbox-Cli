@@ -105,7 +105,7 @@ src/
 │   ├── write.rs        Verbatim writer (byte-identical no-op round-trip)
 │   ├── codec.rs        Magicless-zstd extract + repack (streaming decode; no dict)
 │   ├── mesh.rs         FMSH mesh-section framing parser (has-mesh flag, header, chunk, sizes)
-│   ├── geometry.rs     FMSH geometry transport: fwd/reverse readers, super-block/sub-block header, state-0 table-builder cursor, zstd-block + raw windows, first-sub-block index decode (bufA 99.3% from scratch); vertex coder TODO
+│   ├── geometry.rs     FMSH geometry transport: fwd/reverse readers, super-block/sub-block header, state-0 canonical-Huffman table builder (full table, byte-exact), zstd-block + raw windows, first-sub-block index decode (bufA 99.3% from scratch); vertex symbol-reader/transform TODO
 │   └── error.rs        McError (magic/flags/reserved/size/zstd/mesh-framing context)
 ├── meshopt/            Pure-Rust meshoptimizer 0.15 codec (reference + encoder; MeshCodec uses a custom entropy backend)
 │   ├── mod.rs          Public encode/decode_{vertex_buffer,index_buffer,index_sequence} + decode_index_buffer_split + read_indices
@@ -681,10 +681,21 @@ then a 440-B direct window. The 8 `0x10fb2e0` calls each decode ONE attribute
 (table entry; offsets in `ctx+0x27c`, cols in `ctx+0x310`) into a ws staging
 buffer; the kernel transform (`0x10f9690`→`0x10fa980`) writes transposed
 delta/zigzag into bufB. `0x110d7f0`'s 2-bit mode (jump `0x2cf6acc`): 0/1 =
-canonical-Huffman symbol arrays (widths), 2 = zstd-window value stream, 3 =
+entropy-coded symbol arrays (widths), 2 = zstd-window value stream, 3 =
 direct (sentinel bytes); `0x110d360` is the 3-stream byte-group width combiner.
-Porting `0x10f8d20` table VALUES + `0x110d7f0` (4 modes) + `0x110d360` + the
-kernel transform + states 4/5/2 is the remaining work (FINDINGS UPDATE #8).
+
+**Committed `0e14f86`: the canonical-Huffman table builder (`0x10f8d20`) is now
+ported + validated in Rust** (`state0_table_builder` materializes the full decode
+table — `ctx+0x240`/`0x27c`/`0x310`/`0x2d4` + totals — byte-exact vs the oracle for
+Bear). Subtlety that cost a wrong first cut: two distinct `w19` — packing/mask use
+bits 62-63, but the long/short branch tests **bit 56** and the stream-reset tests
+**bit 55** (`0x10f8e00` overwrites `x19` with `x14>>55` before the branch); this
+also fixed a latent cursor bug. `w13 = ctx[0x2c0]` (=7 across fixtures, alignment-
+like) is a param (index path passes 0). **Remaining: the symbol reader `0x110d7f0`
+(modes 0/1 = a 4-way-interleaved FSE/range decoder `0x110e270` — multiply-renorm
+`mul;lsr #0x1f`, FSE table indexed by state, u16 out — + RLE variants `0x110ef70`/
+`0x110f930`), the 3-stream width combiner `0x110d360`, the kernel transform, and
+states 4/5/2.** Disasm dumped in `local-assets/re/_symdec.txt` (FINDINGS UPDATE #8).
 
 ### 2026-06-01 — MeshCodec INDEX transport framing VALIDATED (prototype) + vertex coder ground truth
 Continued the Stage-1b port. Built a Python framing prototype (gitignored,
