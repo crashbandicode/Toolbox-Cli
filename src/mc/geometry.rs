@@ -495,6 +495,20 @@ pub fn rans_init_states(
 }
 
 /// Decode `count` symbols with the vertex coder's rANS decoder (`0x110e270`).
+///
+/// Four interleaved lanes decode in round-robin; each round writes lanes 0..3 to
+/// output positions `base + lane*stride`. The `count % 4` tail then continues the
+/// **first `count&3` lanes** — tail symbol `k` reads and advances `states[k]`,
+/// not `states[0]`. This is the `0x110e410` tail loop: after the main loop stores
+/// the four lane states to `x0[0..4]` (`stp` at `0x110e3f0`), the tail does
+/// `ldr x17,[x0]` + `str x17,[x0],#8` (post-increment by one state slot per
+/// symbol), so successive tail symbols consume successive lanes.
+///
+/// VALIDATED for `stride == 1` (the single-stream decode). `stride > 1` is the
+/// 3-lane interleave where only `w2 < count` symbols are produced into a wider
+/// `count`-slot buffer; that mode is not yet reproduced —
+/// `// TODO(0x110ef70): 3-lane (stride>1) decode + sibling streams`. Callers
+/// must pass `stride == 1` until then.
 pub fn rans_decode(
     count: usize,
     log: u32,
@@ -533,9 +547,9 @@ pub fn rans_decode(
         }
     }
     for k in 0..(count & 3) {
-        let (s, ns) = decode_lane(states[0], &mut spos);
+        let (s, ns) = decode_lane(states[k], &mut spos);
         out[iters * 4 * stride + k * stride] = s;
-        states[0] = ns;
+        states[k] = ns;
     }
     out
 }
@@ -1111,6 +1125,34 @@ mod tests {
         );
         assert_eq!(&out[220..], &[14, 13, 13, 14, 14, 13, 14, 13]);
         assert_eq!(out.iter().map(|&s| s as u32).sum::<u32>(), 2565);
+    }
+
+    /// Discriminating tail decode: `count % 4 != 0`, so the leftover symbols
+    /// exercise the tail loop (`0x110e410`). The tail must continue lanes 0,1,…
+    /// (tail symbol `k` from `states[k]`), NOT decode every leftover from
+    /// `states[0]`.
+    ///
+    /// Provenance: `capture_decode_tail_golden.py`, Animal_Bear's 4th `0x110e270`
+    /// call (`count=142`, `tail=2`, `log=6`, `stride=1`). With the wrong
+    /// `states[0]`-only tail the last symbol decodes to `12`; the emulator (and
+    /// the `states[k]` rule, confirmed by the `str x17,[x0],#8` post-increment)
+    /// gives `14`. Also cross-checked against Animal_Bass call #1 (`count=194`,
+    /// `tail=2`) in `audit_decode_spread.py`.
+    #[test]
+    fn rans_decode_tail_continues_lanes() {
+        const FREQS: [u16; 15] = [1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 3, 13, 21, 18];
+        let states = [0x1bdb9fbf46u64, 0xbccd27a202, 0x424e240141, 0x13610be603];
+        let stream = hex_bytes(
+            "c9f18c17d9d5062f2be62f960821c609377ce810a26db5967caa56af741a01f3\
+             e7238315b6ebcb1ce861fedaff21bcbd",
+        );
+        let t = rans_spread(6, &FREQS);
+        let out = rans_decode(142, 6, 1, &t.step, &t.sym, states, &stream);
+        assert_eq!(out.len(), 142);
+        assert_eq!(&out[..8], &[9, 5, 4, 6, 11, 10, 8, 13]);
+        // The two-symbol tail: lanes 0 and 1 continue -> [14, 14]. The
+        // `states[0]`-only shortcut would yield [14, 12] here.
+        assert_eq!(&out[138..], &[12, 13, 14, 14]);
     }
 
     fn hex_bytes(s: &str) -> Vec<u8> {
