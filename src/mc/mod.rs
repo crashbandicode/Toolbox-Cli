@@ -43,7 +43,9 @@ pub use codec::{
     size_descriptor,
 };
 pub use error::{McError, Result};
-pub use geometry::{decode_first_subblock_indices, ForwardReader, SubBlockHeader, TableBuild};
+pub use geometry::{
+    decode_first_subblock_indices, rans_decode, ForwardReader, SubBlockHeader, TableBuild,
+};
 pub use mesh::{has_mesh_flag, read_mesh_section, MeshChunk, MeshSection};
 pub use read::read_mc;
 pub use write::write_mc;
