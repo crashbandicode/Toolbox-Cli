@@ -397,8 +397,91 @@ pub fn rans_spread(log: u32, symbol_freqs: &[u16]) -> RansDecodeTable {
     RansDecodeTable { log, step, sym }
 }
 
-/// Validated byte-exact against the decoder's dumped I/O. Four-state stream init
-/// (`0x110dfa0`) and the 3-lane (`0x110ef70`) / RLE (`0x110f930`) variants remain.
+/// Errors from four-lane rANS state initialization (`0x110dfa0`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RansInitError {
+    /// `prod < 4` hits the scalar path (`0x110e140`) — not yet traced for commit.
+    ProdTooSmall,
+    /// `prod & 3 != 0` tail uses `0x110e128` — not yet traced for commit.
+    UnsupportedProdTail,
+    /// `step`/`sym` length must equal `1 << table.log`.
+    TableSizeMismatch,
+    /// Forward renorm at `0x110e05c` could not read four bytes for a lane.
+    StreamTooShort,
+}
+
+/// Result of [`rans_init_states`]: final four states and forward bytes consumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RansInitResult {
+    pub states: [u64; 4],
+    pub stream_used: usize,
+}
+
+/// Initialize four interleaved rANS states (`0x110dfa0`, caller `0x110ddc8` mode 0).
+///
+/// For `prod >= 4` the main loop (`0x110e010`..`0x110e120`) runs `prod >> 2`
+/// rounds. Each round emits four output bytes (`ldrh` from `table.sym` at
+/// `step+0x2000`, `strb` to the output buffer), applies the range step on the
+/// shifted state (`lsr` by `log`, `mul`/`add` from `table.step`), then
+/// renormalizes lanes 0..3 in cascade order when `state < 2^31` (`0x110e05c`).
+///
+/// NOT ported: nibble bootstrap (`0x110e1bc` when `ctx+0x20 & 0xf != 0`), scalar
+/// `prod < 4` (`0x110e140`), and `prod & 3` tail (`0x110e128`). Animal_Bear's
+/// golden init (`flag=0xf`, stream `P+8044`, `prod=228`, `log=5`) validates on
+/// the interleaved path with unchanged `states_in` (nibble does not affect that
+/// trace's register inputs to the loop).
+pub fn rans_init_states(
+    table: &RansDecodeTable,
+    stream: &[u8],
+    prod: u32,
+    _stride: usize,
+    states_in: [u64; 4],
+) -> Result<RansInitResult, RansInitError> {
+    let m = 1usize << table.log;
+    if table.step.len() != m || table.sym.len() != m {
+        return Err(RansInitError::TableSizeMismatch);
+    }
+    if prod < 4 {
+        return Err(RansInitError::ProdTooSmall);
+    }
+    if prod & 3 != 0 {
+        return Err(RansInitError::UnsupportedProdTail);
+    }
+
+    let mask = (1u64 << table.log) - 1;
+    let log = table.log;
+    let mut states = states_in;
+    let mut spos = 0usize;
+    let step = &table.step;
+    let sym = &table.sym;
+
+    for _ in 0..(prod >> 2) {
+        for state in &mut states {
+            let idx = (*state & mask) as usize;
+            let entry = step[idx];
+            let shifted = *state >> log;
+            let _ = sym[idx];
+            *state = shifted * (entry >> 16) as u64 + (entry & 0xffff) as u64;
+        }
+        for state in &mut states {
+            if *state >> 31 == 0 {
+                let chunk = stream
+                    .get(spos..spos + 4)
+                    .ok_or(RansInitError::StreamTooShort)?;
+                let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                *state = (*state << 32) | word as u64;
+                spos += 4;
+            }
+        }
+    }
+
+    Ok(RansInitResult {
+        states,
+        stream_used: spos,
+    })
+}
+
+/// Decode `count` symbols with the vertex coder's rANS decoder (`0x110e270`).
 pub fn rans_decode(
     count: usize,
     log: u32,
@@ -898,26 +981,75 @@ mod tests {
         assert_eq!(t.sym, SYM);
     }
 
-    /// Spread + decode: Bear first rANS (228 symbols) with fixture-free table/states/stream.
+    /// Four-state init for Bear's first rANS segment (M=32, log=5, stream P+8044).
     ///
-    /// Provenance: `trace_rans.py` → `vtxgt/rans/`; spread freqs as in
-    /// `rans_spread_bear_first_rans_m64`. Init states are still golden-only
-    /// (`0x110dfa0` not yet ported — stream base P+8044 vs body P+8068).
+    /// Provenance: `capture_init6.py` / `trace_init_lane0.py` on `0x110dfa0` return
+    /// at `0x110e1b8` (Animal_Bear, `prod=228`, `w11=1`). Init table is
+    /// `rans_spread(5, [28,3,1])`, not the M=64 decode table. Rules out treating
+    /// init as decode-only renorm and using log=6 / uniform M=32 tables.
     #[test]
-    fn rans_spread_then_decode_bear_first_rans() {
-        const FREQS: [u16; 15] = [5, 1, 1, 0, 1, 0, 1, 1, 0, 1, 3, 6, 13, 23, 8];
-        let t = rans_spread(6, &FREQS);
-        let states = [
-            0x1670c7fb0e5cc107u64,
+    fn rans_init_states_bear_first_rans() {
+        const INIT_FREQS: [u16; 3] = [28, 3, 1];
+        const ST_IN: [u64; 4] = [0x15601103de, 0x7a4056e3de, 0x4939330469c, 0x1136b5c57093e];
+        const ST_OUT: [u64; 4] = [
+            0x1670c7fb0e5cc107,
             0x80581303,
             0x0e1e9623a87cf343,
             0x01321a08545304,
         ];
-        let stream = hex_bytes(
+        let init_stream =
+            hex_bytes("1c6c79053929c95b0ce6a98f0bb0c472ab757821cbb49d0d44d69beb2784028b");
+        let t = rans_spread(5, &INIT_FREQS);
+        let r = rans_init_states(&t, &init_stream, 228, 1, ST_IN).unwrap();
+        assert_eq!(r.states, ST_OUT);
+        assert_eq!(r.stream_used, 24);
+
+        let mut bad_stream = init_stream.clone();
+        bad_stream[0] ^= 1;
+        assert_ne!(
+            rans_init_states(&t, &bad_stream, 228, 1, ST_IN)
+                .unwrap()
+                .states,
+            ST_OUT
+        );
+        assert!(matches!(
+            rans_init_states(&t, &init_stream[..8], 228, 1, ST_IN),
+            Err(RansInitError::StreamTooShort)
+        ));
+        assert!(matches!(
+            rans_init_states(&t, &init_stream, 3, 1, ST_IN),
+            Err(RansInitError::ProdTooSmall)
+        ));
+    }
+
+    /// Spread → init (`0x110dfa0`) → decode: Bear first rANS without hardcoded states.
+    ///
+    /// Provenance: `trace_rans.py` decode oracle; init from `capture_init6.py`.
+    #[test]
+    fn rans_spread_init_then_decode_bear_first_rans() {
+        const DEC_FREQS: [u16; 15] = [5, 1, 1, 0, 1, 0, 1, 1, 0, 1, 3, 6, 13, 23, 8];
+        const INIT_FREQS: [u16; 3] = [28, 3, 1];
+        const ST_IN: [u64; 4] = [0x15601103de, 0x7a4056e3de, 0x4939330469c, 0x1136b5c57093e];
+        let init_stream =
+            hex_bytes("1c6c79053929c95b0ce6a98f0bb0c472ab757821cbb49d0d44d69beb2784028b");
+        let decode_stream = hex_bytes(
             "44d69beb2784028b6a39382a036f90a250ebc749203fa34e0d60353e5071548d51aa7a26\
              943ad95a422eea145dab83d860ba542ed7bf85ec1c78e11fedddfb9ceaf8b9031988e12f",
         );
-        let out = rans_decode(228, 6, 1, &t.step, &t.sym, states, &stream);
+        let init_tbl = rans_spread(5, &INIT_FREQS);
+        let states = rans_init_states(&init_tbl, &init_stream, 228, 1, ST_IN)
+            .unwrap()
+            .states;
+        let dec_tbl = rans_spread(6, &DEC_FREQS);
+        let out = rans_decode(
+            228,
+            6,
+            1,
+            &dec_tbl.step,
+            &dec_tbl.sym,
+            states,
+            &decode_stream,
+        );
         assert_eq!(out.len(), 228);
         assert_eq!(
             &out[..24],
