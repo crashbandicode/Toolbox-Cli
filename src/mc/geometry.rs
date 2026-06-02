@@ -38,7 +38,7 @@
 //! ## What is NOT yet ported
 //!
 //! Threading the reverse-A reader through the per-window raw/zstd flag bits,
-//! the rANS table build (`0x110de80` spread + state init), and the kernel
+//! the rANS 4-state stream init (`0x110dfa0`), and the kernel
 //! (`0x10fa980`) + vertex byte-group transform (`0x10fb2e0`). Tracked in
 //! `local-assets/re/FINDINGS.md`.
 
@@ -363,8 +363,42 @@ pub fn decode_zstd_window(
 /// any `count % 4` tail is decoded with state 0. `stream` is read forward as
 /// little-endian `u32`s for renormalization.
 ///
-/// Validated byte-exact against the decoder's dumped I/O. The table build,
-/// 3-lane variant (`0x110ef70`), and RLE fill (`0x110f930`) remain.
+/// Built rANS decode tables (`step` at `+0`, `sym` at `+0x2000` in the segment).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RansDecodeTable {
+    pub log: u32,
+    pub step: Vec<u32>,
+    pub sym: Vec<u16>,
+}
+
+/// Contiguous spread into decode tables (`0x110e6f8`..`0x110e7a4` after `0x110e7b0`).
+///
+/// For each symbol `s` with frequency `f`, slots `[cum..cum+f)` map to `sym[i]=s` and
+/// `step[i]=(f<<16)|(i-cum)` (slot index within the symbol's range, not global `i`).
+/// Zero-frequency symbols are skipped. `symbol_freqs` must sum to `1 << log`.
+pub fn rans_spread(log: u32, symbol_freqs: &[u16]) -> RansDecodeTable {
+    let m = 1usize << log;
+    let mut step = vec![0u32; m];
+    let mut sym = vec![0u16; m];
+    let mut cum = 0usize;
+    for (s, &f) in symbol_freqs.iter().enumerate() {
+        let f = f as usize;
+        if f == 0 {
+            continue;
+        }
+        let hi = (f as u32) << 16;
+        for i in 0..f {
+            sym[cum + i] = s as u16;
+            step[cum + i] = hi | (i as u32);
+        }
+        cum += f;
+    }
+    debug_assert_eq!(cum, m);
+    RansDecodeTable { log, step, sym }
+}
+
+/// Validated byte-exact against the decoder's dumped I/O. Four-state stream init
+/// (`0x110dfa0`) and the 3-lane (`0x110ef70`) / RLE (`0x110f930`) variants remain.
 pub fn rans_decode(
     count: usize,
     log: u32,
@@ -834,6 +868,62 @@ mod tests {
             &bufa[16528..16540],
             &[0x76, 0x04, 0x78, 0x04, 0x7a, 0x04, 0x76, 0x04, 0x7a, 0x04, 0x79, 0x04]
         );
+    }
+
+    /// Contiguous spread for Bear's first rANS segment (M=64, log=6).
+    ///
+    /// Provenance: `spread_ref.py` / `vtxgt/rans/{step,sym}.bin` from `trace_rans.py`
+    /// (Animal_Bear first `0x110e270` call). Freqs inferred from the spread map:
+    /// `[5,1,1,0,1,0,1,1,0,1,3,6,13,23,8]` (symbols 3/5/8 unused). Rules out
+    /// FSE-style scatter and off-by-one slot indexing within each symbol run.
+    #[test]
+    fn rans_spread_bear_first_rans_m64() {
+        const FREQS: [u16; 15] = [5, 1, 1, 0, 1, 0, 1, 1, 0, 1, 3, 6, 13, 23, 8];
+        const STEP: [u32; 64] = [
+            327680, 327681, 327682, 327683, 327684, 65536, 65536, 65536, 65536, 65536, 65536,
+            196608, 196609, 196610, 393216, 393217, 393218, 393219, 393220, 393221, 851968, 851969,
+            851970, 851971, 851972, 851973, 851974, 851975, 851976, 851977, 851978, 851979, 851980,
+            1507328, 1507329, 1507330, 1507331, 1507332, 1507333, 1507334, 1507335, 1507336,
+            1507337, 1507338, 1507339, 1507340, 1507341, 1507342, 1507343, 1507344, 1507345,
+            1507346, 1507347, 1507348, 1507349, 1507350, 524288, 524289, 524290, 524291, 524292,
+            524293, 524294, 524295,
+        ];
+        const SYM: [u16; 64] = [
+            0, 0, 0, 0, 0, 1, 2, 4, 6, 7, 9, 10, 10, 10, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12,
+            12, 12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13,
+            13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14,
+        ];
+        let t = rans_spread(6, &FREQS);
+        assert_eq!(t.step, STEP);
+        assert_eq!(t.sym, SYM);
+    }
+
+    /// Spread + decode: Bear first rANS (228 symbols) with fixture-free table/states/stream.
+    ///
+    /// Provenance: `trace_rans.py` → `vtxgt/rans/`; spread freqs as in
+    /// `rans_spread_bear_first_rans_m64`. Init states are still golden-only
+    /// (`0x110dfa0` not yet ported — stream base P+8044 vs body P+8068).
+    #[test]
+    fn rans_spread_then_decode_bear_first_rans() {
+        const FREQS: [u16; 15] = [5, 1, 1, 0, 1, 0, 1, 1, 0, 1, 3, 6, 13, 23, 8];
+        let t = rans_spread(6, &FREQS);
+        let states = [
+            0x1670c7fb0e5cc107u64,
+            0x80581303,
+            0x0e1e9623a87cf343,
+            0x01321a08545304,
+        ];
+        let stream = hex_bytes(
+            "44d69beb2784028b6a39382a036f90a250ebc749203fa34e0d60353e5071548d51aa7a26\
+             943ad95a422eea145dab83d860ba542ed7bf85ec1c78e11fedddfb9ceaf8b9031988e12f",
+        );
+        let out = rans_decode(228, 6, 1, &t.step, &t.sym, states, &stream);
+        assert_eq!(out.len(), 228);
+        assert_eq!(
+            &out[..24],
+            &[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 4, 2, 12, 13, 12, 10, 13, 10]
+        );
+        assert_eq!(&out[220..], &[14, 13, 13, 14, 14, 13, 14, 13]);
     }
 
     /// The rANS decoder reproduces a real decoded symbol stream (the first
