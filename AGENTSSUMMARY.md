@@ -649,6 +649,20 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-02 — MeshCodec rANS contiguous decode-table spread ported
+Added `geometry::rans_build_decode_table`, the contiguous spread used by
+`0x110de80`: each symbol owns `sym[cumfreq..cumfreq+freq]`, and `step[slot] =
+(freq << 16) | (slot - cumfreq)`. This is deliberately only the validated table
+materialization step, not the full segment reader or state init.
+
+Fixture-free golden test `rans_decode_table_spread_matches_oracle` uses Bear's
+first rANS table from `trace_rans.py` / `vtxgt/rans/{step,sym}.bin`, including
+zero-frequency symbols, so an FSE-style scatter, wrong cumulative offset, or
+wrong low half fails visibly.
+
+All green: **165 lib unit (incl. 9 mc::geometry) + all integration; clippy
+`--all-targets` clean; `--no-default-features` builds.**
+
 ### 2026-06-02 — MeshCodec vertex rANS frequency reader ported (`0x110e7b0`)
 Ported `geometry::rans_read_freqs` in `src/mc/geometry.rs`: the adaptive
 `clz`-prefix frequency decoder that feeds each per-segment rANS table build

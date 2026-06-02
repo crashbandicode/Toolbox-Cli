@@ -449,6 +449,46 @@ pub struct RansFreqRead {
     pub reader: RansFreqReader,
 }
 
+/// rANS decode table built from one segment's frequency distribution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RansDecodeTable {
+    /// Per-slot `(freq << 16) | low`, consumed by [`rans_decode`].
+    pub step: Vec<u32>,
+    /// Per-slot symbol spread, consumed by [`rans_decode`].
+    pub sym: Vec<u16>,
+}
+
+/// Build the contiguous rANS decode table used by `0x110de80`.
+///
+/// Each symbol owns its canonical cumulative-frequency range: for `freqs[s] = f`
+/// and `cum = sum(freqs[..s])`, slots `cum..cum+f` map to symbol `s`, and the
+/// corresponding step is `(f << 16) | (slot - cum)`. This is the table shape
+/// dumped at `x3_seg+0x80` (`step`) and `x3_seg+0x2080` (`sym`) before
+/// `0x110e270` consumes it.
+pub fn rans_build_decode_table(log: u32, freqs: &[u16]) -> Option<RansDecodeTable> {
+    let size = 1usize.checked_shl(log)?;
+    let mut step = vec![0u32; size];
+    let mut sym = vec![0u16; size];
+    let mut slot = 0usize;
+
+    for (symbol, &freq) in freqs.iter().enumerate() {
+        let symbol = u16::try_from(symbol).ok()?;
+        for low in 0..freq {
+            let idx = slot.checked_add(low as usize)?;
+            let e = ((freq as u32) << 16) | (low as u32);
+            *step.get_mut(idx)? = e;
+            *sym.get_mut(idx)? = symbol;
+        }
+        slot = slot.checked_add(freq as usize)?;
+    }
+
+    if slot == size {
+        Some(RansDecodeTable { step, sym })
+    } else {
+        None
+    }
+}
+
 #[inline]
 fn clz64(x: u64) -> u32 {
     if x == 0 {
@@ -861,6 +901,31 @@ mod tests {
         );
         assert_eq!(&out[220..], &[14, 13, 13, 14, 14, 13, 14, 13]);
         assert_eq!(out.iter().map(|&s| s as u32).sum::<u32>(), 2565);
+    }
+
+    /// The rANS table spread is contiguous (`sym[cumfreq..cumfreq+freq]=s`) and
+    /// `step=(freq<<16)|low`. Provenance: Bear first rANS call table dumped by
+    /// `trace_rans.py` into `vtxgt/rans/{step,sym}.bin`.
+    #[test]
+    fn rans_decode_table_spread_matches_oracle() {
+        const FREQS: [u16; 15] = [5, 1, 1, 0, 1, 0, 1, 1, 0, 1, 3, 6, 13, 23, 8];
+        const STEP: [u32; 64] = [
+            327680, 327681, 327682, 327683, 327684, 65536, 65536, 65536, 65536, 65536, 65536,
+            196608, 196609, 196610, 393216, 393217, 393218, 393219, 393220, 393221, 851968, 851969,
+            851970, 851971, 851972, 851973, 851974, 851975, 851976, 851977, 851978, 851979, 851980,
+            1507328, 1507329, 1507330, 1507331, 1507332, 1507333, 1507334, 1507335, 1507336, 1507337,
+            1507338, 1507339, 1507340, 1507341, 1507342, 1507343, 1507344, 1507345, 1507346, 1507347,
+            1507348, 1507349, 1507350, 524288, 524289, 524290, 524291, 524292, 524293, 524294, 524295,
+        ];
+        const SYM: [u16; 64] = [
+            0, 0, 0, 0, 0, 1, 2, 4, 6, 7, 9, 10, 10, 10, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12, 12,
+            12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13,
+            13, 13, 13, 13, 13, 13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14,
+        ];
+
+        let table = rans_build_decode_table(6, &FREQS).expect("valid M=64 distribution");
+        assert_eq!(table.step, STEP);
+        assert_eq!(table.sym, SYM);
     }
 
     fn hex_bytes(s: &str) -> Vec<u8> {
