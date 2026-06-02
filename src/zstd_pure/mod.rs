@@ -51,7 +51,9 @@ mod tests {
     #[test]
     fn matches_libzstd_across_levels_and_inputs() {
         // Highly redundant (lots of matches / repeat offsets).
-        let redundant: Vec<u8> = (0..20_000u32).flat_map(|i| (i % 11).to_le_bytes()).collect();
+        let redundant: Vec<u8> = (0..20_000u32)
+            .flat_map(|i| (i % 11).to_le_bytes())
+            .collect();
         // Structured-ish (FRES-like header + counted body).
         let mut structured = b"FRES____".to_vec();
         for i in 0..8000u32 {

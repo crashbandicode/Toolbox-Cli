@@ -29,7 +29,10 @@ use nx_layout_toolbox::dds::Dds;
 fn dds_export_import_replace_invariants() {
     let dir = Path::new("tests/fixtures/bntx");
     if !dir.exists() {
-        eprintln!("skipping DDS round-trip test (no fixtures at {})", dir.display());
+        eprintln!(
+            "skipping DDS round-trip test (no fixtures at {})",
+            dir.display()
+        );
         return;
     }
 
@@ -63,7 +66,10 @@ fn dds_export_import_replace_invariants() {
             assert_eq!(dds.array_count, 1);
             assert!(!dds.is_cube);
             let fresh = deswizzle_texture(&parsed, tex).expect("deswizzle");
-            assert_eq!(dds.data, fresh.linear, "export payload must equal a deswizzle");
+            assert_eq!(
+                dds.data, fresh.linear,
+                "export payload must equal a deswizzle"
+            );
 
             // (2) DDS serialize -> parse round-trips losslessly.
             let serialized = dds.write();
@@ -84,7 +90,11 @@ fn dds_export_import_replace_invariants() {
             let mut replaced = parsed.clone();
             replace_with_dds(&mut replaced, &name, &reparsed_dds).expect("replace_with_dds");
             let written = write_bntx(&replaced).expect("write replaced");
-            assert_eq!(written.len(), bytes.len(), "replace must preserve file size");
+            assert_eq!(
+                written.len(),
+                bytes.len(),
+                "replace must preserve file size"
+            );
 
             let re = read_bntx(&written).expect("re-parse replaced");
             let rt = &re.textures[idx];
@@ -96,7 +106,10 @@ fn dds_export_import_replace_invariants() {
             // Re-export: the linear payload must come back identical
             // (swizzle∘deswizzle is identity on the linear data).
             let dds_after = export_texture_dds(&re, &name).expect("re-export after replace");
-            assert_eq!(dds_after.data, dds.data, "replace round-trip changed linear payload");
+            assert_eq!(
+                dds_after.data, dds.data,
+                "replace round-trip changed linear payload"
+            );
             for (i, orig) in &others {
                 assert_eq!(
                     re.textures[*i].pixel_data(&re.brtd),
@@ -132,7 +145,10 @@ fn dds_export_import_replace_invariants() {
             );
 
             covered.insert(fmt);
-            println!("OK: DDS round-trip for {fmt} '{name}' ({}x{})", tex.width, tex.height);
+            println!(
+                "OK: DDS round-trip for {fmt} '{name}' ({}x{})",
+                tex.width, tex.height
+            );
         }
     }
 

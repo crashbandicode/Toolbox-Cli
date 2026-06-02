@@ -31,10 +31,19 @@ fn every_aamp_fixture_round_trips_byte_identically() {
             continue;
         }
         let doc = read_aamp(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()));
-        assert_eq!(write_aamp(&doc), bytes, "{} not byte-identical", p.display());
+        assert_eq!(
+            write_aamp(&doc),
+            bytes,
+            "{} not byte-identical",
+            p.display()
+        );
         n += 1;
     }
-    assert!(n >= 1, "expected at least one AAMP fixture in {}", dir.display());
+    assert!(
+        n >= 1,
+        "expected at least one AAMP fixture in {}",
+        dir.display()
+    );
     eprintln!("AAMP fixtures round-tripped byte-identically: {n}");
 }
 
@@ -59,19 +68,31 @@ fn canonical_writer_semantic_round_trips_corpus() {
         let doc = read_aamp(&bytes).unwrap();
         let rebuilt =
             write_aamp_canonical(&doc).unwrap_or_else(|e| panic!("canonical {}: {e}", p.display()));
-        let doc2 =
-            read_aamp(&rebuilt).unwrap_or_else(|e| panic!("re-parse canonical {}: {e}", p.display()));
+        let doc2 = read_aamp(&rebuilt)
+            .unwrap_or_else(|e| panic!("re-parse canonical {}: {e}", p.display()));
         // Semantic round-trip: the rebuilt document decodes to the same tree.
-        assert_eq!(doc.root, doc2.root, "{} canonical tree mismatch", p.display());
+        assert_eq!(
+            doc.root,
+            doc2.root,
+            "{} canonical tree mismatch",
+            p.display()
+        );
         assert_eq!(doc.pio_type, doc2.pio_type, "{} pio_type", p.display());
-        assert_eq!(doc.pio_version, doc2.pio_version, "{} pio_version", p.display());
+        assert_eq!(
+            doc.pio_version,
+            doc2.pio_version,
+            "{} pio_version",
+            p.display()
+        );
         if rebuilt == bytes {
             byte_identical += 1;
         }
         n += 1;
     }
     assert!(n >= 1, "expected at least one AAMP fixture");
-    eprintln!("AAMP canonical semantic round-trip: {n} files ({byte_identical} also byte-identical)");
+    eprintln!(
+        "AAMP canonical semantic round-trip: {n} files ({byte_identical} also byte-identical)"
+    );
 }
 
 /// Edit a real Int parameter via `set_by_path` (using hex-hash segments, since
@@ -140,7 +161,11 @@ fn pins_known_fixture_structure() {
     let phys = aamp_dir().join("Weapon_Sword_001.bphysics");
     if phys.exists() {
         let doc = read_aamp(&std::fs::read(&phys).unwrap()).unwrap();
-        assert_eq!(doc.counts(), (14, 23, 231), "Weapon_Sword_001.bphysics structure");
+        assert_eq!(
+            doc.counts(),
+            (14, 23, 231),
+            "Weapon_Sword_001.bphysics structure"
+        );
     } else {
         eprintln!("skipping bphysics pin (no {})", phys.display());
     }

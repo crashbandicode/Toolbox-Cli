@@ -11,8 +11,9 @@ use super::{
 
 /// SFAT name hash (the standard SARC multiply-add hash with key `0x65`).
 fn sarc_hash(name: &str) -> u32 {
-    name.bytes()
-        .fold(0u32, |h, b| h.wrapping_mul(SARC_HASH_KEY).wrapping_add(b as u32))
+    name.bytes().fold(0u32, |h, b| {
+        h.wrapping_mul(SARC_HASH_KEY).wrapping_add(b as u32)
+    })
 }
 
 fn align_up(value: usize, align: usize) -> usize {
@@ -211,12 +212,18 @@ mod tests {
     fn alignment_derivation() {
         assert_eq!(file_alignment(b"abc"), MIN_ALIGNMENT); // too short, no header
         assert_eq!(file_alignment(b"FLYT\x00\x00\x00\x00"), MIN_ALIGNMENT); // no 0x0C BOM
-        // BNTX/BNSH report exponent 12 → 0x1000.
+                                                                            // BNTX/BNSH report exponent 12 → 0x1000.
         assert_eq!(file_alignment(&nn_resource(b"BNTX", 12)), 0x1000);
         assert_eq!(file_alignment(&nn_resource(b"BNSH", 12)), 0x1000);
         // Nested SARC and Yaz0 by magic.
-        assert_eq!(file_alignment(b"SARC____________________________________"), 0x2000);
-        assert_eq!(file_alignment(b"Yaz0____________________________________"), 0x80);
+        assert_eq!(
+            file_alignment(b"SARC____________________________________"),
+            0x2000
+        );
+        assert_eq!(
+            file_alignment(b"Yaz0____________________________________"),
+            0x80
+        );
         // Exponent clamps at MAX_ALIGNMENT (0x2000 = 1<<13).
         assert_eq!(file_alignment(&nn_resource(b"ANY?", 13)), 0x2000);
         // Out-of-range exponent is ignored (falls back to minimum).
@@ -239,7 +246,9 @@ mod tests {
                     assert_eq!(got.data, src.data, "data for {name}");
                 }
                 None => assert!(
-                    arc.files.iter().any(|f| f.name.is_none() && f.data == src.data),
+                    arc.files
+                        .iter()
+                        .any(|f| f.name.is_none() && f.data == src.data),
                     "hash-only entry not preserved"
                 ),
             }
@@ -269,7 +278,11 @@ mod tests {
                 packed[node + 15],
             ]) as usize;
             let needed = file_alignment(&packed[abs..data_offset + end]) as usize;
-            assert_eq!(abs % needed, 0, "node {i} at 0x{abs:x} not aligned to 0x{needed:x}");
+            assert_eq!(
+                abs % needed,
+                0,
+                "node {i} at 0x{abs:x} not aligned to 0x{needed:x}"
+            );
         }
     }
 

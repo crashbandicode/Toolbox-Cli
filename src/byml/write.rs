@@ -49,9 +49,16 @@ pub fn write_byml_canonical(version: u16, big_endian: bool, root: &Byml) -> Resu
     collect_strings(root, &mut keys, &mut strings);
     let keys: Vec<&str> = keys.into_iter().collect();
     let strings: Vec<&str> = strings.into_iter().collect();
-    let key_index: HashMap<&str, u32> = keys.iter().enumerate().map(|(i, &k)| (k, i as u32)).collect();
-    let str_index: HashMap<&str, u32> =
-        strings.iter().enumerate().map(|(i, &s)| (s, i as u32)).collect();
+    let key_index: HashMap<&str, u32> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, &k)| (k, i as u32))
+        .collect();
+    let str_index: HashMap<&str, u32> = strings
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| (s, i as u32))
+        .collect();
 
     // 2. Header placeholder + the two string tables.
     let mut buf = vec![0u8; 16];
@@ -153,7 +160,12 @@ impl<'a> Writer<'a> {
     fn write_container_node(&mut self, node: &'a Byml) {
         match node {
             Byml::Array(items) => {
-                push_node_header(&mut self.buf, NODE_ARRAY, items.len() as u32, self.big_endian);
+                push_node_header(
+                    &mut self.buf,
+                    NODE_ARRAY,
+                    items.len() as u32,
+                    self.big_endian,
+                );
                 for item in items {
                     self.buf.push(node_type_tag(item));
                 }
@@ -163,7 +175,12 @@ impl<'a> Writer<'a> {
                 }
             }
             Byml::Hash(entries) => {
-                push_node_header(&mut self.buf, NODE_HASH, entries.len() as u32, self.big_endian);
+                push_node_header(
+                    &mut self.buf,
+                    NODE_HASH,
+                    entries.len() as u32,
+                    self.big_endian,
+                );
                 // BYML requires hash keys sorted ascending; sort a borrowed
                 // view so synthesized (unsorted) trees still emit valid files.
                 let mut sorted: Vec<&(String, Byml)> = entries.iter().collect();
@@ -189,7 +206,9 @@ impl<'a> Writer<'a> {
             Byml::I32(n) => write_u32_push(&mut self.buf, *n as u32, self.big_endian),
             Byml::U32(n) => write_u32_push(&mut self.buf, *n, self.big_endian),
             Byml::F32(n) => write_u32_push(&mut self.buf, n.to_bits(), self.big_endian),
-            Byml::String(s) => write_u32_push(&mut self.buf, self.str_index[s.as_str()], self.big_endian),
+            Byml::String(s) => {
+                write_u32_push(&mut self.buf, self.str_index[s.as_str()], self.big_endian)
+            }
             Byml::Array(_) | Byml::Hash(_) => {
                 write_u32_push(&mut self.buf, 0, self.big_endian);
                 self.queue.push_back((slot, Deferred::Container(value)));
@@ -216,7 +235,11 @@ impl<'a> Writer<'a> {
 
 /// Recursively gather every hash key and string value into sorted, deduped
 /// sets (borrowing from the tree — no allocation per string).
-fn collect_strings<'a>(node: &'a Byml, keys: &mut BTreeSet<&'a str>, strings: &mut BTreeSet<&'a str>) {
+fn collect_strings<'a>(
+    node: &'a Byml,
+    keys: &mut BTreeSet<&'a str>,
+    strings: &mut BTreeSet<&'a str>,
+) {
     match node {
         Byml::String(s) => {
             strings.insert(s.as_str());
@@ -447,7 +470,10 @@ mod tests {
             let c1 = write_byml_canonical(7, big_endian, &root).expect("write 1");
             let d1 = read_byml(&c1).expect("read 1");
             let c2 = write_byml_canonical(d1.version, d1.big_endian, &d1.root).expect("write 2");
-            assert_eq!(c2, c1, "canonical writer must be idempotent (be={big_endian})");
+            assert_eq!(
+                c2, c1,
+                "canonical writer must be idempotent (be={big_endian})"
+            );
         }
     }
 }

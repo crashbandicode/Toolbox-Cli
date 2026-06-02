@@ -201,8 +201,18 @@ fn material_infos(b: &BFLYT) -> BTreeMap<String, MatInfo> {
             (
                 m.name.clone(),
                 MatInfo {
-                    white: [m.white_color.r, m.white_color.g, m.white_color.b, m.white_color.a],
-                    black: [m.black_color.r, m.black_color.g, m.black_color.b, m.black_color.a],
+                    white: [
+                        m.white_color.r,
+                        m.white_color.g,
+                        m.white_color.b,
+                        m.white_color.a,
+                    ],
+                    black: [
+                        m.black_color.r,
+                        m.black_color.g,
+                        m.black_color.b,
+                        m.black_color.a,
+                    ],
                     textures,
                 },
             )
@@ -285,13 +295,20 @@ pub fn diff_bflyt(old: &BFLYT, new: &BFLYT) -> BflytDiff {
         if let Some(op) = old_panes.get(name) {
             let mut changes = Vec::new();
             if op.kind as u8 != np.kind as u8 {
-                changes.push(format!("kind {} -> {}", kind_str(op.kind), kind_str(np.kind)));
+                changes.push(format!(
+                    "kind {} -> {}",
+                    kind_str(op.kind),
+                    kind_str(np.kind)
+                ));
             }
             if op.parent != np.parent {
                 changes.push(format!("parent {:?} -> {:?}", op.parent, np.parent));
             }
             if op.translate != np.translate {
-                changes.push(format!("translate {:?} -> {:?}", op.translate, np.translate));
+                changes.push(format!(
+                    "translate {:?} -> {:?}",
+                    op.translate, np.translate
+                ));
             }
             if op.rotate != np.rotate {
                 changes.push(format!("rotate {:?} -> {:?}", op.rotate, np.rotate));
@@ -387,7 +404,11 @@ pub fn diff_bntx(old: &BntxFile, new: &BntxFile) -> BntxDiff {
                 ));
             }
             if oi.format != ni.format {
-                changes.push(format!("format {} -> {}", oi.format.name(), ni.format.name()));
+                changes.push(format!(
+                    "format {} -> {}",
+                    oi.format.name(),
+                    ni.format.name()
+                ));
             }
             if oi.mips != ni.mips {
                 changes.push(format!("mips {} -> {}", oi.mips, ni.mips));

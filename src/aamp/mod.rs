@@ -179,10 +179,16 @@ pub enum Value {
     Quat([f32; 4]),
     /// A string value; `ty` records which string variant it was
     /// (`String32`/`String64`/`String256`/`StringRef`) so the type round-trips.
-    Str { ty: ParamType, value: String },
+    Str {
+        ty: ParamType,
+        value: String,
+    },
     /// A curve value, kept as raw bytes (`ty` ∈ `Curve1..=Curve4`). Decoding
     /// the individual control points is a follow-up; the bytes round-trip.
-    Curve { ty: ParamType, raw: Vec<u8> },
+    Curve {
+        ty: ParamType,
+        raw: Vec<u8>,
+    },
     BufferInt(Vec<i32>),
     BufferF32(Vec<f32>),
     BufferU32(Vec<u32>),

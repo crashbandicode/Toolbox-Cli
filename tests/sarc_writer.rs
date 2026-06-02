@@ -23,7 +23,10 @@ fn rd_u32(d: &[u8], o: usize) -> usize {
 fn write_arc_preserves_data_and_aligns_tightly() {
     let arc_path = Path::new("tests/fixtures/archives/info_melee_original.layout.arc");
     if !arc_path.exists() {
-        eprintln!("skipping sarc writer test (no fixture at {})", arc_path.display());
+        eprintln!(
+            "skipping sarc writer test (no fixture at {})",
+            arc_path.display()
+        );
         return;
     }
     let original = std::fs::read(arc_path).expect("read arc");
@@ -45,7 +48,9 @@ fn write_arc_preserves_data_and_aligns_tightly() {
     for f in &reparsed.files {
         if let Some(name) = &f.name {
             named += 1;
-            let orig = by_name.get(name.as_str()).expect("name present in original");
+            let orig = by_name
+                .get(name.as_str())
+                .expect("name present in original");
             assert_eq!(&f.data[..], *orig, "data for '{name}' changed");
         }
     }
@@ -83,7 +88,11 @@ fn write_arc_preserves_data_and_aligns_tightly() {
             "entry #{i} at 0x{abs:x} not aligned to its required 0x{needed:x}"
         );
         if bytes.len() >= 4 && (bytes[0..4] == *b"BNTX" || bytes[0..4] == *b"BNSH") {
-            assert_eq!(abs % 0x1000, 0, "GPU resource at 0x{abs:x} not 0x1000-aligned");
+            assert_eq!(
+                abs % 0x1000,
+                0,
+                "GPU resource at 0x{abs:x} not 0x1000-aligned"
+            );
             checked_gpu += 1;
         }
     }

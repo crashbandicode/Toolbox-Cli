@@ -32,9 +32,7 @@ pub fn decode(src: &[u8], cache: &mut Option<HuffTable>) -> Result<(Vec<u8>, usi
                 _ => {
                     need(src, 3)?;
                     (
-                        ((b0 >> 4) as usize)
-                            | ((src[1] as usize) << 4)
-                            | ((src[2] as usize) << 12),
+                        ((b0 >> 4) as usize) | ((src[1] as usize) << 4) | ((src[2] as usize) << 12),
                         3,
                     )
                 }

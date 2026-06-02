@@ -25,7 +25,10 @@ fn vertex_exact_format_vector_single() {
     let mut expect = vec![0xa0u8, 0, 0, 0, 0];
     expect.extend(std::iter::repeat_n(0u8, 28));
     expect.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
-    assert_eq!(enc, expect, "vertex stream must match the meshopt 0.15 layout");
+    assert_eq!(
+        enc, expect,
+        "vertex stream must match the meshopt 0.15 layout"
+    );
     assert_eq!(decode_vertex_buffer(1, 4, &enc).unwrap(), v);
 }
 
@@ -36,7 +39,10 @@ fn index_exact_format_vector_single_triangle() {
     let enc = encode_index_buffer(&[0, 1, 2], 3, 0).unwrap();
     let mut expect = vec![0xe0u8, 0xf0];
     expect.extend_from_slice(&CODE_AUX_TABLE);
-    assert_eq!(enc, expect, "index stream must match the meshopt 0.15 layout");
+    assert_eq!(
+        enc, expect,
+        "index stream must match the meshopt 0.15 layout"
+    );
     let dec = decode_index_buffer(3, 4, &enc).unwrap();
     assert_eq!(read_indices(&dec, 3, 4).unwrap(), vec![0, 1, 2]);
 }
@@ -57,7 +63,9 @@ fn vertex_roundtrip_random_multiblock() {
     for &vsize in &[4usize, 8, 12, 16, 24, 28, 32, 64] {
         for &vcount in &[0usize, 1, 15, 16, 17, 255, 256, 257, 1000] {
             let mut seed = 0x1234_5678u32 ^ (vsize as u32 * 131 + vcount as u32);
-            let data: Vec<u8> = (0..vcount * vsize).map(|_| (lcg(&mut seed) >> 24) as u8).collect();
+            let data: Vec<u8> = (0..vcount * vsize)
+                .map(|_| (lcg(&mut seed) >> 24) as u8)
+                .collect();
             let enc = encode_vertex_buffer(&data, vcount, vsize).unwrap();
             let dec = decode_vertex_buffer(vcount, vsize, &enc).unwrap();
             assert_eq!(dec, data, "vsize={vsize} vcount={vcount}");
@@ -72,7 +80,9 @@ fn vertex_roundtrip_structured() {
     let vcount = 500usize;
     let mut data = vec![0u8; vcount * vsize];
     for (i, b) in data.iter_mut().enumerate() {
-        *b = ((i / vsize) as u8).wrapping_mul(3).wrapping_add((i % vsize) as u8);
+        *b = ((i / vsize) as u8)
+            .wrapping_mul(3)
+            .wrapping_add((i % vsize) as u8);
     }
     let enc = encode_vertex_buffer(&data, vcount, vsize).unwrap();
     assert_eq!(decode_vertex_buffer(vcount, vsize, &enc).unwrap(), data);
@@ -102,7 +112,11 @@ fn index_roundtrip_grid_and_random_both_versions() {
         let enc = encode_index_buffer(&grid, n, version).unwrap();
         for &isz in &[2usize, 4] {
             let dec = decode_index_buffer(n, isz, &enc).unwrap();
-            assert_eq!(read_indices(&dec, n, isz).unwrap(), grid, "grid v{version} isz{isz}");
+            assert_eq!(
+                read_indices(&dec, n, isz).unwrap(),
+                grid,
+                "grid v{version} isz{isz}"
+            );
         }
         // Random triangles exercise the free-index (delta) paths.
         let mut seed = 0x0000_ABCDu32 ^ version as u32;
@@ -122,7 +136,9 @@ fn index_split_stream_matches_buffer_decode() {
     // carve out the code/data sub-slices, and decode them split.
     let meshes = [grid_indices(18), {
         let mut seed = 0x0000_BEE5u32;
-        (0..3 * 333).map(|_| lcg(&mut seed) % 4000).collect::<Vec<_>>()
+        (0..3 * 333)
+            .map(|_| lcg(&mut seed) % 4000)
+            .collect::<Vec<_>>()
     }];
     for indices in &meshes {
         let n = indices.len();

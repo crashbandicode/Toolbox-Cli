@@ -560,7 +560,8 @@ pub fn compress_image_to_format(
         BlockDim::block_4x4()
     };
     let bytes_per_block = format.block_size();
-    let block_height = block_height_log2.and_then(|l| crate::bntx::decode::block_height_from_log2(l as i32));
+    let block_height =
+        block_height_log2.and_then(|l| crate::bntx::decode::block_height_from_log2(l as i32));
 
     let swizzled = swizzle_surface(
         width,
@@ -575,8 +576,8 @@ pub fn compress_image_to_format(
     )
     .map_err(|e| Error::Texpipe(format!("Tegra swizzle failed ({}): {e:?}", format.name())))?;
 
-    let used_log2 = block_height_log2
-        .unwrap_or_else(|| block_height_to_log2(block_height_mip0(height / bh)));
+    let used_log2 =
+        block_height_log2.unwrap_or_else(|| block_height_to_log2(block_height_mip0(height / bh)));
 
     Ok(CompressedTexture {
         width,

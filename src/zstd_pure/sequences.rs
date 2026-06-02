@@ -223,10 +223,7 @@ pub fn decode(
         if lit_pos + lit_len > literals.len() {
             return Err(ZstdError::Invalid {
                 what: "sequence literals length",
-                detail: format!(
-                    "want {lit_len} literals at {lit_pos} of {}",
-                    literals.len()
-                ),
+                detail: format!("want {lit_len} literals at {lit_pos} of {}", literals.len()),
             });
         }
         out.extend_from_slice(&literals[lit_pos..lit_pos + lit_len]);

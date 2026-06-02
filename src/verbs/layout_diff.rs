@@ -48,15 +48,21 @@ fn entry<'a>(arc: &'a ArcFile, name: &str, which: &str) -> Result<&'a [u8]> {
 }
 
 pub fn run(args: Args) -> Result<ExitCode> {
-    let old_bytes = fs::read(&args.old).with_context(|| format!("reading {}", args.old.display()))?;
-    let new_bytes = fs::read(&args.new).with_context(|| format!("reading {}", args.new.display()))?;
+    let old_bytes =
+        fs::read(&args.old).with_context(|| format!("reading {}", args.old.display()))?;
+    let new_bytes =
+        fs::read(&args.new).with_context(|| format!("reading {}", args.new.display()))?;
     let old_arc = read_arc(&old_bytes)?;
     let new_arc = read_arc(&new_bytes)?;
 
-    let old_bflyt = read_bflyt(entry(&old_arc, &args.bflyt, "old BFLYT")?).map_err(|e| anyhow!("{e}"))?;
-    let new_bflyt = read_bflyt(entry(&new_arc, &args.bflyt, "new BFLYT")?).map_err(|e| anyhow!("{e}"))?;
-    let old_bntx = read_bntx(entry(&old_arc, &args.bntx, "old BNTX")?).map_err(|e| anyhow!("{e}"))?;
-    let new_bntx = read_bntx(entry(&new_arc, &args.bntx, "new BNTX")?).map_err(|e| anyhow!("{e}"))?;
+    let old_bflyt =
+        read_bflyt(entry(&old_arc, &args.bflyt, "old BFLYT")?).map_err(|e| anyhow!("{e}"))?;
+    let new_bflyt =
+        read_bflyt(entry(&new_arc, &args.bflyt, "new BFLYT")?).map_err(|e| anyhow!("{e}"))?;
+    let old_bntx =
+        read_bntx(entry(&old_arc, &args.bntx, "old BNTX")?).map_err(|e| anyhow!("{e}"))?;
+    let new_bntx =
+        read_bntx(entry(&new_arc, &args.bntx, "new BNTX")?).map_err(|e| anyhow!("{e}"))?;
 
     let diff = diff_layouts(&old_bflyt, &old_bntx, &new_bflyt, &new_bntx);
 
@@ -104,7 +110,10 @@ fn print_summary(diff: &LayoutDiff) {
     let n = &diff.bntx;
     println!("BNTX:");
     for t in &n.textures_added {
-        println!("  + texture {} ({}x{} {})", t.name, t.width, t.height, t.format);
+        println!(
+            "  + texture {} ({}x{} {})",
+            t.name, t.width, t.height, t.format
+        );
     }
     print_list("  - texture", &n.textures_removed);
     for c in &n.textures_changed {

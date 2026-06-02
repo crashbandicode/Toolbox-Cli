@@ -85,7 +85,13 @@ pub fn audit_path_with_dicts(root: &Path, dicts: &DictRegistry) -> Result<AuditR
 
     if root.is_file() {
         let bytes = std::fs::read(root)?;
-        audit_entry(&root.display().to_string(), &bytes, dicts, &mut totals, &mut files);
+        audit_entry(
+            &root.display().to_string(),
+            &bytes,
+            dicts,
+            &mut totals,
+            &mut files,
+        );
     } else if root.is_dir() {
         for entry in WalkDir::new(root).sort_by_file_name() {
             let entry =
@@ -126,7 +132,10 @@ fn is_auditable(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => {
             let ext = ext.to_ascii_lowercase();
-            matches!(ext.as_str(), "bflyt" | "bntx" | "bflan" | "arc" | "szs" | "zs")
+            matches!(
+                ext.as_str(),
+                "bflyt" | "bntx" | "bflan" | "arc" | "szs" | "zs"
+            )
         }
         None => false,
     }
@@ -190,7 +199,9 @@ fn audit_bflyt(path: &str, bytes: &[u8], totals: &mut AuditTotals, files: &mut V
             let major = (b.version >> 24) & 0xff;
             if major >= 9 {
                 totals.bflyt_v9 += 1;
-                findings.push(format!("BFLYT version {major}.x (v9 material extension is opaque)"));
+                findings.push(format!(
+                    "BFLYT version {major}.x (v9 material extension is opaque)"
+                ));
             }
             let untrusted = b.materials.iter().filter(|m| m.flags_untrusted).count();
             if untrusted > 0 {
@@ -200,7 +211,11 @@ fn audit_bflyt(path: &str, bytes: &[u8], totals: &mut AuditTotals, files: &mut V
                     "{untrusted} material(s) with untrusted flags (malformed mat1, recovered)"
                 ));
             }
-            let v9_ext = b.materials.iter().filter(|m| !m.trailing.is_empty()).count();
+            let v9_ext = b
+                .materials
+                .iter()
+                .filter(|m| !m.trailing.is_empty())
+                .count();
             if v9_ext > 0 {
                 totals.bflyt_with_v9_mat_extension += 1;
                 totals.v9_extension_materials += v9_ext;

@@ -53,7 +53,8 @@ pub fn run(args: Args) -> Result<ExitCode> {
         ));
     }
 
-    let packed = repack(&original, &bfres, args.level, args.allow_resize).map_err(|e| anyhow!("{e}"))?;
+    let packed =
+        repack(&original, &bfres, args.level, args.allow_resize).map_err(|e| anyhow!("{e}"))?;
 
     // Self-verify: the repacked container must decode back to the exact BFRES.
     let check = read_mc(&packed).map_err(|e| anyhow!("re-reading repacked: {e}"))?;

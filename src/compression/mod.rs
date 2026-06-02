@@ -143,7 +143,10 @@ mod tests {
         let dicts = DictRegistry::new();
         let plain = b"SARC and friends, not compressed";
         let out = decompress(plain, &dicts).unwrap();
-        assert!(matches!(out, Cow::Borrowed(_)), "uncompressed should not copy");
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "uncompressed should not copy"
+        );
         assert_eq!(&*out, plain);
     }
 

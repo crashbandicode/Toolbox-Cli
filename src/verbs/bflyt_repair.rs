@@ -46,13 +46,24 @@ pub fn run(args: Args) -> Result<ExitCode> {
         println!("  rename pane '{old}' -> '{new}'");
     }
     if report.fixed_texture_refs > 0 {
-        println!("  clamped {} dangling texture ref(s) into range", report.fixed_texture_refs);
+        println!(
+            "  clamped {} dangling texture ref(s) into range",
+            report.fixed_texture_refs
+        );
     }
     if !report.removed_materials.is_empty() {
-        println!("  removed {} material(s): {}", report.removed_materials.len(), report.removed_materials.join(", "));
+        println!(
+            "  removed {} material(s): {}",
+            report.removed_materials.len(),
+            report.removed_materials.join(", ")
+        );
     }
     if !report.removed_textures.is_empty() {
-        println!("  removed {} texture(s): {}", report.removed_textures.len(), report.removed_textures.join(", "));
+        println!(
+            "  removed {} texture(s): {}",
+            report.removed_textures.len(),
+            report.removed_textures.join(", ")
+        );
     }
     if report.materials_prune_skipped {
         println!("  note: material pruning skipped (layout has prt1 property data)");
@@ -66,6 +77,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
     let written = write_bflyt(&bflyt).map_err(|e| anyhow!("{e}"))?;
     let target = args.out.as_deref().unwrap_or(&args.input);
     super::write_output(target, &written)?;
-    println!("ok: repaired -> {} ({} bytes)", target.display(), written.len());
+    println!(
+        "ok: repaired -> {} ({} bytes)",
+        target.display(),
+        written.len()
+    );
     Ok(ExitCode::SUCCESS)
 }

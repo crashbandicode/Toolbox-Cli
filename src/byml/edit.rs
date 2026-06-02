@@ -366,6 +366,9 @@ mod tests {
             set_by_path(&mut t, "/SystemData/Hp", "not-a-number", None),
             Err(BymlError::ValueParse { ty: "u32", .. })
         ));
-        assert!(matches!(ScalarType::parse("vec3"), Err(BymlError::UnknownScalarType(_))));
+        assert!(matches!(
+            ScalarType::parse("vec3"),
+            Err(BymlError::UnknownScalarType(_))
+        ));
     }
 }

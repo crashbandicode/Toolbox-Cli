@@ -63,14 +63,22 @@ fn mc_extract_matches_reference_bfres() {
     let mc_path = mc_dir().join("Animal_Bass.Bass.bfres.mc");
     let ref_path = Path::new("tests/fixtures/bfres/Animal_Bass.Bass.bfres");
     if !mc_path.exists() || !ref_path.exists() {
-        eprintln!("skipping (need {} + {})", mc_path.display(), ref_path.display());
+        eprintln!(
+            "skipping (need {} + {})",
+            mc_path.display(),
+            ref_path.display()
+        );
         return;
     }
     let mc = read_mc(&std::fs::read(&mc_path).unwrap()).unwrap();
     let extracted = extract(&mc).expect("mc-extract");
     let reference = std::fs::read(ref_path).unwrap();
     let real = u32::from_le_bytes(reference[0x1c..0x20].try_into().unwrap()) as usize;
-    assert_eq!(&extracted[..], &reference[..real], "extract != reference BFRES");
+    assert_eq!(
+        &extracted[..],
+        &reference[..real],
+        "extract != reference BFRES"
+    );
     assert_eq!(&extracted[0..4], b"FRES");
 }
 

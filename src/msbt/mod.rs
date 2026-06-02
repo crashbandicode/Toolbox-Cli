@@ -139,7 +139,10 @@ impl Message {
                     vec![TextChunk::Text(s)]
                 }
             }
-            Encoding::Utf32 => vec![TextChunk::Text(format!("<utf-32 {} bytes>", self.raw.len()))],
+            Encoding::Utf32 => vec![TextChunk::Text(format!(
+                "<utf-32 {} bytes>",
+                self.raw.len()
+            ))],
         }
     }
 
@@ -262,10 +265,11 @@ impl MsbtDocument {
     /// unknown or its index is out of range (no change made). Serialize with
     /// [`write_msbt_canonical`] afterward.
     pub fn set_message_by_label(&mut self, label: &str, message: Message) -> bool {
-        let Some(index) = self
-            .labels()
-            .and_then(|ls| ls.iter().find(|l| l.name == label).map(|l| l.index as usize))
-        else {
+        let Some(index) = self.labels().and_then(|ls| {
+            ls.iter()
+                .find(|l| l.name == label)
+                .map(|l| l.index as usize)
+        }) else {
             return false;
         };
         for s in &mut self.sections {

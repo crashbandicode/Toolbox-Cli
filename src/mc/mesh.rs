@@ -183,7 +183,13 @@ mod tests {
 
     /// Build a synthetic `.mc`: a real magicless-zstd BFRES frame (has-mesh flag
     /// set) + 4-align pad + a hand-built FMSH section with `payload` bytes.
-    fn synthetic_mc(sub_a: u32, sub_b: u32, buf_a: u32, buf_b: u32, compressed_size: u32) -> Vec<u8> {
+    fn synthetic_mc(
+        sub_a: u32,
+        sub_b: u32,
+        buf_a: u32,
+        buf_b: u32,
+        compressed_size: u32,
+    ) -> Vec<u8> {
         let mut bfres = vec![0u8; 0x100];
         bfres[0..4].copy_from_slice(b"FRES");
         bfres[0xEE] = 0x08; // has-mesh flag

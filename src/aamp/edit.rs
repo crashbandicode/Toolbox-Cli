@@ -69,7 +69,9 @@ pub fn set_by_path(root: &mut ParameterList, path: &str, raw: &str) -> Result<Se
         .params
         .iter_mut()
         .find(|p| p.name_hash == ph)
-        .ok_or_else(|| AampError::Edit(format!("parameter {param_seg:?} (0x{ph:08x}) not found")))?;
+        .ok_or_else(|| {
+            AampError::Edit(format!("parameter {param_seg:?} (0x{ph:08x}) not found"))
+        })?;
 
     let old = param.value.summary();
     param.value = parse_into_type(&param.value, raw)?;
@@ -84,7 +86,12 @@ pub fn set_by_path(root: &mut ParameterList, path: &str, raw: &str) -> Result<Se
 /// Parse `raw` into a value matching `existing`'s type (type-preserving).
 fn parse_into_type(existing: &Value, raw: &str) -> Result<Value> {
     let r = raw.trim();
-    let err = || AampError::Edit(format!("cannot parse {raw:?} as {}", existing.param_type().label()));
+    let err = || {
+        AampError::Edit(format!(
+            "cannot parse {raw:?} as {}",
+            existing.param_type().label()
+        ))
+    };
     Ok(match existing {
         Value::Bool(_) => Value::Bool(match r.to_ascii_lowercase().as_str() {
             "true" | "1" | "yes" | "on" => true,
@@ -145,7 +152,7 @@ fn parse_floats<const N: usize>(raw: &str) -> Result<[f32; N]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aamp::{Parameter, ParameterObject, ParamType};
+    use crate::aamp::{ParamType, Parameter, ParameterObject};
 
     fn tree() -> ParameterList {
         ParameterList {
@@ -164,13 +171,28 @@ mod tests {
             objects: vec![ParameterObject {
                 name_hash: crc32(b"WeaponCommon"),
                 params: vec![
-                    Parameter { name_hash: crc32(b"Atk"), value: Value::Int(10) },
+                    Parameter {
+                        name_hash: crc32(b"Atk"),
+                        value: Value::Int(10),
+                    },
                     Parameter {
                         name_hash: crc32(b"Name"),
-                        value: Value::Str { ty: ParamType::String64, value: "old".into() },
+                        value: Value::Str {
+                            ty: ParamType::String64,
+                            value: "old".into(),
+                        },
                     },
-                    Parameter { name_hash: crc32(b"Tint"), value: Value::Color([0.0, 0.0, 0.0, 1.0]) },
-                    Parameter { name_hash: crc32(b"Curve"), value: Value::Curve { ty: ParamType::Curve1, raw: vec![0; 128] } },
+                    Parameter {
+                        name_hash: crc32(b"Tint"),
+                        value: Value::Color([0.0, 0.0, 0.0, 1.0]),
+                    },
+                    Parameter {
+                        name_hash: crc32(b"Curve"),
+                        value: Value::Curve {
+                            ty: ParamType::Curve1,
+                            raw: vec![0; 128],
+                        },
+                    },
                 ],
             }],
         }
@@ -201,7 +223,10 @@ mod tests {
         set_by_path(&mut t, "WeaponCommon/Name", "Master Sword").unwrap();
         assert_eq!(
             find_value(&t, "WeaponCommon", "Name"),
-            Value::Str { ty: ParamType::String64, value: "Master Sword".into() }
+            Value::Str {
+                ty: ParamType::String64,
+                value: "Master Sword".into()
+            }
         );
     }
 
@@ -209,7 +234,10 @@ mod tests {
     fn sets_color_from_csv() {
         let mut t = tree();
         set_by_path(&mut t, "WeaponCommon/Tint", "1.0, 0.5, 0.25, 1.0").unwrap();
-        assert_eq!(find_value(&t, "WeaponCommon", "Tint"), Value::Color([1.0, 0.5, 0.25, 1.0]));
+        assert_eq!(
+            find_value(&t, "WeaponCommon", "Tint"),
+            Value::Color([1.0, 0.5, 0.25, 1.0])
+        );
     }
 
     #[test]

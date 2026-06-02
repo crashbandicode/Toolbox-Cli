@@ -452,10 +452,16 @@ pub fn apply_manifest_to_arc(
     let mut arc = read_arc(arc_bytes)?;
 
     let bflyt_idx = arc.position(&opts.bflyt_rel).ok_or_else(|| {
-        Error::Manifest(format!("BFLYT entry '{}' not found in archive", opts.bflyt_rel))
+        Error::Manifest(format!(
+            "BFLYT entry '{}' not found in archive",
+            opts.bflyt_rel
+        ))
     })?;
     let bntx_idx = arc.position(&opts.bntx_rel).ok_or_else(|| {
-        Error::Manifest(format!("BNTX entry '{}' not found in archive", opts.bntx_rel))
+        Error::Manifest(format!(
+            "BNTX entry '{}' not found in archive",
+            opts.bntx_rel
+        ))
     })?;
 
     let mut bflyt = read_bflyt(&arc.files[bflyt_idx].data)?;

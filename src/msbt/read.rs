@@ -264,7 +264,7 @@ mod tests {
         lbl1.extend_from_slice(&1u32.to_le_bytes()); // ngroups
         lbl1.extend_from_slice(&2u32.to_le_bytes()); // group 0 count
         lbl1.extend_from_slice(&12u32.to_le_bytes()); // group 0 offset (4 + 8)
-        // entries at offset 12
+                                                      // entries at offset 12
         for (name, idx) in [("Greeting", 0u32), ("Reply", 1u32)] {
             lbl1.push(name.len() as u8);
             lbl1.extend_from_slice(name.as_bytes());
@@ -412,7 +412,11 @@ mod tests {
             .unwrap();
         let section_count = doc.sections.len();
 
-        let new = Message::from_chunks(&[TextChunk::Text("Bye".into())], doc.encoding, doc.big_endian);
+        let new = Message::from_chunks(
+            &[TextChunk::Text("Bye".into())],
+            doc.encoding,
+            doc.big_endian,
+        );
         assert!(doc.set_message_by_label("Greeting", new));
         let doc2 = read_msbt(&write_msbt_canonical(&doc).unwrap()).expect("re-parse");
 
@@ -450,7 +454,10 @@ mod tests {
         let c1 = write_msbt_canonical(&doc).expect("canonical 1");
         let d1 = read_msbt(&c1).expect("re-parse 1");
         let c2 = write_msbt_canonical(&d1).expect("canonical 2");
-        assert_eq!(c2, c1, "canonical writer must be byte-stable across re-writes");
+        assert_eq!(
+            c2, c1,
+            "canonical writer must be byte-stable across re-writes"
+        );
     }
 
     #[test]

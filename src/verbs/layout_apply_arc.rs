@@ -103,8 +103,13 @@ pub fn run(args: Args) -> Result<ExitCode> {
         skip_existing: args.skip_existing,
     };
 
-    let (out_arc, report) =
-        apply_manifest_to_arc(&arc_bytes, &manifest, &args.skin_dir, &opts, args.strict_dimensions)?;
+    let (out_arc, report) = apply_manifest_to_arc(
+        &arc_bytes,
+        &manifest,
+        &args.skin_dir,
+        &opts,
+        args.strict_dimensions,
+    )?;
 
     let valid = report.validation.all_passed();
     println!(
@@ -117,7 +122,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
         report.out_arc_len
     );
     if !valid {
-        eprintln!("validation FAILED for {} element(s):", report.validation.failed);
+        eprintln!(
+            "validation FAILED for {} element(s):",
+            report.validation.failed
+        );
         for r in report.validation.results.iter().filter(|r| !r.ok) {
             eprintln!("  {}: {}", r.pane_name, r.failures.join("; "));
         }

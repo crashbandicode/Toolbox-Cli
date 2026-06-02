@@ -45,8 +45,13 @@ fn edit_real_string_leaf_changes_exactly_one_path() {
     );
 
     let mut root = doc.root;
-    let report =
-        set_by_path(&mut root, "/RecipeList/0/ResultActorName", "Item_Cook_TEST", None).unwrap();
+    let report = set_by_path(
+        &mut root,
+        "/RecipeList/0/ResultActorName",
+        "Item_Cook_TEST",
+        None,
+    )
+    .unwrap();
     assert_eq!(report.path, "/RecipeList/0/ResultActorName");
     assert_eq!(report.old, "string(\"Item_Cook_C_16\")");
     assert_eq!(report.new, "string(\"Item_Cook_TEST\")");
@@ -63,7 +68,12 @@ fn edit_real_string_leaf_changes_exactly_one_path() {
     let d = diff_byml(&original, &reread);
     assert!(d.added.is_empty(), "no additions, got {:?}", d.added);
     assert!(d.removed.is_empty(), "no removals, got {:?}", d.removed);
-    assert_eq!(d.changed.len(), 1, "exactly one change, got {:?}", d.changed);
+    assert_eq!(
+        d.changed.len(),
+        1,
+        "exactly one change, got {:?}",
+        d.changed
+    );
     assert_eq!(d.changed[0].path, "/RecipeList/0/ResultActorName");
 }
 
@@ -77,7 +87,9 @@ fn type_preserving_numeric_edit_keeps_kind() {
     let doc = read_byml(&std::fs::read(&path).unwrap()).unwrap();
     let original = doc.root.clone();
     let target = "/RecipeList/0/SingleRecipeMaterialNum";
-    let before = get(&original, target).expect("numeric leaf present").clone();
+    let before = get(&original, target)
+        .expect("numeric leaf present")
+        .clone();
 
     let mut root = doc.root;
     set_by_path(&mut root, target, "7", None).unwrap();

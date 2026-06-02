@@ -716,7 +716,12 @@ mod tests {
         assert!(b.set_text("NotText", "x").is_err());
         // A pane with a per-character transform offset is rejected.
         let mut b = one_pane(txt("Fancy", "hi"));
-        b.find_pane_mut("Fancy").unwrap().text.as_mut().unwrap().per_character_transform_offset = 0x100;
+        b.find_pane_mut("Fancy")
+            .unwrap()
+            .text
+            .as_mut()
+            .unwrap()
+            .per_character_transform_offset = 0x100;
         assert!(b.set_text("Fancy", "x").is_err());
         assert!(b.pane_text("Fancy").is_none());
     }
@@ -734,7 +739,7 @@ mod tests {
         assert_eq!(w.stretch_l, 4);
         assert_eq!(w.frame_size_t, 7);
         assert_eq!(w.stretch_r, 0); // untouched
-        // Non-window pane errors.
+                                    // Non-window pane errors.
         assert!(b.set_window("RootPane", &edit).is_err());
     }
 
@@ -870,7 +875,8 @@ mod tests {
     #[test]
     fn copy_subtree_explicit_root_name() {
         let mut b = sample();
-        b.copy_subtree("A", Some("Clone"), Some("RootPane"), "_2").unwrap();
+        b.copy_subtree("A", Some("Clone"), Some("RootPane"), "_2")
+            .unwrap();
         assert!(b.pane_exists("Clone"));
         assert!(b.pane_exists("A1_2"));
     }
@@ -889,7 +895,8 @@ mod tests {
     fn ops_survive_write_read_round_trip() {
         let mut b = sample();
         b.rename_pane("B", "B_renamed").unwrap();
-        b.copy_subtree("A", Some("A_copy"), Some("RootPane"), "_cp").unwrap();
+        b.copy_subtree("A", Some("A_copy"), Some("RootPane"), "_cp")
+            .unwrap();
         b.remove_pane("A2").unwrap();
 
         let bytes = crate::bflyt::write_bflyt(&b).unwrap();

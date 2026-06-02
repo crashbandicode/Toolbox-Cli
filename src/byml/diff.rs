@@ -149,7 +149,12 @@ mod tests {
     use super::*;
 
     fn hash(pairs: &[(&str, Byml)]) -> Byml {
-        Byml::Hash(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+        Byml::Hash(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        )
     }
 
     #[test]
@@ -171,11 +176,27 @@ mod tests {
             ("fresh", Byml::Bool(true)),
         ]);
         let d = diff_byml(&old, &new);
-        assert_eq!(d.added, vec![DiffEntry { path: "/fresh".into(), value: "bool(true)".into() }]);
-        assert_eq!(d.removed, vec![DiffEntry { path: "/gone".into(), value: "string(\"bye\")".into() }]);
+        assert_eq!(
+            d.added,
+            vec![DiffEntry {
+                path: "/fresh".into(),
+                value: "bool(true)".into()
+            }]
+        );
+        assert_eq!(
+            d.removed,
+            vec![DiffEntry {
+                path: "/gone".into(),
+                value: "string(\"bye\")".into()
+            }]
+        );
         assert_eq!(
             d.changed,
-            vec![ChangedEntry { path: "/change".into(), old: "u32(2)".into(), new: "u32(99)".into() }]
+            vec![ChangedEntry {
+                path: "/change".into(),
+                old: "u32(2)".into(),
+                new: "u32(99)".into()
+            }]
         );
     }
 
@@ -196,7 +217,13 @@ mod tests {
                 new: "string(\"two\")".into()
             }]
         );
-        assert_eq!(d.added, vec![DiffEntry { path: "/list/2".into(), value: "u32(3)".into() }]);
+        assert_eq!(
+            d.added,
+            vec![DiffEntry {
+                path: "/list/2".into(),
+                value: "u32(3)".into()
+            }]
+        );
         assert!(d.removed.is_empty());
     }
 }

@@ -12,8 +12,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use nx_layout_toolbox::bntx::read_bntx;
 use nx_layout_toolbox::bflyt::read_bflyt;
+use nx_layout_toolbox::bntx::read_bntx;
 use nx_layout_toolbox::layout::{apply_manifest_to_arc, validate_manifest_in_memory, ApplyOptions};
 use nx_layout_toolbox::manifest::{SkinElement, SkinManifest};
 use nx_layout_toolbox::sarc::read_arc;
@@ -48,7 +48,10 @@ fn write_test_png(path: &Path, w: u32, h: u32) {
 fn apply_arc_round_trips_against_info_melee() {
     let arc_path = Path::new("tests/fixtures/archives/info_melee_original.layout.arc");
     if !arc_path.exists() {
-        eprintln!("skipping layout-apply-arc test (no fixture at {})", arc_path.display());
+        eprintln!(
+            "skipping layout-apply-arc test (no fixture at {})",
+            arc_path.display()
+        );
         return;
     }
     let arc_bytes = std::fs::read(arc_path).expect("read arc fixture");
@@ -90,9 +93,17 @@ fn apply_arc_round_trips_against_info_melee() {
     assert!(
         report.validation.all_passed(),
         "post-apply validation failed: {:?}",
-        report.validation.results.iter().filter(|r| !r.ok).collect::<Vec<_>>()
+        report
+            .validation
+            .results
+            .iter()
+            .filter(|r| !r.ok)
+            .collect::<Vec<_>>()
     );
-    assert_eq!(report.file_count, input_count, "entry count must be preserved");
+    assert_eq!(
+        report.file_count, input_count,
+        "entry count must be preserved"
+    );
 
     // Re-open the produced archive and re-validate independently.
     let out = read_arc(&out_arc).expect("parse output arc");
@@ -161,7 +172,10 @@ fn apply_arc_round_trips_against_info_melee() {
         apply_manifest_to_arc(&out_arc, &manifest, skin.path(), &opts_skip, false)
             .expect("idempotent re-apply");
     assert_eq!(report2.applied, 0, "re-apply should add nothing");
-    assert_eq!(report2.skipped, 2, "re-apply should skip both existing elements");
+    assert_eq!(
+        report2.skipped, 2,
+        "re-apply should skip both existing elements"
+    );
     assert!(report2.validation.all_passed());
 
     println!(

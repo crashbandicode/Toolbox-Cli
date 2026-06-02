@@ -102,8 +102,14 @@ fn every_bflan_in_fixtures_round_trips_byte_identically() {
     }
 
     // The corpus must actually exercise both decoders.
-    assert!(pat1_decoded > 0, "no pat1 sections decoded across the corpus");
-    assert!(pai1_decoded > 0, "no pai1 sections decoded across the corpus");
+    assert!(
+        pat1_decoded > 0,
+        "no pat1 sections decoded across the corpus"
+    );
+    assert!(
+        pai1_decoded > 0,
+        "no pai1 sections decoded across the corpus"
+    );
 
     println!(
         "OK: {tested} BFLAN fixture(s) round-tripped byte-identically \

@@ -47,9 +47,17 @@ fn diff_original_vs_generated_sgpo() {
 
     // BFLYT: exactly the SGPO additions, nothing removed or changed.
     let b = &diff.bflyt;
-    assert!(b.textures_added.is_empty(), "unexpected txl1 additions: {:?}", b.textures_added);
+    assert!(
+        b.textures_added.is_empty(),
+        "unexpected txl1 additions: {:?}",
+        b.textures_added
+    );
     assert!(b.textures_removed.is_empty());
-    assert!(b.materials_added.is_empty(), "unexpected material additions: {:?}", b.materials_added);
+    assert!(
+        b.materials_added.is_empty(),
+        "unexpected material additions: {:?}",
+        b.materials_added
+    );
     assert!(b.materials_removed.is_empty());
     assert!(b.materials_changed.is_empty());
     assert!(b.panes_removed.is_empty());
@@ -83,7 +91,11 @@ fn diff_original_vs_generated_sgpo() {
     }
 
     // BNTX is unchanged (the generated layout reuses stock textures).
-    assert!(diff.bntx.is_empty(), "expected no BNTX changes; got {:?}", diff.bntx);
+    assert!(
+        diff.bntx.is_empty(),
+        "expected no BNTX changes; got {:?}",
+        diff.bntx
+    );
 
     // Direction check: reversing old/new turns additions into removals.
     let rev = diff_layouts(&gb, &gn, &ob, &on);
@@ -91,8 +103,14 @@ fn diff_original_vs_generated_sgpo() {
     assert!(rev.bflyt.panes_added.is_empty());
 
     // Self-diff is empty for both layouts.
-    assert!(diff_layouts(&ob, &on, &ob, &on).is_empty(), "self-diff (orig) not empty");
-    assert!(diff_layouts(&gb, &gn, &gb, &gn).is_empty(), "self-diff (gen) not empty");
+    assert!(
+        diff_layouts(&ob, &on, &ob, &on).is_empty(),
+        "self-diff (orig) not empty"
+    );
+    assert!(
+        diff_layouts(&gb, &gn, &gb, &gn).is_empty(),
+        "self-diff (gen) not empty"
+    );
 
     println!(
         "OK: layout-diff original->SGPO = {} panes added (sgpo_root + {} markers), BNTX unchanged",

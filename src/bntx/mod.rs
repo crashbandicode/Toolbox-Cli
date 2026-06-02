@@ -333,7 +333,7 @@ impl AstcBlock {
         match rel % 4 {
             0 => Self::from_index(idx).map(|b| (b, false)), // UNORM
             1 => Self::from_index(idx).map(|b| (b, true)),  // UNORM_SRGB
-            _ => None,                                       // TYPELESS / reserved
+            _ => None,                                      // TYPELESS / reserved
         }
     }
 

@@ -141,12 +141,13 @@ impl Ctx<'_> {
             ParamType::Vec4 => Value::Vec4(self.read_floats::<4>(at)?),
             ParamType::Color => Value::Color(self.read_floats::<4>(at)?),
             ParamType::Quat => Value::Quat(self.read_floats::<4>(at)?),
-            ParamType::String32 | ParamType::String64 | ParamType::String256 | ParamType::StringRef => {
-                Value::Str {
-                    ty,
-                    value: read_cstring(self.data, at)?,
-                }
-            }
+            ParamType::String32
+            | ParamType::String64
+            | ParamType::String256
+            | ParamType::StringRef => Value::Str {
+                ty,
+                value: read_cstring(self.data, at)?,
+            },
             ParamType::Curve1 | ParamType::Curve2 | ParamType::Curve3 | ParamType::Curve4 => {
                 let size = ty.curve_count() * CURVE_SIZE;
                 self.need(at, size)?;
@@ -155,7 +156,12 @@ impl Ctx<'_> {
                     raw: self.data[at..at + size].to_vec(),
                 }
             }
-            ParamType::BufferInt => Value::BufferInt(self.read_buffer_u32(at)?.into_iter().map(|v| v as i32).collect()),
+            ParamType::BufferInt => Value::BufferInt(
+                self.read_buffer_u32(at)?
+                    .into_iter()
+                    .map(|v| v as i32)
+                    .collect(),
+            ),
             ParamType::BufferU32 => Value::BufferU32(self.read_buffer_u32(at)?),
             ParamType::BufferF32 => Value::BufferF32(
                 self.read_buffer_u32(at)?
@@ -241,7 +247,10 @@ fn read_cstring(data: &[u8], off: usize) -> Result<String> {
     let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
     std::str::from_utf8(&rest[..end])
         .map(|s| s.to_string())
-        .map_err(|e| AampError::NonUtf8 { offset: off, source: e })
+        .map_err(|e| AampError::NonUtf8 {
+            offset: off,
+            source: e,
+        })
 }
 
 #[cfg(test)]
@@ -261,7 +270,7 @@ mod tests {
         b[0x1c..0x20].copy_from_slice(&1u32.to_le_bytes()); // num_objects
         b[0x20..0x24].copy_from_slice(&1u32.to_le_bytes()); // num_params
         b[0x24..0x28].copy_from_slice(&4u32.to_le_bytes()); // data section size
-        // Type string "xml\0" at 0x30.
+                                                            // Type string "xml\0" at 0x30.
         b.extend_from_slice(b"xml\0");
         // Root list at 0x34.
         let root = b.len();
@@ -271,17 +280,17 @@ mod tests {
         push_u32(&mut b, 0xAABB_CCDD); // name hash
         push_u32(&mut b, 0); // no child lists {offset:0, count:0}
         push_u32(&mut b, (obj_off as u32 / 4) | (1u32 << 16)); // 1 object
-        // Object at root + 0xC.
+                                                               // Object at root + 0xC.
         let obj = b.len();
         assert_eq!(obj - root, obj_off);
         let param_off = 8; // param right after the 0x8 object header
         push_u32(&mut b, 0x1122_3344); // object name
         push_u32(&mut b, (param_off as u32 / 4) | (1u32 << 16)); // 1 param
-        // Param at obj + 8.
+                                                                 // Param at obj + 8.
         let param = b.len();
         assert_eq!(param - obj, param_off);
         push_u32(&mut b, 0x5566_7788); // param name
-        // data lives right after the 8-byte param node.
+                                       // data lives right after the 8-byte param node.
         let data_off_words = 8u32 / 4;
         let ty = ParamType::F32.to_u8() as u32;
         push_u32(&mut b, (data_off_words & 0x00FF_FFFF) | (ty << 24));

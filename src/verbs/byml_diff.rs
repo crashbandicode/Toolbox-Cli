@@ -73,11 +73,19 @@ pub fn run(args: Args) -> Result<ExitCode> {
     }
 
     if diff.is_empty() {
-        println!("no differences ({} vs {})", args.old.display(), args.new.display());
+        println!(
+            "no differences ({} vs {})",
+            args.old.display(),
+            args.new.display()
+        );
         return Ok(ExitCode::SUCCESS);
     }
 
-    let cap = if args.limit == 0 { usize::MAX } else { args.limit };
+    let cap = if args.limit == 0 {
+        usize::MAX
+    } else {
+        args.limit
+    };
     println!(
         "{} -> {}: +{} -{} ~{}",
         args.old.display(),

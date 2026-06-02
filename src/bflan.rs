@@ -247,7 +247,11 @@ fn read_zstring(d: &[u8], start: usize) -> String {
     if start >= d.len() {
         return String::new();
     }
-    let z = d[start..].iter().position(|&c| c == 0).map(|p| start + p).unwrap_or(d.len());
+    let z = d[start..]
+        .iter()
+        .position(|&c| c == 0)
+        .map(|p| start + p)
+        .unwrap_or(d.len());
     String::from_utf8_lossy(&d[start..z]).into_owned()
 }
 

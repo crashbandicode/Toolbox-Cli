@@ -117,7 +117,11 @@ fn multi_mip_and_cube_decode_dimensions() {
     // Face 0 and face 5 at mip 0, plus a middle face at a deeper mip.
     for layer in [0u32, 5] {
         let img = decode_texture_image(&bntx, cube, 0, layer, true).expect("decode cube face");
-        assert_eq!((img.width, img.height), (64, 64), "cube layer {layer} mip 0");
+        assert_eq!(
+            (img.width, img.height),
+            (64, 64),
+            "cube layer {layer} mip 0"
+        );
     }
     let deep = decode_texture_image(&bntx, cube, 2, 3, true).expect("decode cube deep mip");
     assert_eq!((deep.width, deep.height), (16, 16), "cube layer 3 mip 2");
