@@ -352,6 +352,228 @@ pub fn decode_zstd_window(
     Ok((state.out, src_start + srcsize))
 }
 
+/// The vertex coder's reverse-A bit reader, in the decoder's own
+/// `(ptr, acc, bitpos)` representation (`0x10f8d20` / `0x110e7b0`). The bit
+/// convention is identical to [`zstd_pure::bits::ReverseBitReader`] (MSB-first,
+/// read backwards from the end), but the decoder threads this `(ptr, acc,
+/// bitpos)` triple through `ctx` between successive readers, so the coder keeps
+/// that exact representation rather than converting to/from a `ReverseBitReader`
+/// at every reader boundary (the table builder above reads inline the same way).
+///
+/// `acc` holds the unconsumed bits left-aligned (the next bit is the MSB):
+/// [`RevReader::refill`] ORs `u64_le[ptr] >> bitpos` into `acc`, and
+/// [`RevReader::take`] extracts the top `n` bits, consumes them (`acc <<= n`),
+/// and advances `ptr -= (bitpos >> 3) ^ 7`, `bitpos = (bitpos | 0x38) - n`.
+struct RevReader {
+    ptr: usize,
+    acc: u64,
+    bitpos: u32,
+}
+
+impl RevReader {
+    /// Merge fresh stream bits into the low (consumed) end of the accumulator.
+    #[inline]
+    fn refill(&mut self, buf: &[u8]) {
+        self.acc |= u64_le(buf, self.ptr) >> (self.bitpos & 63);
+    }
+
+    /// Leading zeros of the accumulator — the unary `clz` prefix length.
+    #[inline]
+    fn clz(&self) -> u32 {
+        self.acc.leading_zeros()
+    }
+
+    /// Extract and consume the top `n` bits (`1..=64`), advancing the cursor.
+    /// Shifts use ARM's `& 63` masking (so `n == 64` is a no-op consume, exactly
+    /// as the `lsl x,x,x` / `lsr x,x,x` instructions behave).
+    #[inline]
+    fn take(&mut self, n: u32) -> u64 {
+        let val = self.acc.wrapping_shr(n.wrapping_neg()); // acc >> ((64 - n) & 63)
+        self.acc = self.acc.wrapping_shl(n);
+        self.ptr = self.ptr.wrapping_sub(((self.bitpos >> 3) ^ 7) as usize);
+        self.bitpos = (self.bitpos | 0x38).wrapping_sub(n);
+        val
+    }
+}
+
+/// Zig-zag decode (`(v >> 1) ^ -(v & 1)`), returned as a two's-complement `u32`
+/// so it adds to a running frequency with wrapping arithmetic.
+#[inline]
+fn unzigzag(v: u32) -> u32 {
+    (v >> 1) ^ (v & 1).wrapping_neg()
+}
+
+/// The adaptive-width state update shared by both frequency-reader paths
+/// (`0x110e860` / `0x110e920`): blend the current width toward a target derived
+/// from the decoded value's magnitude, then clamp by the remaining mass.
+/// `w10 = 16 - w4`. `clz << 10` saturates at `0x8000` (`clz == 32`), so each
+/// `0x8000 - (clz << 10)` term stays in `0..=0x8000`.
+#[inline]
+fn freq_width_update(w15: u32, w10: u32, w4: u32, value_clz_src: u32, rem: u32) -> u32 {
+    let blended = w15.wrapping_mul(w10);
+    let target = 0x8000u32.wrapping_sub(value_clz_src.leading_zeros() << 10);
+    let w = target.wrapping_mul(w4).wrapping_add(blended) >> 4;
+    let cap = 0x8000u32.wrapping_sub(rem.leading_zeros() << 10);
+    if cap < w {
+        cap
+    } else {
+        w
+    }
+}
+
+/// The decoded result of the rANS **frequency reader** (`0x110e7b0`).
+#[derive(Debug, Clone)]
+pub struct FreqRead {
+    /// The `count` decoded symbol frequencies (stored as `u16` by the decoder).
+    pub freqs: Vec<u16>,
+    /// The implicit final `(count + 1)`-th frequency, `M - sum(freqs)` (returned
+    /// in the high word of the function's result; the table builder appends it).
+    pub rem: u32,
+    /// Advanced reverse-A pointer (payload offset).
+    pub rev_ptr: usize,
+    /// Advanced reverse-A accumulator.
+    pub rev_acc: u64,
+    /// Advanced reverse-A bit position.
+    pub rev_bitpos: u32,
+}
+
+/// Read a rANS segment's symbol frequencies from reverse-A (`0x110e7b0`).
+///
+/// The table for one rANS segment has `count + 1` symbols summing to `M`. This
+/// reads the first `count` as an **adaptive `clz`-prefix + zig-zag-delta** code
+/// and returns the last as `rem = M - sum`. Each frequency is `prev + zigzag(v)`
+/// where `v` is read MSB-first from reverse-A; the prefix length adapts via
+/// [`freq_width_update`]. A run of equal-width small deltas is encoded compactly:
+/// a `clz`-coded run length (`0x110e890`) followed by that many fixed-`width`
+/// values (`0x110e900`); when the run length would exceed the remaining symbols
+/// the rest are all one run (`0x110e8e8`). `init_freq` (`= M / (count + 1)`) and
+/// `M` are the decoder's packed `x5`; `width_init` (`w3`) and `w4` are the
+/// adaptive-width constants. The control flow mirrors the function's three read
+/// sites (labelled by their addresses) so every branch is the disassembled one.
+#[allow(clippy::too_many_arguments)]
+pub fn rans_read_freqs(
+    payload: &[u8],
+    rev_ptr: usize,
+    rev_acc: u64,
+    rev_bitpos: u32,
+    count: u32,
+    width_init: u32,
+    w4: u32,
+    m: u32,
+    init_freq: u32,
+) -> FreqRead {
+    let mut r = RevReader {
+        ptr: rev_ptr,
+        acc: rev_acc,
+        bitpos: rev_bitpos,
+    };
+    let w10 = 0x10u32.wrapping_sub(w4); // 16 - w4
+    let mut w15 = width_init << 10; // adaptive-width state
+    let mut freq = init_freq; // running frequency (w5)
+    let mut rem = m; // running remainder (w9) — the implicit last symbol
+    let mut remaining = count; // symbols still to read (w1)
+    let mut prime = 0u32; // entry prime `1 << width` after a run (w7)
+    let mut saved = 0u32; // remaining count saved across a run (w18)
+    let mut freqs: Vec<u16> = Vec::new();
+
+    enum Site {
+        Slow,    // 0x110e7f8
+        RunHead, // 0x110e890
+        RunBody, // 0x110e900
+        RunDone, // 0x110e7e4
+    }
+    let mut site = Site::Slow;
+    loop {
+        match site {
+            // 0x110e7e4: re-arm after a run group; restore the saved count.
+            Site::RunDone => {
+                prime = 1u32.wrapping_shl(w15 >> 10);
+                remaining = saved;
+                if saved == 0 {
+                    break;
+                }
+                site = Site::Slow;
+            }
+            // 0x110e7f8: one symbol with a full `clz` prefix.
+            Site::Slow => {
+                r.refill(payload);
+                remaining = remaining.wrapping_sub(1);
+                let exhausted = remaining == 0;
+                let width = w15 >> 10;
+                let nbits = width + (r.clz() << 1) + 1;
+                let val = r.take(nbits) as u32;
+                let raw = 0xffff_ffffu32
+                    .wrapping_shl(width)
+                    .wrapping_add(prime)
+                    .wrapping_add(val); // val - (1 << width) + prime
+                freq = freq.wrapping_add(unzigzag(raw));
+                rem = rem.wrapping_sub(freq);
+                freqs.push(freq as u16);
+                if exhausted {
+                    break;
+                }
+                w15 = freq_width_update(w15, w10, w4, raw, rem);
+                prime = 0;
+                site = if (raw >> width) != 0 {
+                    Site::Slow
+                } else {
+                    Site::RunHead
+                };
+            }
+            // 0x110e890: read a `clz`-coded run length (width 0).
+            Site::RunHead => {
+                r.refill(payload);
+                let bit_len = 0x20 - remaining.leading_zeros(); // bit_length(count)
+                let clz_acc = r.clz();
+                if bit_len <= clz_acc {
+                    // 0x110e8e8: the rest is a single run; skip the prefix bits.
+                    r.take(bit_len);
+                    saved = 0;
+                    site = Site::RunBody;
+                } else {
+                    let run = (r.take((clz_acc << 1) + 1) as u32).wrapping_sub(1);
+                    saved = remaining.wrapping_sub(run);
+                    remaining = run;
+                    site = if run != 0 {
+                        Site::RunBody
+                    } else {
+                        Site::RunDone
+                    };
+                }
+            }
+            // 0x110e900: a run of fixed-`width` small deltas.
+            Site::RunBody => {
+                r.refill(payload);
+                remaining = remaining.wrapping_sub(1);
+                let width = w15 >> 10;
+                // `take` advances the cursor for either width; the run-body's
+                // value idiom (`(acc >> 1) >> ~width`, 0x110e928) yields 0 for a
+                // zero-bit symbol, whereas the shared extraction would read the
+                // whole accumulator — so a `width == 0` symbol is a literal 0.
+                let raw = r.take(width);
+                let val = if width == 0 { 0 } else { raw as u32 };
+                freq = freq.wrapping_add(unzigzag(val));
+                rem = rem.wrapping_sub(freq);
+                w15 = freq_width_update(w15, w10, w4, val, rem);
+                freqs.push(freq as u16);
+                site = if remaining != 0 {
+                    Site::RunBody
+                } else {
+                    Site::RunDone
+                };
+            }
+        }
+    }
+
+    FreqRead {
+        freqs,
+        rem,
+        rev_ptr: r.ptr,
+        rev_acc: r.acc,
+        rev_bitpos: r.bitpos,
+    }
+}
+
 /// Decode `count` symbols with the vertex coder's **rANS** decoder (`0x110e270`).
 ///
 /// The custom vertex byte-group entropy is a standard range-ANS coder: `M =
@@ -632,6 +854,69 @@ mod tests {
         );
         assert_eq!(&out[220..], &[14, 13, 13, 14, 14, 13, 14, 13]);
         assert_eq!(out.iter().map(|&s| s as u32).sum::<u32>(), 2565);
+    }
+
+    /// The rANS frequency reader reproduces a real segment header byte-exact:
+    /// frequencies, the implicit remainder, and the advanced reverse-A cursor.
+    /// Inputs are the minimal reverse-A byte window the reader touches plus the
+    /// `(acc, bitpos)` and segment params captured from the decoder — no fixture
+    /// or oracle file. The expected outputs are the decoder's actual results.
+    ///
+    /// Bear's first freq segment (`M = 512`, 5 symbols): the canonical
+    /// `[95, 408, 7, 1, 1]` (four read + the remainder), slow path only.
+    #[test]
+    fn rans_read_freqs_bear_slow_path() {
+        let win = [
+            0x88, 0xff, 0x4f, 0x53, 0x86, 0x0f, 0x38, 0x11, 0x17, 0xed, 0xa7, 0x42, 0x42,
+        ];
+        let fr = rans_read_freqs(&win, 5, 0x8d82720662f204b8, 62, 4, 7, 15, 512, 102);
+        assert_eq!(fr.freqs, [95, 408, 7, 1]);
+        assert_eq!(fr.rem, 1, "implicit 5th symbol = M - sum");
+        assert_eq!(
+            fr.freqs.iter().map(|&f| f as u32).sum::<u32>() + fr.rem,
+            512
+        );
+        assert_eq!(fr.rev_ptr, 0);
+        assert_eq!(fr.rev_acc, 0x204b9090a9fb45c0);
+        assert_eq!(fr.rev_bitpos, 58);
+    }
+
+    /// A Bear segment that exercises **all four** read sites in one call: the
+    /// slow `clz` path (`0x110e7f8`), the run-length head (`0x110e890`), the
+    /// "rest is one run" branch (`0x110e8e8`), and the fixed-width run body
+    /// (`0x110e900`). `M = 512`, 6 symbols → `[9, 496, 3, 2, 1, 1]`.
+    #[test]
+    fn rans_read_freqs_bear_all_paths() {
+        let win = [
+            0xd9, 0x5d, 0xec, 0x75, 0x69, 0x8b, 0x11, 0x68, 0x2b, 0x87, 0xcb, 0x8b, 0x88, 0xff,
+        ];
+        let fr = rans_read_freqs(&win, 6, 0x45c44e03e194d3f8, 58, 5, 7, 15, 512, 85);
+        assert_eq!(fr.freqs, [9, 496, 3, 2, 1]);
+        assert_eq!(fr.rem, 1);
+        assert_eq!(
+            fr.freqs.iter().map(|&f| f as u32).sum::<u32>() + fr.rem,
+            512
+        );
+        assert_eq!(fr.rev_ptr, 0);
+        assert_eq!(fr.rev_acc, 0x34fff888bcb872b6);
+        assert_eq!(fr.rev_bitpos, 60);
+    }
+
+    /// A second model (Animal_Bass) confirms the formula is not Bear-specific:
+    /// `M = 128`, 4 symbols → `[6, 118, 3, 1]` (slow path, different `M`/width).
+    #[test]
+    fn rans_read_freqs_bass_second_model() {
+        let win = [0xd2, 0xa7, 0x9c, 0x93, 0xcf, 0xb3, 0xe0, 0x9b, 0x61, 0x8b];
+        let fr = rans_read_freqs(&win, 2, 0x531000ed76178088, 60, 3, 5, 15, 128, 32);
+        assert_eq!(fr.freqs, [6, 118, 3]);
+        assert_eq!(fr.rem, 1);
+        assert_eq!(
+            fr.freqs.iter().map(|&f| f as u32).sum::<u32>() + fr.rem,
+            128
+        );
+        assert_eq!(fr.rev_ptr, 0);
+        assert_eq!(fr.rev_acc, 0x76178088b619b000);
+        assert_eq!(fr.rev_bitpos, 44);
     }
 
     fn hex_bytes(s: &str) -> Vec<u8> {

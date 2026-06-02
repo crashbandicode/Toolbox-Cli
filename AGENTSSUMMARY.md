@@ -105,7 +105,7 @@ src/
 │   ├── write.rs        Verbatim writer (byte-identical no-op round-trip)
 │   ├── codec.rs        Magicless-zstd extract + repack (streaming decode; no dict)
 │   ├── mesh.rs         FMSH mesh-section framing parser (has-mesh flag, header, chunk, sizes)
-│   ├── geometry.rs     FMSH geometry transport: fwd/reverse readers, super-block/sub-block header, state-0 canonical-Huffman table builder (full table, byte-exact), zstd-block + raw windows, first-sub-block index decode (bufA 99.3% from scratch); vertex symbol-reader/transform TODO
+│   ├── geometry.rs     FMSH geometry transport: fwd/reverse readers, super-block/sub-block header, state-0 canonical-Huffman table builder (full table, byte-exact), zstd-block + raw windows, first-sub-block index decode (bufA 99.3% from scratch); vertex rANS decode loop (`rans_decode`) + adaptive-clz freq reader (`rans_read_freqs`, byte-exact, fixture-free); spread/state-init/transform TODO
 │   └── error.rs        McError (magic/flags/reserved/size/zstd/mesh-framing context)
 ├── meshopt/            Pure-Rust meshoptimizer 0.15 codec (reference + encoder; MeshCodec uses a custom entropy backend)
 │   ├── mod.rs          Public encode/decode_{vertex_buffer,index_buffer,index_sequence} + decode_index_buffer_split + read_indices
@@ -648,6 +648,54 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-06-02 — MeshCodec vertex rANS **frequency reader** ported (`0x110e7b0`, byte-exact, fixture-free)
+Ported the rANS table's frequency reader (`geometry::rans_read_freqs`) — the
+piece the prior handoff flagged as the only blocker for the vertex table build.
+Each rANS segment's `count + 1` symbol frequencies (summing to `M`) are an
+**adaptive `clz`-prefix + zig-zag-delta** code over the reverse-A bitstream: the
+function reads the first `count` (each `freq += zigzag(value)`, the prefix length
+adapting via a blended-width state) and returns the last as `rem = M - sum`.
+
+**The blocker was a misread, not a missing reverse reader.** The prior notes
+inferred a mysterious "1-bit prime / S1 off-by-one" from `trace_refill.py`, which
+only observes the slow read site (`0x110e7f8`). Disassembling `0x110e7b0` showed
+**three** read sites: the slow `clz` path, a `clz`-coded **run-length** head
+(`0x110e890` / the "rest is one run" branch `0x110e8e8`), and a fixed-`width`
+**run body** (`0x110e900`) — so symbols read via the run body are invisible to
+that tracer, which fully explains the apparent off-by-one (there is none). I
+transcribed the function instruction-by-instruction to a faithful Python
+reference, validated it byte-exact (freqs **and** the advanced `(ptr, acc,
+bitpos)` cursor) against the emulator for **all 40 freq calls across Bear, Bass,
+and Dragonfly**, then ported to Rust with a small `RevReader` in the decoder's
+own `(ptr, acc, bitpos)` form (same bit convention as
+`zstd_pure::bits::ReverseBitReader`, but that triple is what the decoder threads
+through `ctx` between readers, so the coder keeps it rather than converting).
+
+**Gotcha that cost a wrong first cut:** the slow/run-head sites extract a value
+as `acc >> (64 - n)`, but the run body uses `(acc >> 1) >> ~width`, which yields
+**0** for a `width == 0` (zero-bit) symbol where the shared extraction would read
+the whole accumulator. The all-40 cross-check caught this on a 247-symbol run
+(the 3-golden-test subset alone would have missed it); a `width == 0 ⇒ 0`
+override fixes it while keeping the cursor bookkeeping shared.
+
+Committed with **three fixture-free golden tests** (hardcoded minimal reverse-A
+windows + params + expected freqs/`rem`/end-cursor, no fixture or oracle file):
+Bear's canonical `[95, 408, 7, 1, 1]` (slow path), a Bear segment hitting **all
+four** read sites, and an **Animal_Bass** segment (second model, different `M`).
+Diff is `src/mc/geometry.rs` only, +285/-0 (no rustfmt reflow of untouched lines;
+the repo's committed code isn't clean under this rustfmt version, so global `cargo
+fmt` is intentionally not run — added lines are hand-matched to rustfmt style).
+All green: **164 lib unit (incl. 8 mc::geometry) + all integration; clippy
+--all-targets clean; --no-default-features builds.**
+
+**Remaining vertex work (unchanged plan):** the contiguous spread + 4-state init
+→ a complete from-stream rANS symbol decoder; the segment loop `0x110dc30` +
+3-lane (`0x110ef70`) / RLE (`0x110f930`) variants; the 3-stream width combiner
+`0x110d360`; the kernel transform (delta/zigzag/transpose) + states 4/5/2 →
+reproduce `vtxgt/Animal_Bear.bufB.bin`; then thread the window flags + multi-sub-
+block state machine for the full bufA+bufB, assemble + pad, validate full `.mc`
+== oracle, sweep 12,395.
 
 ### 2026-06-01 — MeshCodec geometry transport ported to Rust (`src/mc/geometry.rs`); bufA 99.3% from scratch + vertex coder mapped
 Turned the validated Python index framing into a **committable clean-room Rust
