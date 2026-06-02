@@ -147,7 +147,14 @@ pub struct Meta {
 }
 
 impl FormatStats {
-    fn record(&mut self, format: Format, path: &str, operation: &str, outcome: Outcome, meta: Meta) {
+    fn record(
+        &mut self,
+        format: Format,
+        path: &str,
+        operation: &str,
+        outcome: Outcome,
+        meta: Meta,
+    ) {
         self.files_seen += 1;
         if let Some(v) = meta.version {
             self.versions.insert(v);
@@ -182,7 +189,10 @@ impl FormatStats {
                     expected: true,
                 });
             }
-            Outcome::Failed { error_type, message } => {
+            Outcome::Failed {
+                error_type,
+                message,
+            } => {
                 self.files_attempted += 1;
                 self.failed += 1;
                 self.failures.push(FailureEntry {
@@ -316,10 +326,13 @@ impl<'a> Auditor<'a> {
         if format == Format::Sarc {
             if self.wants(Format::Sarc) {
                 let (outcome, meta) = audit_sarc(&data);
-                self.stats
-                    .get_mut("sarc")
-                    .unwrap()
-                    .record(Format::Sarc, rel, "read_arc/write_arc", outcome, meta);
+                self.stats.get_mut("sarc").unwrap().record(
+                    Format::Sarc,
+                    rel,
+                    "read_arc/write_arc",
+                    outcome,
+                    meta,
+                );
             }
             // Recurse into entries regardless of whether sarc is recorded, so
             // inner byml/msbt/bntx/... get audited.
@@ -429,14 +442,16 @@ fn audit_byml(data: &[u8]) -> (&'static str, Outcome, Meta) {
             };
             let out = match crate::byml::write_byml(&doc) {
                 Ok(b) if b == data => Outcome::ByteIdentical,
-                _ => match crate::byml::write_byml_canonical(doc.version, doc.big_endian, &doc.root)
-                {
-                    Ok(c) => match crate::byml::read_byml(&c) {
-                        Ok(d2) if d2.root == doc.root => Outcome::Semantic,
-                        _ => Outcome::InspectOk,
-                    },
-                    Err(_) => Outcome::InspectOk,
-                },
+                _ => {
+                    match crate::byml::write_byml_canonical(doc.version, doc.big_endian, &doc.root)
+                    {
+                        Ok(c) => match crate::byml::read_byml(&c) {
+                            Ok(d2) if d2.root == doc.root => Outcome::Semantic,
+                            _ => Outcome::InspectOk,
+                        },
+                        Err(_) => Outcome::InspectOk,
+                    }
+                }
             };
             ("read/write", out, meta)
         }
@@ -599,7 +614,11 @@ fn endian(big: bool) -> String {
 pub fn iso8601_utc(epoch_secs: u64) -> String {
     let days = (epoch_secs / 86_400) as i64;
     let secs_of_day = epoch_secs % 86_400;
-    let (h, mi, s) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
+    let (h, mi, s) = (
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60,
+    );
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -680,7 +699,10 @@ mod tests {
             Format::Byml,
             "e",
             "op",
-            Outcome::Failed { error_type: String::new(), message: "boom".into() },
+            Outcome::Failed {
+                error_type: String::new(),
+                message: "boom".into(),
+            },
             Meta::default(),
         );
         assert_eq!(s.files_seen, 5);
@@ -691,7 +713,7 @@ mod tests {
         assert_eq!(s.expected_unsupported, 1);
         assert_eq!(s.failed, 1);
         assert_eq!(s.failures.len(), 2); // the unsupported + the failure
-        // The unexpected failure inherits the format's typed-error name.
+                                         // The unexpected failure inherits the format's typed-error name.
         let unexpected = s.failures.iter().find(|f| !f.expected).unwrap();
         assert_eq!(unexpected.error_type, "BymlError");
         assert!(s.versions.contains("v7"));

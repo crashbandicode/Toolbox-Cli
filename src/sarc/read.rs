@@ -9,9 +9,10 @@ use super::{ArcEntry, ArcFile, UnpackedFile};
 use super::{SARC_HEADER_SIZE, SFAT_HAS_NAME, SFAT_HEADER_SIZE, SFAT_NODE_SIZE, SFNT_HEADER_SIZE};
 
 fn read_u16(bytes: &[u8], off: usize, big_endian: bool) -> Result<u16> {
-    let b = bytes
-        .get(off..off + 2)
-        .ok_or(SarcError::Truncated { offset: off, need: 2 })?;
+    let b = bytes.get(off..off + 2).ok_or(SarcError::Truncated {
+        offset: off,
+        need: 2,
+    })?;
     Ok(if big_endian {
         u16::from_be_bytes([b[0], b[1]])
     } else {
@@ -20,9 +21,10 @@ fn read_u16(bytes: &[u8], off: usize, big_endian: bool) -> Result<u16> {
 }
 
 fn read_u32(bytes: &[u8], off: usize, big_endian: bool) -> Result<u32> {
-    let b = bytes
-        .get(off..off + 4)
-        .ok_or(SarcError::Truncated { offset: off, need: 4 })?;
+    let b = bytes.get(off..off + 4).ok_or(SarcError::Truncated {
+        offset: off,
+        need: 4,
+    })?;
     Ok(if big_endian {
         u32::from_be_bytes([b[0], b[1], b[2], b[3]])
     } else {
@@ -43,7 +45,10 @@ fn read_c_string(bytes: &[u8], off: usize) -> Result<String> {
         .ok_or(SarcError::UnterminatedName { offset: off })?;
     std::str::from_utf8(&slice[..end])
         .map(str::to_owned)
-        .map_err(|source| SarcError::NonUtf8Name { offset: off, source })
+        .map_err(|source| SarcError::NonUtf8Name {
+            offset: off,
+            source,
+        })
 }
 
 /// Parse a SARC archive into an [`ArcFile`], preserving every entry (named
@@ -95,7 +100,11 @@ pub(super) fn parse_sarc(bytes: &[u8]) -> Result<ArcFile> {
         let start = read_u32(bytes, node + 0x08, big_endian)? as usize;
         let end = read_u32(bytes, node + 0x0C, big_endian)? as usize;
         if end < start {
-            return Err(SarcError::NodeBackwards { index: i, start, end });
+            return Err(SarcError::NodeBackwards {
+                index: i,
+                start,
+                end,
+            });
         }
         let abs_start = data_offset + start;
         let abs_end = data_offset + end;
@@ -133,7 +142,10 @@ pub fn unpack(bytes: &[u8]) -> Result<Vec<UnpackedFile>> {
     let mut out = Vec::with_capacity(arc.files.len());
     for entry in arc.files {
         if let Some(name) = entry.name {
-            out.push(UnpackedFile { name, data: entry.data });
+            out.push(UnpackedFile {
+                name,
+                data: entry.data,
+            });
         }
     }
     Ok(out)
@@ -161,7 +173,10 @@ mod tests {
         let arc = parse_sarc(&packed).unwrap();
         assert!(!arc.big_endian);
         assert_eq!(arc.files.len(), 2);
-        assert_eq!(arc.position("dir/a.bin").map(|i| &arc.files[i].data[..]), Some(&b"alpha"[..]));
+        assert_eq!(
+            arc.position("dir/a.bin").map(|i| &arc.files[i].data[..]),
+            Some(&b"alpha"[..])
+        );
     }
 
     // The malformed-input checklist below mirrors the failure modes the MIT
@@ -186,7 +201,10 @@ mod tests {
         buf[0..4].copy_from_slice(b"SARC");
         buf[0x06] = 0x12;
         buf[0x07] = 0x34;
-        assert!(matches!(parse_sarc(&buf), Err(SarcError::BadBom([0x12, 0x34]))));
+        assert!(matches!(
+            parse_sarc(&buf),
+            Err(SarcError::BadBom([0x12, 0x34]))
+        ));
     }
 
     #[test]
@@ -196,7 +214,10 @@ mod tests {
         buf[0..4].copy_from_slice(b"SARC");
         buf[0x06] = 0xFF;
         buf[0x07] = 0xFE;
-        assert!(matches!(parse_sarc(&buf), Err(SarcError::MissingSection("SFAT"))));
+        assert!(matches!(
+            parse_sarc(&buf),
+            Err(SarcError::MissingSection("SFAT"))
+        ));
     }
 
     #[test]

@@ -108,7 +108,9 @@ pub mod zstd_pure;
 /// format read/write entry points, the BNTX import/replace helpers, the
 /// BFLYT mutation specs, the manifest types, and [`Error`]/[`Result`].
 pub mod prelude {
+    pub use crate::aamp::{read_aamp, write_aamp, AampDocument, ParameterList, Value};
     pub use crate::bflyt::{read_bflyt, write_bflyt, ClonePaneSpec, PaneEdit, BFLYT};
+    pub use crate::bfres::{read_bfres, write_bfres, BfresDocument, DetectedBlock};
     pub use crate::bntx::pipeline::{
         import_cube_png_files, import_image, import_png_file, replace_texture, ImportOptions,
         ImportTextureFormat, ReplaceSource,
@@ -124,8 +126,6 @@ pub mod prelude {
         ValidateReport,
     };
     pub use crate::manifest::{SkinElement, SkinManifest};
-    pub use crate::aamp::{read_aamp, write_aamp, AampDocument, ParameterList, Value};
-    pub use crate::bfres::{read_bfres, write_bfres, BfresDocument, DetectedBlock};
     pub use crate::msbt::{read_msbt, write_msbt, write_msbt_canonical, MsbtDocument, TextChunk};
     pub use crate::restbl::{read_restbl, write_restbl, Restbl, SetOutcome};
     pub use crate::texpipe::Bc7Quality;

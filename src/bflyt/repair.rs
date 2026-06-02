@@ -247,7 +247,11 @@ impl BFLYT {
 }
 
 /// Depth-first dedupe: rename any pane whose name is already taken.
-fn dedupe_walk(pane: &mut BasePane, used: &mut HashSet<String>, renames: &mut Vec<(String, String)>) {
+fn dedupe_walk(
+    pane: &mut BasePane,
+    used: &mut HashSet<String>,
+    renames: &mut Vec<(String, String)>,
+) {
     if !pane.name.is_empty() {
         if used.contains(&pane.name) {
             let new = unique_name(&pane.name, used);
@@ -403,8 +407,24 @@ mod tests {
         assert_eq!(removed, vec!["mat1".to_string()]);
         assert_eq!(b.materials.len(), 2);
         // P0 still -> mat0 (index 0); P1 -> mat2 (now index 1).
-        assert_eq!(b.find_pane("P0").unwrap().picture.as_ref().unwrap().material_index, 0);
-        assert_eq!(b.find_pane("P1").unwrap().picture.as_ref().unwrap().material_index, 1);
+        assert_eq!(
+            b.find_pane("P0")
+                .unwrap()
+                .picture
+                .as_ref()
+                .unwrap()
+                .material_index,
+            0
+        );
+        assert_eq!(
+            b.find_pane("P1")
+                .unwrap()
+                .picture
+                .as_ref()
+                .unwrap()
+                .material_index,
+            1
+        );
     }
 
     #[test]
@@ -429,7 +449,10 @@ mod tests {
         // texture pruning alone.
         let mut b = sample();
         let removed = b.prune_unused_textures();
-        assert!(removed.is_empty(), "all textures are referenced by some material");
+        assert!(
+            removed.is_empty(),
+            "all textures are referenced by some material"
+        );
         assert_eq!(b.textures.len(), 3);
     }
 

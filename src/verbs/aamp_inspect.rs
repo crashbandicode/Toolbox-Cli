@@ -91,7 +91,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
         if codec.is_compressed() {
             println!("  compression = {} -> {} bytes", codec.label(), bytes.len());
         }
-        println!("  type = {:?}  pio_version = {}", doc.pio_type, doc.pio_version);
+        println!(
+            "  type = {:?}  pio_version = {}",
+            doc.pio_type, doc.pio_version
+        );
         println!("  {lists} list(s) / {objects} object(s) / {params} param(s)");
         print_list(&doc.root, 1, &resolve, "param_root");
     }
@@ -100,10 +103,18 @@ pub fn run(args: Args) -> Result<ExitCode> {
 
 fn print_list(l: &ParameterList, depth: usize, resolve: &impl Fn(u32) -> String, name: &str) {
     let pad = "  ".repeat(depth);
-    println!("{pad}list {name} ({} obj, {} list)", l.objects.len(), l.lists.len());
+    println!(
+        "{pad}list {name} ({} obj, {} list)",
+        l.objects.len(),
+        l.lists.len()
+    );
     let pad2 = "  ".repeat(depth + 1);
     for o in &l.objects {
-        println!("{pad2}obj {} ({} param)", resolve(o.name_hash), o.params.len());
+        println!(
+            "{pad2}obj {} ({} param)",
+            resolve(o.name_hash),
+            o.params.len()
+        );
         let pad3 = "  ".repeat(depth + 2);
         for p in &o.params {
             println!("{pad3}{} = {}", resolve(p.name_hash), p.value.summary());

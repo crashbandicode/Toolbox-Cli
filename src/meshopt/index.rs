@@ -203,7 +203,8 @@ fn decode_index_core(
             let fec = (codetri & 15) as i32;
 
             if fec < fecmax {
-                let cf = vertexfifo[(vertexfifooffset.wrapping_sub(1).wrapping_sub(fec as usize)) & 15];
+                let cf =
+                    vertexfifo[(vertexfifooffset.wrapping_sub(1).wrapping_sub(fec as usize)) & 15];
                 let c = if fec == 0 { next } else { cf };
                 let fec0 = (fec == 0) as u32;
                 next = next.wrapping_add(fec0);
@@ -337,7 +338,11 @@ fn decode_index_split_stream(data: &[u8], p: &mut usize, last: u32) -> Result<u3
 
 /// Decode a meshoptimizer index buffer (triangle list) of `index_count`
 /// indices (`index_count % 3 == 0`), each `index_size` (2 or 4) bytes.
-pub fn decode_index_buffer(index_count: usize, index_size: usize, buffer: &[u8]) -> Result<Vec<u8>> {
+pub fn decode_index_buffer(
+    index_count: usize,
+    index_size: usize,
+    buffer: &[u8],
+) -> Result<Vec<u8>> {
     if !index_count.is_multiple_of(3) {
         return Err(MeshoptError::Invalid(format!(
             "index_count {index_count} must be a multiple of 3"
@@ -408,7 +413,8 @@ pub fn decode_index_buffer_split(
     data: &[u8],
     version: u8,
 ) -> Result<Vec<u8>> {
-    decode_index_buffer_split_used(index_count, index_size, code, data, version).map(|(out, _, _)| out)
+    decode_index_buffer_split_used(index_count, index_size, code, data, version)
+        .map(|(out, _, _)| out)
 }
 
 /// Like [`decode_index_buffer_split`] but also returns how many `code` and
@@ -435,7 +441,9 @@ pub fn decode_index_buffer_split_used(
         )));
     }
     if version > 1 {
-        return Err(MeshoptError::Invalid(format!("index version {version} > 1")));
+        return Err(MeshoptError::Invalid(format!(
+            "index version {version} > 1"
+        )));
     }
     let fecmax: i32 = if version >= 1 { 13 } else { 15 };
     decode_index_core(
@@ -461,7 +469,9 @@ pub fn encode_index_buffer(indices: &[u32], index_count: usize, version: u8) -> 
         )));
     }
     if version > 1 {
-        return Err(MeshoptError::Invalid(format!("index version {version} > 1")));
+        return Err(MeshoptError::Invalid(format!(
+            "index version {version} > 1"
+        )));
     }
     if indices.len() < index_count {
         return Err(MeshoptError::Truncated {
@@ -624,7 +634,11 @@ pub fn encode_index_buffer(indices: &[u32], index_count: usize, version: u8) -> 
 // ---------------------------------------------------------------------------
 
 /// Decode a meshoptimizer index *sequence* (`0xd0`) of `index_count` indices.
-pub fn decode_index_sequence(index_count: usize, index_size: usize, buffer: &[u8]) -> Result<Vec<u8>> {
+pub fn decode_index_sequence(
+    index_count: usize,
+    index_size: usize,
+    buffer: &[u8],
+) -> Result<Vec<u8>> {
     if index_size != 2 && index_size != 4 {
         return Err(MeshoptError::Invalid(format!(
             "index_size {index_size} must be 2 or 4"
@@ -683,7 +697,9 @@ pub fn decode_index_sequence(index_count: usize, index_size: usize, buffer: &[u8
 /// Encode an index sequence (`version` 0 or 1).
 pub fn encode_index_sequence(indices: &[u32], index_count: usize, version: u8) -> Result<Vec<u8>> {
     if version > 1 {
-        return Err(MeshoptError::Invalid(format!("sequence version {version} > 1")));
+        return Err(MeshoptError::Invalid(format!(
+            "sequence version {version} > 1"
+        )));
     }
     if indices.len() < index_count {
         return Err(MeshoptError::Truncated {

@@ -125,7 +125,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
             doc.messages().map(|m| m.len()).unwrap_or(0),
         );
         for (label, msg) in entries.iter().take(limit) {
-            println!("  {label}: {:?}", msg.to_display(doc.encoding, doc.big_endian));
+            println!(
+                "  {label}: {:?}",
+                msg.to_display(doc.encoding, doc.big_endian)
+            );
         }
         if entries.len() > limit {
             println!("  ... ({} more; raise --limit)", entries.len() - limit);

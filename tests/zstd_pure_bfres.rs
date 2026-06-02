@@ -54,7 +54,8 @@ fn pure_zstd_matches_libzstd_on_bfres_frames() {
             p.display()
         );
         assert_eq!(
-            frame.data, reference,
+            frame.data,
+            reference,
             "{}: pure decode bytes differ from libzstd",
             p.display()
         );

@@ -45,8 +45,8 @@ fn msbt_corpus_round_trips_byte_identically() {
     let mut total_messages = 0usize;
     for path in &fixtures {
         let original = std::fs::read(path).expect("read fixture");
-        let doc = read_msbt(&original)
-            .unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
+        let doc =
+            read_msbt(&original).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
 
         // Decode every message's chunks to prove the tag decoder walks them
         // without panicking (the verbatim writer is unaffected either way).
@@ -94,14 +94,24 @@ fn canonical_writer_semantic_round_trips_corpus() {
             .unwrap_or_else(|e| panic!("re-parse canonical {}: {e}", path.display()));
 
         // Semantic round-trip: labels + messages + label->message pairing match.
-        assert_eq!(doc2.labels(), doc.labels(), "labels differ for {}", path.display());
+        assert_eq!(
+            doc2.labels(),
+            doc.labels(),
+            "labels differ for {}",
+            path.display()
+        );
         assert_eq!(
             doc2.messages(),
             doc.messages(),
             "messages differ for {}",
             path.display()
         );
-        assert_eq!(doc2.entries(), doc.entries(), "entries differ for {}", path.display());
+        assert_eq!(
+            doc2.entries(),
+            doc.entries(),
+            "entries differ for {}",
+            path.display()
+        );
 
         if rebuilt == original {
             byte_identical += 1;

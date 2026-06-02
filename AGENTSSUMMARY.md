@@ -105,7 +105,7 @@ src/
 │   ├── write.rs        Verbatim writer (byte-identical no-op round-trip)
 │   ├── codec.rs        Magicless-zstd extract + repack (streaming decode; no dict)
 │   ├── mesh.rs         FMSH mesh-section framing parser (has-mesh flag, header, chunk, sizes)
-│   ├── geometry.rs     FMSH geometry transport: fwd/reverse readers, super-block/sub-block header, state-0 canonical-Huffman table builder, zstd-block + raw windows, first-sub-block index decode (bufA 99.3%), vertex rANS decode loop + freq reader (`0x110e7b0`); table spread/state init + transform TODO
+│   ├── geometry.rs     FMSH geometry transport: fwd/reverse readers, super-block/sub-block header, state-0 canonical-Huffman table builder, zstd-block + raw windows, first-sub-block index decode (bufA 99.3%), vertex rANS decode loop + freq reader (`0x110e7b0`) + contiguous spread (`0x110e6f8`); 4-state init + transform TODO
 │   └── error.rs        McError (magic/flags/reserved/size/zstd/mesh-framing context)
 ├── meshopt/            Pure-Rust meshoptimizer 0.15 codec (reference + encoder; MeshCodec uses a custom entropy backend)
 │   ├── mod.rs          Public encode/decode_{vertex_buffer,index_buffer,index_sequence} + decode_index_buffer_split + read_indices
@@ -648,6 +648,20 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-06-02 — MeshCodec vertex rANS contiguous spread ported (`0x110e6f8..0x110e7a4`)
+**Committed:** `geometry::rans_spread` + `RansDecodeTable` — fills `step[M]` and
+`sym[M]` after freq decode: `sym[cum..)=s`, `step=(f<<16)|(slot_in_symbol)`.
+Mapped to `0x110e6f8` (pair loop when `f>=2`, `add` by `0x200000002`) and tail
+at `0x110e744`. Subtlety: low 16 bits are the index within the symbol's run, not
+the global table index. Fixture-free: Bear first rANS M=64 freqs
+`[5,1,1,0,1,0,1,1,0,1,3,6,13,23,8]` → golden `step`/`sym` from `trace_rans.py` /
+`vtxgt/rans/`; `rans_spread_then_decode_bear_first_rans` chains spread + existing
+decode golden (init states still hardcoded — `0x110dfa0` blocked: init stream at
+P+8044, body at P+8068, `0x110e1bc` nibble path when `ctx+0x20&0xf!=0`).
+**Next:** port `0x110dfa0` 4-state init, then segment loop / 3-lane / RLE.
+All green: **166 lib unit** (incl. `mc::geometry`) + all integration; clippy
+`--all-targets` clean; `--no-default-features` builds.
 
 ### 2026-06-02 — MeshCodec vertex rANS frequency reader ported (`0x110e7b0`)
 **Committed:** `geometry::rans_read_freqs` + `RansFreqReader` / `RansFreqParams` /

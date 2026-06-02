@@ -71,7 +71,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         println!("{} ({} bytes)", args.input.display(), bytes.len());
-        println!("  magic = MCPK  version = {}  flags = {}", mc.header.version, mc.header.flags);
+        println!(
+            "  magic = MCPK  version = {}  flags = {}",
+            mc.header.version, mc.header.flags
+        );
         println!(
             "  size_descriptor = 0x{:08x} -> decompressed {} bytes (align 1<<{})",
             mc.header.size_descriptor,
@@ -103,7 +106,9 @@ pub fn run(args: Args) -> Result<ExitCode> {
                         m.first_chunk.sub_b_size
                     );
                 }
-                None => println!("  mesh: none (no FMSH section — e.g. a skeleton/animation resource)"),
+                None => {
+                    println!("  mesh: none (no FMSH section — e.g. a skeleton/animation resource)")
+                }
             }
         }
     }

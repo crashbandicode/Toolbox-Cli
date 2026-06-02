@@ -1067,7 +1067,10 @@ mod tests {
         // Header-sized, wrong magic -> BadMagic.
         let mut bad_magic = vec![0u8; 0x14];
         bad_magic[0..4].copy_from_slice(b"NOPE");
-        assert!(matches!(read_bflyt(&bad_magic), Err(BflytError::BadMagic(_))));
+        assert!(matches!(
+            read_bflyt(&bad_magic),
+            Err(BflytError::BadMagic(_))
+        ));
         // Right magic, bad byte-order mark (0x0000, not 0xFEFF) -> BadBom.
         let mut bad_bom = vec![0u8; 0x14];
         bad_bom[0..4].copy_from_slice(b"FLYT");

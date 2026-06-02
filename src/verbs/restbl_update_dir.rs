@@ -81,7 +81,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
     let mut unchanged = 0usize;
     let mut skipped = 0usize;
 
-    for entry in walkdir::WalkDir::new(&args.dir).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(&args.dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if !entry.file_type().is_file() {
             continue;
         }

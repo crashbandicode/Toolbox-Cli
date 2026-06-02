@@ -48,7 +48,12 @@ fn every_bfres_fixture_round_trips_byte_identically() {
         }
         let doc = read_bfres(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()));
         // Verbatim round-trip is byte-identical by construction.
-        assert_eq!(write_bfres(&doc), bytes, "{} not byte-identical", p.display());
+        assert_eq!(
+            write_bfres(&doc),
+            bytes,
+            "{} not byte-identical",
+            p.display()
+        );
         assert!(!doc.name.is_empty(), "{} empty name", p.display());
         // file_size header field never exceeds the actual buffer.
         assert!(
@@ -94,8 +99,8 @@ fn surfaces_embedded_bntx() {
         }
         let doc = read_bfres(&bytes).unwrap();
         if let Some(emb) = doc.embedded_bntx_bytes() {
-            let bntx = read_bntx(emb)
-                .unwrap_or_else(|e| panic!("embedded BNTX in {}: {e}", p.display()));
+            let bntx =
+                read_bntx(emb).unwrap_or_else(|e| panic!("embedded BNTX in {}: {e}", p.display()));
             assert!(
                 !bntx.textures.is_empty(),
                 "{} embedded BNTX has no textures",
@@ -141,7 +146,11 @@ fn pins_known_fixture_structure() {
         assert_eq!(doc.name, "Animal_Bass.Tex");
         let emb = doc.embedded_bntx_bytes().expect("Tex has embedded BNTX");
         let bntx = read_bntx(emb).unwrap();
-        assert_eq!(bntx.textures.len(), 8, "Animal_Bass.Tex embedded texture count");
+        assert_eq!(
+            bntx.textures.len(),
+            8,
+            "Animal_Bass.Tex embedded texture count"
+        );
     } else {
         eprintln!("skipping tex pin (no {})", tex.display());
     }

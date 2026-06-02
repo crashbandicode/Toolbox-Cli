@@ -41,7 +41,13 @@ pub fn run(args: Args) -> Result<ExitCode> {
     let lo = diff.saturating_sub(context);
     let hi_o = (diff + context).min(original.len());
     let hi_w = (diff + context).min(written.len());
-    println!("  original[0x{lo:x}..0x{hi_o:x}] = {:02x?}", &original[lo..hi_o]);
-    println!("  rewritten[0x{lo:x}..0x{hi_w:x}] = {:02x?}", &written[lo..hi_w]);
+    println!(
+        "  original[0x{lo:x}..0x{hi_o:x}] = {:02x?}",
+        &original[lo..hi_o]
+    );
+    println!(
+        "  rewritten[0x{lo:x}..0x{hi_w:x}] = {:02x?}",
+        &written[lo..hi_w]
+    );
     Ok(ExitCode::from(1))
 }

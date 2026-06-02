@@ -64,7 +64,10 @@ fn zsdic_pack_yields_expected_dictionaries() {
 fn blarc_zs_decompresses_to_sarc_and_inner_round_trips() {
     let Some(reg) = load_registry() else { return };
     let blarcs = blarc_paths();
-    assert!(!blarcs.is_empty(), "expected at least one .blarc.zs fixture");
+    assert!(
+        !blarcs.is_empty(),
+        "expected at least one .blarc.zs fixture"
+    );
 
     let mut bflyt_ok = 0usize;
     let mut bflan_ok = 0usize;
@@ -89,7 +92,10 @@ fn blarc_zs_decompresses_to_sarc_and_inner_round_trips() {
             }
         }
     }
-    assert!(bflyt_ok > 0, "expected at least one inner BFLYT to round-trip");
+    assert!(
+        bflyt_ok > 0,
+        "expected at least one inner BFLYT to round-trip"
+    );
     eprintln!(
         "OK: {} blarc(s); {bflyt_ok} inner BFLYT + {bflan_ok} inner BFLAN round-tripped byte-identically",
         blarcs.len()

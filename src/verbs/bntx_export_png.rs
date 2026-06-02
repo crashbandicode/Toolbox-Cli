@@ -45,9 +45,13 @@ pub fn run(args: Args) -> Result<ExitCode> {
         fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
     let bntx = read_bntx(&bytes).map_err(|e| anyhow!("{e}"))?;
 
-    let tex_index = bntx
-        .texture_index_by_name(&args.name)
-        .ok_or_else(|| anyhow!("texture '{}' not found in {}", args.name, args.input.display()))?;
+    let tex_index = bntx.texture_index_by_name(&args.name).ok_or_else(|| {
+        anyhow!(
+            "texture '{}' not found in {}",
+            args.name,
+            args.input.display()
+        )
+    })?;
 
     let img = decode_texture_image(&bntx, tex_index, args.mip, args.layer, !args.raw)?;
     let buffer = image::RgbaImage::from_raw(img.width, img.height, img.rgba)

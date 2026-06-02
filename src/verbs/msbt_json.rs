@@ -154,7 +154,10 @@ pub fn import_run(args: ImportArgs) -> Result<ExitCode> {
         } else {
             missing += 1;
             if args.strict {
-                return Err(anyhow!("label {label:?} not found in {}", args.input.display()));
+                return Err(anyhow!(
+                    "label {label:?} not found in {}",
+                    args.input.display()
+                ));
             }
             eprintln!("  warning: label {label:?} not found — skipping");
         }
@@ -213,7 +216,9 @@ fn json_to_chunk(v: &Value) -> Result<TextChunk> {
             ty: field_u16(close, "t")?,
         });
     }
-    Err(anyhow!("chunk object must have a \"tag\" or \"close\" key: {v}"))
+    Err(anyhow!(
+        "chunk object must have a \"tag\" or \"close\" key: {v}"
+    ))
 }
 
 fn field_u16(obj: &Map<String, Value>, key: &str) -> Result<u16> {

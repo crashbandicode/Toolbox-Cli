@@ -91,7 +91,12 @@ fn replace_preserves_format_for_each_format_in_corpus() {
             let img = procedural_image(exp_w, exp_h);
 
             let mut modified = parsed.clone();
-            match replace_texture(&mut modified, &name, ReplaceSource::Image(&img), Bc7Quality::UltraFast) {
+            match replace_texture(
+                &mut modified,
+                &name,
+                ReplaceSource::Image(&img),
+                Bc7Quality::UltraFast,
+            ) {
                 Ok(()) => {}
                 Err(e) => {
                     // A padding/size mismatch on this particular texture:
@@ -129,7 +134,8 @@ fn replace_preserves_format_for_each_format_in_corpus() {
                 "replaced data length must equal image_size"
             );
             assert_ne!(
-                new_pixels, &orig_pixels[..],
+                new_pixels,
+                &orig_pixels[..],
                 "{}: '{name}' ({fmt_name}) bytes should change after replacing with a new image",
                 path.display()
             );
@@ -144,7 +150,10 @@ fn replace_preserves_format_for_each_format_in_corpus() {
             }
 
             covered.insert(fmt_name);
-            println!("OK: replaced one {fmt_name} texture '{name}' ({exp_w}x{exp_h}) in {}", path.display());
+            println!(
+                "OK: replaced one {fmt_name} texture '{name}' ({exp_w}x{exp_h}) in {}",
+                path.display()
+            );
         }
     }
 

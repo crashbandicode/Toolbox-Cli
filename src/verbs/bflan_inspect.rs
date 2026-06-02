@@ -96,7 +96,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
         for s in &bflan.sections {
             println!("    {} ({} payload bytes)", s.magic_str(), s.payload.len());
         }
-        if let Some(p) = bflan.section(b"pat1").and_then(|s| decode_pat1(&s.payload, bflan.version_major())) {
+        if let Some(p) = bflan
+            .section(b"pat1")
+            .and_then(|s| decode_pat1(&s.payload, bflan.version_major()))
+        {
             println!(
                 "  pat1: name='{}' frames {}..{} order={} child_binding={} groups={:?}",
                 p.name, p.start_frame, p.end_frame, p.animation_order, p.child_binding, p.groups
@@ -111,7 +114,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
                 p.entries.len()
             );
             for e in &p.entries {
-                println!("    entry '{}' target={} tags={}", e.name, e.target, e.tag_count);
+                println!(
+                    "    entry '{}' target={} tags={}",
+                    e.name, e.target, e.tag_count
+                );
             }
         }
     }

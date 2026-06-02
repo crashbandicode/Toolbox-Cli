@@ -158,7 +158,7 @@ pub fn write_aamp_canonical(doc: &AampDocument) -> Result<Vec<u8>> {
     out[0..4].copy_from_slice(AAMP_MAGIC);
     write_u32(&mut out, 0x04, 2, be); // version
     write_u32(&mut out, 0x08, if be { 2 } else { 3 }, be); // flags: UTF8 (+ LE)
-    // 0x0C file_size — back-patched.
+                                                           // 0x0C file_size — back-patched.
     write_u32(&mut out, 0x10, doc.pio_version, be);
     write_u32(&mut out, 0x14, pio_offset as u32, be);
     write_u32(&mut out, 0x18, bfs.len() as u32, be);
@@ -323,7 +323,7 @@ fn write_u32(buf: &mut [u8], pos: usize, v: u32, be: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aamp::{read_aamp, Parameter, ParameterObject, ParamType};
+    use crate::aamp::{read_aamp, ParamType, Parameter, ParameterObject};
 
     /// A nested doc exercising scalars, a string, a vec, and a buffer across
     /// two lists and two objects.
@@ -334,14 +334,29 @@ mod tests {
             objects: vec![ParameterObject {
                 name_hash: 0x2222_3333,
                 params: vec![
-                    Parameter { name_hash: 1, value: Value::F32(1.5) },
-                    Parameter { name_hash: 2, value: Value::Int(-7) },
+                    Parameter {
+                        name_hash: 1,
+                        value: Value::F32(1.5),
+                    },
+                    Parameter {
+                        name_hash: 2,
+                        value: Value::Int(-7),
+                    },
                     Parameter {
                         name_hash: 3,
-                        value: Value::Str { ty: ParamType::String32, value: "hello".into() },
+                        value: Value::Str {
+                            ty: ParamType::String32,
+                            value: "hello".into(),
+                        },
                     },
-                    Parameter { name_hash: 4, value: Value::Vec3([1.0, 2.0, 3.0]) },
-                    Parameter { name_hash: 5, value: Value::BufferInt(vec![10, 20, 30]) },
+                    Parameter {
+                        name_hash: 4,
+                        value: Value::Vec3([1.0, 2.0, 3.0]),
+                    },
+                    Parameter {
+                        name_hash: 5,
+                        value: Value::BufferInt(vec![10, 20, 30]),
+                    },
                 ],
             }],
         };
@@ -350,7 +365,10 @@ mod tests {
             lists: vec![inner],
             objects: vec![ParameterObject {
                 name_hash: 0x1122_3344,
-                params: vec![Parameter { name_hash: 6, value: Value::Bool(true) }],
+                params: vec![Parameter {
+                    name_hash: 6,
+                    value: Value::Bool(true),
+                }],
             }],
         };
         AampDocument {
@@ -380,6 +398,9 @@ mod tests {
         let c1 = write_aamp_canonical(&doc).unwrap();
         let d1 = read_aamp(&c1).expect("re-parse");
         let c2 = write_aamp_canonical(&d1).unwrap();
-        assert_eq!(c2, c1, "canonical writer must be byte-stable across re-writes");
+        assert_eq!(
+            c2, c1,
+            "canonical writer must be byte-stable across re-writes"
+        );
     }
 }

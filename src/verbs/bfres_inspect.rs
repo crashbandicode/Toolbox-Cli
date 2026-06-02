@@ -47,9 +47,7 @@ pub fn run(args: Args) -> Result<ExitCode> {
     let doc = read_bfres(&bytes).map_err(|e| anyhow!("{e}"))?;
 
     // Surface an embedded BNTX (BOTW `.Tex.bfres`) via the BNTX reader.
-    let bntx = doc
-        .embedded_bntx_bytes()
-        .and_then(|b| read_bntx(b).ok());
+    let bntx = doc.embedded_bntx_bytes().and_then(|b| read_bntx(b).ok());
 
     if args.json {
         let out = json!({
@@ -85,7 +83,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
         }
         println!("  name = {:?}", doc.name);
         println!("  version = {}", doc.version_label());
-        println!("  endian = {}", if doc.big_endian { "big" } else { "little" });
+        println!(
+            "  endian = {}",
+            if doc.big_endian { "big" } else { "little" }
+        );
         if (doc.file_size as usize) == bytes.len() {
             println!("  file_size = {} bytes", doc.file_size);
         } else {
@@ -95,13 +96,23 @@ pub fn run(args: Args) -> Result<ExitCode> {
                 bytes.len()
             );
         }
-        println!("  relocation_table_offset = 0x{:x}", doc.relocation_table_offset);
+        println!(
+            "  relocation_table_offset = 0x{:x}",
+            doc.relocation_table_offset
+        );
         println!("  blocks:");
         for b in &doc.blocks {
-            println!("    {:<5} x{:<4} (first @ 0x{:x})", b.magic, b.count, b.first_offset);
+            println!(
+                "    {:<5} x{:<4} (first @ 0x{:x})",
+                b.magic, b.count, b.first_offset
+            );
         }
         if let Some(f) = &bntx {
-            println!("  embedded BNTX {:?}: {} texture(s)", f.name, f.textures.len());
+            println!(
+                "  embedded BNTX {:?}: {} texture(s)",
+                f.name,
+                f.textures.len()
+            );
             for t in &f.textures {
                 println!(
                     "    {} {} {}x{} mips={}",

@@ -77,8 +77,13 @@ fn import_texture_format_selection() {
     assert_eq!((w, h), (sw, sh), "rgba8 keeps exact source dims");
 
     // (2) rgba8-srgb -> R8G8B8A8_UNORM_SRGB.
-    let (fmt, w, h) =
-        import_and_reread(ImportTextureFormat::Rgba8Srgb, false, "sgpo_rgba8_srgb", sw, sh);
+    let (fmt, w, h) = import_and_reread(
+        ImportTextureFormat::Rgba8Srgb,
+        false,
+        "sgpo_rgba8_srgb",
+        sw,
+        sh,
+    );
     assert_eq!(fmt, TextureFormat::R8G8B8A8UnormSrgb, "rgba8-srgb format");
     assert_eq!((w, h), (sw, sh), "rgba8-srgb keeps exact source dims");
 
@@ -121,9 +126,7 @@ fn apply_manifest_rgba8_imports_and_validates() {
 
     let skin = tempfile::tempdir().expect("temp skin dir");
     let png_path = skin.path().join("btn.png");
-    gen_image(64, 64)
-        .save(&png_path)
-        .expect("write test png");
+    gen_image(64, 64).save(&png_path).expect("write test png");
 
     let element = element("sgpo_rgba8_pane", "btn.png");
     let texture_name = element.texture_name();

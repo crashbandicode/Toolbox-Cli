@@ -49,13 +49,11 @@ pub fn read_byml(data: &[u8]) -> Result<BymlDocument> {
     let root = if root_off == 0 {
         Byml::Null
     } else {
-        let node_type = *data
-            .get(root_off)
-            .ok_or(BymlError::Truncated {
-                offset: root_off,
-                need: 1,
-                len: data.len(),
-            })?;
+        let node_type = *data.get(root_off).ok_or(BymlError::Truncated {
+            offset: root_off,
+            need: 1,
+            len: data.len(),
+        })?;
         ctx.read_container(node_type, root_off, 0)?
     };
 

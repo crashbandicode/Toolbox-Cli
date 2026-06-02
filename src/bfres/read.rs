@@ -111,7 +111,10 @@ fn read_cstring(data: &[u8], off: usize) -> Result<String> {
     let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
     std::str::from_utf8(&rest[..end])
         .map(|s| s.to_string())
-        .map_err(|e| BfresError::NonUtf8 { offset: off, source: e })
+        .map_err(|e| BfresError::NonUtf8 {
+            offset: off,
+            source: e,
+        })
 }
 
 #[cfg(test)]
@@ -131,7 +134,7 @@ mod tests {
         b[0x10..0x14].copy_from_slice(&0x30u32.to_le_bytes()); // name chars at 0x30
         b[0x18..0x1C].copy_from_slice(&0x50u32.to_le_bytes()); // _RLT at 0x50
         b[0x1C..0x20].copy_from_slice(&total.to_le_bytes()); // file size
-                                                                        // name: u16 len at 0x2E, "Test\0" at 0x30
+                                                             // name: u16 len at 0x2E, "Test\0" at 0x30
         b[0x2E..0x30].copy_from_slice(&4u16.to_le_bytes());
         b[0x30..0x35].copy_from_slice(b"Test\0");
         b[0x40..0x44].copy_from_slice(b"FMDL");
@@ -174,7 +177,10 @@ mod tests {
 
     #[test]
     fn rejects_bad_input() {
-        assert!(matches!(read_bfres(&[0u8; 8]), Err(BfresError::TooSmall(8))));
+        assert!(matches!(
+            read_bfres(&[0u8; 8]),
+            Err(BfresError::TooSmall(8))
+        ));
         let mut bad = vec![0u8; HEADER_LEN];
         bad[0..8].copy_from_slice(b"NOPE0000");
         assert!(matches!(read_bfres(&bad), Err(BfresError::BadMagic(_))));

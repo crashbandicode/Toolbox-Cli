@@ -80,7 +80,9 @@ fn build_table(weights: &[u8]) -> Result<HuffTable> {
     let mut total_weight: u32 = 0;
     for &w in weights {
         if w as u32 > HUF_TABLELOG_MAX {
-            return Err(ZstdError::CorruptTable(format!("huffman weight {w} too large")));
+            return Err(ZstdError::CorruptTable(format!(
+                "huffman weight {w} too large"
+            )));
         }
         if w > 0 {
             total_weight += 1 << (w - 1);
@@ -107,7 +109,9 @@ fn build_table(weights: &[u8]) -> Result<HuffTable> {
     all_weights.extend_from_slice(weights);
     all_weights.push(last_weight as u8);
     if all_weights.len() > 256 {
-        return Err(ZstdError::CorruptTable("huffman alphabet exceeds 256".into()));
+        return Err(ZstdError::CorruptTable(
+            "huffman alphabet exceeds 256".into(),
+        ));
     }
 
     let mut rank_stats = [0u32; (HUF_TABLELOG_MAX + 1) as usize];

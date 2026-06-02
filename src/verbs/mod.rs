@@ -34,10 +34,10 @@ mod bntx_export_dds;
 mod bntx_export_png;
 mod bntx_import_dds;
 mod bntx_import_png;
-mod bntx_replace_dds;
 mod bntx_inspect;
 mod bntx_layout_dump;
 mod bntx_remove_texture;
+mod bntx_replace_dds;
 mod bntx_replace_png;
 mod bntx_rlt_dump;
 mod bntx_roundtrip_test;
@@ -98,7 +98,8 @@ pub(crate) fn load_dict_registry(
         if p.is_dir() {
             return DictRegistry::from_dir(p).map_err(|e| anyhow::anyhow!("{e}"));
         }
-        let bytes = std::fs::read(p).with_context(|| format!("reading dictionary {}", p.display()))?;
+        let bytes =
+            std::fs::read(p).with_context(|| format!("reading dictionary {}", p.display()))?;
         return DictRegistry::from_zsdic_pack(&bytes)
             .map_err(|e| anyhow::anyhow!("loading {}: {e}", p.display()));
     }
@@ -515,17 +516,47 @@ mod tests {
     #[test]
     fn texture_format_flag_aliases() {
         // BC7: sRGB comes from the --srgb flag, or the explicit -srgb alias.
-        assert_eq!(parse_import_texture_format("bc7", false).unwrap(), (Bc7, false));
-        assert_eq!(parse_import_texture_format("bc7", true).unwrap(), (Bc7, true));
-        assert_eq!(parse_import_texture_format("BC7-UNORM", false).unwrap(), (Bc7, false));
-        assert_eq!(parse_import_texture_format("bc7-srgb", false).unwrap(), (Bc7, true));
-        assert_eq!(parse_import_texture_format("bc7_unorm_srgb", false).unwrap(), (Bc7, true));
+        assert_eq!(
+            parse_import_texture_format("bc7", false).unwrap(),
+            (Bc7, false)
+        );
+        assert_eq!(
+            parse_import_texture_format("bc7", true).unwrap(),
+            (Bc7, true)
+        );
+        assert_eq!(
+            parse_import_texture_format("BC7-UNORM", false).unwrap(),
+            (Bc7, false)
+        );
+        assert_eq!(
+            parse_import_texture_format("bc7-srgb", false).unwrap(),
+            (Bc7, true)
+        );
+        assert_eq!(
+            parse_import_texture_format("bc7_unorm_srgb", false).unwrap(),
+            (Bc7, true)
+        );
         // RGBA8: the variant carries sRGB; --srgb promotes the plain alias.
-        assert_eq!(parse_import_texture_format("rgba8", false).unwrap(), (Rgba8, false));
-        assert_eq!(parse_import_texture_format("rgba8", true).unwrap(), (Rgba8Srgb, true));
-        assert_eq!(parse_import_texture_format("r8g8b8a8", false).unwrap(), (Rgba8, false));
-        assert_eq!(parse_import_texture_format("rgba8-srgb", false).unwrap(), (Rgba8Srgb, true));
-        assert_eq!(parse_import_texture_format("r8g8b8a8_srgb", false).unwrap(), (Rgba8Srgb, true));
+        assert_eq!(
+            parse_import_texture_format("rgba8", false).unwrap(),
+            (Rgba8, false)
+        );
+        assert_eq!(
+            parse_import_texture_format("rgba8", true).unwrap(),
+            (Rgba8Srgb, true)
+        );
+        assert_eq!(
+            parse_import_texture_format("r8g8b8a8", false).unwrap(),
+            (Rgba8, false)
+        );
+        assert_eq!(
+            parse_import_texture_format("rgba8-srgb", false).unwrap(),
+            (Rgba8Srgb, true)
+        );
+        assert_eq!(
+            parse_import_texture_format("r8g8b8a8_srgb", false).unwrap(),
+            (Rgba8Srgb, true)
+        );
         // Unknown values are rejected.
         assert!(parse_import_texture_format("astc", false).is_err());
         assert!(parse_import_texture_format("", false).is_err());

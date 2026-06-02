@@ -40,7 +40,10 @@ fn self_diff_of_real_file_is_empty() {
         return;
     }
     let tree = read_byml(&std::fs::read(&path).unwrap()).unwrap().root;
-    assert!(diff_byml(&tree, &tree).is_empty(), "a file should not differ from itself");
+    assert!(
+        diff_byml(&tree, &tree).is_empty(),
+        "a file should not differ from itself"
+    );
 }
 
 #[test]
@@ -74,7 +77,10 @@ fn mutated_clone_diff_is_precise() {
         ["/__diff_test_added"]
     );
     assert_eq!(
-        d.removed.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+        d.removed
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect::<Vec<_>>(),
         ["/SystemData/FairyActorName"]
     );
     assert_eq!(d.changed.len(), 1);

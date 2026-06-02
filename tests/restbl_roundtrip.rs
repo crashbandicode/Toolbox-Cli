@@ -41,7 +41,10 @@ fn restbl_fixtures_round_trip_byte_identically() {
     let reg = load_registry();
     let fixtures = fixtures();
     if fixtures.is_empty() {
-        eprintln!("skipping RESTBL round-trip (no fixtures in {})", restbl_dir().display());
+        eprintln!(
+            "skipping RESTBL round-trip (no fixtures in {})",
+            restbl_dir().display()
+        );
         return;
     }
     if reg.is_empty() {
@@ -58,7 +61,10 @@ fn restbl_fixtures_round_trip_byte_identically() {
             .into_owned();
         let table = read_restbl(&bytes).unwrap_or_else(|e| panic!("parse {name}: {e}"));
         let written = write_restbl(&table).unwrap();
-        assert_eq!(written, bytes, "{name} RESTBL round-trip not byte-identical");
+        assert_eq!(
+            written, bytes,
+            "{name} RESTBL round-trip not byte-identical"
+        );
 
         assert_eq!(table.version, 1, "{name} version");
         assert_eq!(table.string_block_size, 160, "{name} string_block_size");
@@ -68,7 +74,10 @@ fn restbl_fixtures_round_trip_byte_identically() {
             "{name} crc table not sorted"
         );
         assert!(
-            table.name_entries.windows(2).all(|w| w[0].name <= w[1].name),
+            table
+                .name_entries
+                .windows(2)
+                .all(|w| w[0].name <= w[1].name),
             "{name} name table not sorted"
         );
         processed += 1;
@@ -142,9 +151,16 @@ fn edit_round_trips_on_real_table() {
     table.insert_by_hash(h, 12345);
 
     let written = write_restbl(&table).unwrap();
-    assert_eq!(written.len(), bytes.len() + 8, "one new CRC entry = +8 bytes");
+    assert_eq!(
+        written.len(),
+        bytes.len() + 8,
+        "one new CRC entry = +8 bytes"
+    );
     let reread = read_restbl(&written).unwrap();
     assert_eq!(reread.crc_entries.len(), crc_count + 1);
     assert_eq!(reread.get_by_hash(h), Some(12345));
-    assert!(reread.crc_entries.windows(2).all(|w| w[0].hash <= w[1].hash));
+    assert!(reread
+        .crc_entries
+        .windows(2)
+        .all(|w| w[0].hash <= w[1].hash));
 }

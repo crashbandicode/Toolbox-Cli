@@ -63,7 +63,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
         let outcome = table.set_by_path(path, args.size, args.insert);
         let found = !matches!(outcome, SetOutcome::NotFound);
         (
-            format!("path {path:?} (crc 0x{:08x}) [{outcome:?}]", crc32(path.as_bytes())),
+            format!(
+                "path {path:?} (crc 0x{:08x}) [{outcome:?}]",
+                crc32(path.as_bytes())
+            ),
             found,
         )
     } else if let Some(hash) = &args.hash {

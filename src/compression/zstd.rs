@@ -54,9 +54,9 @@ pub fn frame_dictionary_id(bytes: &[u8]) -> Result<u32> {
     if did_size == 0 {
         return Ok(0);
     }
-    let raw = bytes.get(offset..offset + did_size).ok_or_else(|| {
-        Error::Compression("zstd: truncated frame header (dictionary id)".into())
-    })?;
+    let raw = bytes
+        .get(offset..offset + did_size)
+        .ok_or_else(|| Error::Compression("zstd: truncated frame header (dictionary id)".into()))?;
     let mut id = 0u32;
     for (i, b) in raw.iter().enumerate() {
         id |= (*b as u32) << (8 * i); // little-endian
@@ -69,11 +69,13 @@ pub fn frame_dictionary_id(bytes: &[u8]) -> Result<u32> {
 /// frames.
 pub fn decompress(bytes: &[u8], dictionary: Option<&[u8]>) -> Result<Vec<u8>> {
     match dictionary {
-        None => libzstd::decode_all(bytes)
-            .map_err(|e| Error::Compression(format!("zstd decode: {e}"))),
+        None => {
+            libzstd::decode_all(bytes).map_err(|e| Error::Compression(format!("zstd decode: {e}")))
+        }
         Some(dict) => {
-            let mut decoder = libzstd::stream::read::Decoder::with_dictionary(Cursor::new(bytes), dict)
-                .map_err(|e| Error::Compression(format!("zstd decode (dict): {e}")))?;
+            let mut decoder =
+                libzstd::stream::read::Decoder::with_dictionary(Cursor::new(bytes), dict)
+                    .map_err(|e| Error::Compression(format!("zstd decode (dict): {e}")))?;
             let mut out = Vec::new();
             decoder
                 .read_to_end(&mut out)

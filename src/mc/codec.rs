@@ -150,7 +150,7 @@ pub fn repack(original: &McFile, bfres: &[u8], level: i32, allow_resize: bool) -
     out.push(original.header.version);
     out.push(original.header.flags);
     out.extend_from_slice(&0u16.to_le_bytes()); // reserved
-    // Preserve the original allocation (the mesh layout is unchanged).
+                                                // Preserve the original allocation (the mesh layout is unchanged).
     out.extend_from_slice(&original.header.size_descriptor.to_le_bytes());
     out.extend_from_slice(&compressed);
     out.extend_from_slice(tail); // custom-coded mesh buffers, byte-preserved
@@ -233,7 +233,10 @@ mod tests {
         let mut edited = bfres.clone();
         edited[8] ^= 0xFF; // flip a structure byte, same length
         let repacked = repack(&mc, &edited, 5, false).expect("repack same-size");
-        assert!(repacked.ends_with(&mesh_tail), "mesh tail must be byte-preserved");
+        assert!(
+            repacked.ends_with(&mesh_tail),
+            "mesh tail must be byte-preserved"
+        );
         let mc2 = super::super::read_mc(&repacked).unwrap();
         assert_eq!(extract(&mc2).unwrap(), edited, "extract(repack)=edited");
 
@@ -253,7 +256,10 @@ mod tests {
             let d = size_descriptor(size, shift);
             let decoded = ((d >> 5) as usize) << (d & 0xf);
             assert!(decoded >= size, "descriptor must cover the size");
-            assert!(decoded - size < (1 << shift), "no more than one unit of slack");
+            assert!(
+                decoded - size < (1 << shift),
+                "no more than one unit of slack"
+            );
         }
     }
 }

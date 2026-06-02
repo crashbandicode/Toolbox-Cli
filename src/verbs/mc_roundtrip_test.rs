@@ -62,7 +62,9 @@ fn run_dir(dir: &std::path::Path) -> Result<ExitCode> {
         if p.extension().and_then(|e| e.to_str()) != Some("mc") {
             continue;
         }
-        let Ok(bytes) = std::fs::read(p) else { continue };
+        let Ok(bytes) = std::fs::read(p) else {
+            continue;
+        };
         if bytes.get(0..4) != Some(b"MCPK".as_slice()) {
             continue;
         }

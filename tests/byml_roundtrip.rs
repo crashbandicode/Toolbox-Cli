@@ -85,7 +85,10 @@ fn byml_fixtures_round_trip_byte_identically() {
     let reg = load_registry();
     let fixtures = byml_fixtures();
     if fixtures.is_empty() {
-        eprintln!("skipping BYML round-trip test (no fixtures in {})", byml_dir().display());
+        eprintln!(
+            "skipping BYML round-trip test (no fixtures in {})",
+            byml_dir().display()
+        );
         return;
     }
 
@@ -117,11 +120,17 @@ fn byml_fixtures_round_trip_byte_identically() {
         );
     }
 
-    assert!(processed > 0, "no BYML fixtures were processed (missing dict?)");
+    assert!(
+        processed > 0,
+        "no BYML fixtures were processed (missing dict?)"
+    );
     // The shipped corpus covers both endians; only assert when we have them so
     // a partial local subset still passes.
     if saw_be {
-        assert!(saw_le, "expected at least one little-endian fixture alongside big-endian");
+        assert!(
+            saw_le,
+            "expected at least one little-endian fixture alongside big-endian"
+        );
     }
 }
 
@@ -175,11 +184,15 @@ fn cooking_table_decodes_known_values() {
 
     let root = &doc.root;
     assert_eq!(
-        root.get("RecipeList").and_then(Byml::as_array).map(<[Byml]>::len),
+        root.get("RecipeList")
+            .and_then(Byml::as_array)
+            .map(<[Byml]>::len),
         Some(158)
     );
     assert_eq!(
-        root.get("SingleRecipeList").and_then(Byml::as_array).map(<[Byml]>::len),
+        root.get("SingleRecipeList")
+            .and_then(Byml::as_array)
+            .map(<[Byml]>::len),
         Some(15)
     );
 
@@ -195,7 +208,10 @@ fn cooking_table_decodes_known_values() {
     );
     // Nested arrays inside SystemData decode as arrays.
     assert_eq!(
-        system.get("EffectList").and_then(Byml::as_array).map(<[Byml]>::len),
+        system
+            .get("EffectList")
+            .and_then(Byml::as_array)
+            .map(<[Byml]>::len),
         Some(22)
     );
 }

@@ -73,7 +73,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
             "  BFLAN: {} scanned, {} failed, {} with truncated final section",
             t.bflan_scanned, t.bflan_failed, t.bflan_truncated_section
         );
-        println!("  ARC:   {} scanned, {} failed", t.arc_scanned, t.arc_failed);
+        println!(
+            "  ARC:   {} scanned, {} failed",
+            t.arc_scanned, t.arc_failed
+        );
         println!(
             "  ZS:    {} compressed scanned, {} failed to inflate",
             t.compressed_scanned, t.compressed_failed

@@ -348,8 +348,26 @@ mod tests {
             );
         }
         // Spot-check canonical DXGI ASTC codes (134 = ASTC_4X4_UNORM).
-        assert_eq!(dxgi_format(TextureFormat::Astc { block: AstcBlock::B4x4, srgb: false }), 134);
-        assert_eq!(dxgi_format(TextureFormat::Astc { block: AstcBlock::B4x4, srgb: true }), 135);
-        assert_eq!(dxgi_format(TextureFormat::Astc { block: AstcBlock::B12x12, srgb: true }), 187);
+        assert_eq!(
+            dxgi_format(TextureFormat::Astc {
+                block: AstcBlock::B4x4,
+                srgb: false
+            }),
+            134
+        );
+        assert_eq!(
+            dxgi_format(TextureFormat::Astc {
+                block: AstcBlock::B4x4,
+                srgb: true
+            }),
+            135
+        );
+        assert_eq!(
+            dxgi_format(TextureFormat::Astc {
+                block: AstcBlock::B12x12,
+                srgb: true
+            }),
+            187
+        );
     }
 }

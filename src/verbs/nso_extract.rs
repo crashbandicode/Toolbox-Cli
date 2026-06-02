@@ -41,7 +41,11 @@ pub fn run(args: Args) -> Result<ExitCode> {
         "text" => &["text"],
         "rodata" => &["rodata"],
         "data" => &["data"],
-        other => return Err(anyhow!("unknown --segment '{other}' (text|rodata|data|all)")),
+        other => {
+            return Err(anyhow!(
+                "unknown --segment '{other}' (text|rodata|data|all)"
+            ))
+        }
     };
 
     println!(

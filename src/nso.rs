@@ -158,15 +158,15 @@ fn inflate_segment(data: &[u8], seg: &Segment, name: &'static str) -> Result<Vec
     let off = seg.file_offset as usize;
     let clen = seg.compressed_size as usize;
     let dlen = seg.decompressed_size as usize;
-    let end = off
-        .checked_add(clen)
-        .filter(|&e| e <= data.len())
-        .ok_or(NsoError::SegmentOutOfRange {
-            seg: name,
-            off,
-            len: clen,
-            file_len: data.len(),
-        })?;
+    let end =
+        off.checked_add(clen)
+            .filter(|&e| e <= data.len())
+            .ok_or(NsoError::SegmentOutOfRange {
+                seg: name,
+                off,
+                len: clen,
+                file_len: data.len(),
+            })?;
     let raw = &data[off..end];
 
     if !seg.is_compressed {

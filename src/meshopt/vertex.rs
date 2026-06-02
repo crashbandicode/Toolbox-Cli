@@ -52,7 +52,13 @@ fn get_vertex_block_size(vertex_size: usize) -> usize {
 
 /// Decode one 16-value byte group at `p` into `buffer[boff..boff+16]`; returns
 /// the new input position.
-fn decode_bytes_group(data: &[u8], p: usize, buffer: &mut [u8], boff: usize, bitslog2: u32) -> usize {
+fn decode_bytes_group(
+    data: &[u8],
+    p: usize,
+    buffer: &mut [u8],
+    boff: usize,
+    bitslog2: u32,
+) -> usize {
     match bitslog2 {
         0 => {
             for b in buffer.iter_mut().skip(boff).take(BYTE_GROUP_SIZE) {
@@ -170,7 +176,11 @@ fn decode_vertex_block(
 /// Decode a meshoptimizer vertex buffer: `vertex_count` vertices of
 /// `vertex_size` bytes each (`vertex_size` must be a non-zero multiple of 4,
 /// `<= 256`). Returns `vertex_count * vertex_size` bytes.
-pub fn decode_vertex_buffer(vertex_count: usize, vertex_size: usize, buffer: &[u8]) -> Result<Vec<u8>> {
+pub fn decode_vertex_buffer(
+    vertex_count: usize,
+    vertex_size: usize,
+    buffer: &[u8],
+) -> Result<Vec<u8>> {
     if vertex_size == 0 || vertex_size > 256 || !vertex_size.is_multiple_of(4) {
         return Err(MeshoptError::Invalid(format!(
             "vertex_size {vertex_size} must be a non-zero multiple of 4, <= 256"
@@ -251,7 +261,11 @@ fn encode_bytes_group_zero(buffer: &[u8]) -> bool {
 /// (`u64::MAX` = "impossible", mirroring the C `size_t(-1)`).
 fn encode_bytes_group_measure(buffer: &[u8], bits: u32) -> u64 {
     if bits == 1 {
-        return if encode_bytes_group_zero(buffer) { 0 } else { u64::MAX };
+        return if encode_bytes_group_zero(buffer) {
+            0
+        } else {
+            u64::MAX
+        };
     }
     if bits == 8 {
         return BYTE_GROUP_SIZE as u64;
@@ -357,7 +371,11 @@ fn encode_vertex_block(
 
 /// Encode `vertex_count` vertices of `vertex_size` bytes (a non-zero multiple
 /// of 4, `<= 256`) into a meshoptimizer version-0 vertex buffer.
-pub fn encode_vertex_buffer(vertices: &[u8], vertex_count: usize, vertex_size: usize) -> Result<Vec<u8>> {
+pub fn encode_vertex_buffer(
+    vertices: &[u8],
+    vertex_count: usize,
+    vertex_size: usize,
+) -> Result<Vec<u8>> {
     if vertex_size == 0 || vertex_size > 256 || !vertex_size.is_multiple_of(4) {
         return Err(MeshoptError::Invalid(format!(
             "vertex_size {vertex_size} must be a non-zero multiple of 4, <= 256"
@@ -388,7 +406,14 @@ pub fn encode_vertex_buffer(vertices: &[u8], vertex_count: usize, vertex_size: u
         } else {
             vertex_count - vo
         };
-        encode_vertex_block(&mut data, vertices, vo * vertex_size, bs, vertex_size, &mut last_vertex);
+        encode_vertex_block(
+            &mut data,
+            vertices,
+            vo * vertex_size,
+            bs,
+            vertex_size,
+            &mut last_vertex,
+        );
         vo += bs;
     }
 

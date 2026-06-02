@@ -55,7 +55,11 @@ pub fn run(args: Args) -> Result<ExitCode> {
     super::write_output(&args.out, &written)?;
 
     println!("set {}: {} -> {}", report.path, report.old, report.new);
-    println!("wrote {} ({} bytes, canonical)", args.out.display(), written.len());
+    println!(
+        "wrote {} ({} bytes, canonical)",
+        args.out.display(),
+        written.len()
+    );
     println!(
         "note: canonical output re-parses to the edited tree (semantically lossless), not \
          byte-identical to the original; re-compress with `compress` if the game needs .zs"

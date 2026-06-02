@@ -149,7 +149,10 @@ impl Restbl {
 
     /// Update an existing name-table entry's size. Returns `true` if found.
     pub fn set_by_name(&mut self, name: &str, size: u32) -> bool {
-        match self.name_entries.binary_search_by(|e| e.name.as_str().cmp(name)) {
+        match self
+            .name_entries
+            .binary_search_by(|e| e.name.as_str().cmp(name))
+        {
             Ok(i) => {
                 self.name_entries[i].size = size;
                 true
@@ -161,7 +164,10 @@ impl Restbl {
     /// Insert a name-table entry (keeping the table sorted by name), or update
     /// it if the name already exists.
     pub fn insert_by_name(&mut self, name: &str, size: u32) {
-        match self.name_entries.binary_search_by(|e| e.name.as_str().cmp(name)) {
+        match self
+            .name_entries
+            .binary_search_by(|e| e.name.as_str().cmp(name))
+        {
             Ok(i) => self.name_entries[i].size = size,
             Err(i) => self.name_entries.insert(
                 i,
@@ -257,7 +263,10 @@ pub fn read_restbl(data: &[u8]) -> Result<Restbl> {
         let block = &data[o..o + sbs];
         let nul = block.iter().position(|&b| b == 0).unwrap_or(sbs);
         let name = std::str::from_utf8(&block[..nul])
-            .map_err(|e| RestblError::NonUtf8Name { index: i, source: e })?
+            .map_err(|e| RestblError::NonUtf8Name {
+                index: i,
+                source: e,
+            })?
             .to_string();
         name_entries.push(NameEntry {
             name,
@@ -339,13 +348,28 @@ mod tests {
             version: 1,
             string_block_size: 160,
             crc_entries: vec![
-                CrcEntry { hash: 0x10, size: 100 },
-                CrcEntry { hash: 0x20, size: 200 },
-                CrcEntry { hash: 0x30, size: 300 },
+                CrcEntry {
+                    hash: 0x10,
+                    size: 100,
+                },
+                CrcEntry {
+                    hash: 0x20,
+                    size: 200,
+                },
+                CrcEntry {
+                    hash: 0x30,
+                    size: 300,
+                },
             ],
             name_entries: vec![
-                NameEntry { name: "Actor/A.bgyml".into(), size: 10 },
-                NameEntry { name: "Actor/B.bgyml".into(), size: 20 },
+                NameEntry {
+                    name: "Actor/A.bgyml".into(),
+                    size: 10,
+                },
+                NameEntry {
+                    name: "Actor/B.bgyml".into(),
+                    size: 20,
+                },
             ],
         }
     }
@@ -400,13 +424,19 @@ mod tests {
         assert_eq!(r.set_by_path(path, 8192, false), SetOutcome::UpdatedCrc);
         assert_eq!(r.get_by_path(path), Some(8192));
         // A path present only in the name table updates there.
-        assert_eq!(r.set_by_path("Actor/A.bgyml", 12, false), SetOutcome::UpdatedName);
+        assert_eq!(
+            r.set_by_path("Actor/A.bgyml", 12, false),
+            SetOutcome::UpdatedName
+        );
         assert_eq!(r.get_by_name("Actor/A.bgyml"), Some(12));
     }
 
     #[test]
     fn rejects_bad_input() {
-        assert!(matches!(read_restbl(&[0u8; 4]), Err(RestblError::TooSmall(4))));
+        assert!(matches!(
+            read_restbl(&[0u8; 4]),
+            Err(RestblError::TooSmall(4))
+        ));
         let mut bad = vec![0u8; 22];
         bad[0..6].copy_from_slice(b"NOPEZZ");
         assert!(matches!(read_restbl(&bad), Err(RestblError::BadMagic(_))));
@@ -426,7 +456,11 @@ mod tests {
             if after.hash == 0x20 {
                 assert_eq!((orig.size, after.size), (200, 999), "target updated");
             } else {
-                assert_eq!(after.size, orig.size, "unrelated entry 0x{:x} changed", after.hash);
+                assert_eq!(
+                    after.size, orig.size,
+                    "unrelated entry 0x{:x} changed",
+                    after.hash
+                );
             }
         }
         assert_eq!(r.name_entries, before.name_entries, "name table untouched");

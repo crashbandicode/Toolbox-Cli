@@ -93,7 +93,10 @@ fn rename_copy_remove_round_trip_on_real_bflyt() {
     assert_eq!(copied, 1, "copying a leaf copies exactly one pane");
     let back = read_bflyt(&write_bflyt(&b).unwrap()).unwrap();
     assert!(back.pane_exists(&copy_name), "copied pane should exist");
-    assert!(back.pane_exists(&target), "original pane should be preserved");
+    assert!(
+        back.pane_exists(&target),
+        "original pane should be preserved"
+    );
 
     // --- remove (leaf) ---
     let mut b = read_bflyt(&bytes).unwrap();
@@ -136,7 +139,10 @@ fn repair_round_trips_on_real_bflyt() {
     collect(back.root_pane.as_ref().unwrap(), 0, &mut names);
     let mut seen = std::collections::HashSet::new();
     for (name, _, _) in &names {
-        assert!(seen.insert(name.clone()), "duplicate pane name after repair: {name}");
+        assert!(
+            seen.insert(name.clone()),
+            "duplicate pane name after repair: {name}"
+        );
     }
 }
 
@@ -160,9 +166,13 @@ fn find_text_pane() -> Option<(PathBuf, String)> {
                 walk(&p, out, budget);
             } else if p.extension().and_then(|e| e.to_str()) == Some("bflyt") {
                 *budget -= 1;
-                let Ok(bytes) = std::fs::read(&p) else { continue };
+                let Ok(bytes) = std::fs::read(&p) else {
+                    continue;
+                };
                 let Ok(b) = read_bflyt(&bytes) else { continue };
-                let Some(root) = b.root_pane.as_ref() else { continue };
+                let Some(root) = b.root_pane.as_ref() else {
+                    continue;
+                };
                 let mut names = Vec::new();
                 collect(root, 0, &mut names);
                 for (name, _, _) in &names {

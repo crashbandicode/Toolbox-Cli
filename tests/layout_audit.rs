@@ -19,7 +19,10 @@ use nx_layout_toolbox::audit::audit_path;
 fn audit_training_modpack_exact_counts() {
     let dir = Path::new("tests/fixtures/unpacked/training-modpack");
     if !dir.exists() {
-        eprintln!("skipping training-modpack audit (no fixture at {})", dir.display());
+        eprintln!(
+            "skipping training-modpack audit (no fixture at {})",
+            dir.display()
+        );
         return;
     }
     let report = audit_path(dir).expect("audit");
@@ -46,7 +49,10 @@ fn audit_training_modpack_exact_counts() {
 fn audit_full_unpacked_detects_unsupported_and_suspicious() {
     let dir = Path::new("tests/fixtures/unpacked");
     if !dir.exists() {
-        eprintln!("skipping full unpacked audit (no fixture at {})", dir.display());
+        eprintln!(
+            "skipping full unpacked audit (no fixture at {})",
+            dir.display()
+        );
         return;
     }
     let report = audit_path(dir).expect("audit");
@@ -99,7 +105,9 @@ fn audit_full_unpacked_detects_unsupported_and_suspicious() {
         .collect();
     assert_eq!(untrusted.len(), 2, "expected two untrusted-mat BFLYTs");
     assert!(
-        untrusted.iter().all(|p| p.contains("info_melee_lct_player")),
+        untrusted
+            .iter()
+            .all(|p| p.contains("info_melee_lct_player")),
         "untrusted-mat files should be the HDR player layouts: {untrusted:?}"
     );
 
