@@ -691,11 +691,16 @@ Bear). Subtlety that cost a wrong first cut: two distinct `w19` — packing/mask
 bits 62-63, but the long/short branch tests **bit 56** and the stream-reset tests
 **bit 55** (`0x10f8e00` overwrites `x19` with `x14>>55` before the branch); this
 also fixed a latent cursor bug. `w13 = ctx[0x2c0]` (=7 across fixtures, alignment-
-like) is a param (index path passes 0). **Remaining: the symbol reader `0x110d7f0`
-(modes 0/1 = a 4-way-interleaved FSE/range decoder `0x110e270` — multiply-renorm
-`mul;lsr #0x1f`, FSE table indexed by state, u16 out — + RLE variants `0x110ef70`/
-`0x110f930`), the 3-stream width combiner `0x110d360`, the kernel transform, and
-states 4/5/2.** Disasm dumped in `local-assets/re/_symdec.txt` (FINDINGS UPDATE #8).
+like) is a param (index path passes 0).
+
+**Remaining vertex work — now de-risked by an I/O dump (`trace_rans.py`):** the
+symbol reader `0x110d7f0` modes 0/1 are **standard rANS** (`0x110e270`): `M=2^6`,
+decode table `step_u32[M]=(freq<<16)|(i-cumfreq)` @`+0` + `sym_u16[M]` @`+0x2000`
+(built by `0x110de80`), step `state=(state>>6)*freq+low`, 32-bit renorm at the
+2^31 threshold, 4 interleaved states (`0x110ef70` = 3-lane variant, `0x110f930` =
+RLE fill). Plus the 3-stream width combiner `0x110d360`, the kernel transform
+(delta/zigzag/transpose), and states 4/5/2. Disasm in `local-assets/re/
+_symdec.txt`; rANS I/O ground truth in `_rans.txt` (FINDINGS UPDATE #8).
 
 ### 2026-06-01 — MeshCodec INDEX transport framing VALIDATED (prototype) + vertex coder ground truth
 Continued the Stage-1b port. Built a Python framing prototype (gitignored,
