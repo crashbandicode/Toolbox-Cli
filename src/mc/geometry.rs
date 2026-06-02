@@ -163,10 +163,10 @@ pub fn parse_sub_block_header(fwd: &mut ForwardReader) -> Option<SubBlockHeader>
 }
 
 /// Result of the state-0 canonical-Huffman table builder (`0x10f8d20`) — the
-/// updated cursor positions plus the parsed scalars. (The table *values* drive
-/// the vertex coder; for the index path only the cursor advance matters, and is
-/// validated byte-exact against the decoder.)
-#[derive(Debug, Clone, Copy)]
+/// updated cursor positions, the parsed scalars, and (when `symbols != 0`) the
+/// built decode table. The table drives the vertex byte-group coder; for the
+/// index path only the cursor advance matters (validated byte-exact).
+#[derive(Debug, Clone)]
 pub struct TableBuild {
     /// New forward cursor position.
     pub fwd: usize,
@@ -182,23 +182,38 @@ pub struct TableBuild {
     pub symbols: u32,
     /// The trailing direction bit (`ctx[0x118]`; 0 ⇒ index path).
     pub dir_bit: u32,
+    /// `ctx+0x240`: per-symbol packed entry (`0x10fb2e0` reads byte-count/type/
+    /// bits/forward-byte from this).
+    pub entries: Vec<u32>,
+    /// `ctx+0x27c`: per-symbol bufB byte offset (where this attribute writes).
+    pub offsets: Vec<u32>,
+    /// `ctx+0x310`: per-symbol column offset within its vertex stream.
+    pub cols: Vec<u8>,
+    /// `ctx+0x2d4`: long-symbol markers (`(index<<16) | (w5<<8) | w18`).
+    pub longs: Vec<u32>,
+    /// `ctx+0x2c8`: total byte-group-decoded size (bufB minus the direct tail).
+    pub byte_group_total: u32,
+    /// `ctx+0x2d0`: max `w24*w26` product over symbols.
+    pub max_prod: u32,
 }
 
 /// Port of state 0's continuation (`0x10f8cc8..0x10f9028`): read the forward
-/// var-int `w8`, then walk the canonical-Huffman table description (a 4-bit
+/// var-int `w8`, then build the canonical-Huffman table (`0x10f8d20`: a 4-bit
 /// symbol count from reverse-A, then `symbols` entries of 11 reverse-A bits +
 /// conditional forward byte-pairs), then one direction bit. Returns the advanced
-/// cursors (the table contents themselves are not materialised here — that is
-/// the vertex coder's job).
+/// cursors **and** the table (validated byte-exact against the decoder).
 ///
 /// `rev_ptr` is the reverse-A pointer (payload offset; the decoder seeds it at
-/// `sub_a_size - 8`), `rev_acc`/`rev_bitpos` its accumulator/bit position.
+/// `sub_a_size - 8`); `w13` is the decoder's `ctx[0x2c0]` (an alignment-like
+/// constant — `7` across the model fixtures — used only for the table values,
+/// not the cursor advance, so the index path may pass `0`).
 pub fn state0_table_builder(
     payload: &[u8],
     fwd: usize,
     rev_ptr: usize,
     rev_acc: u64,
     rev_bitpos: u32,
+    w13: u32,
 ) -> TableBuild {
     let w12 = rev_bitpos;
     let mut x11 = rev_ptr;
@@ -217,19 +232,73 @@ pub fn state0_table_builder(
     let mut x14 = x9 << 5;
     let mut w10 = w15.wrapping_sub(5);
 
+    let mut entries = Vec::new();
+    let mut offsets = Vec::new();
+    let mut cols = Vec::new();
+    let mut longs = Vec::new();
+    let mut byte_group_total = 0u32;
+    let mut max_prod = 0u32;
+
     if symbols != 0 {
-        x12 += 2; // initial 2 forward bytes (0x10f8d38)
+        // 0x10f8d20 value loop.
+        let w0 = !w13; // ~ctx[0x2c0]
+        let mut w16 = 0u32; // ctx[0x2c8] running offset
+        let mut w1 = 0u32; // (index << 16)
+        let byte_at = |p: usize| payload.get(p).copied().unwrap_or(0) as u32;
+        let mut w18 = byte_at(x12);
+        let mut w5 = byte_at(x12 + 1);
+        x12 += 2;
+        let mut w7 = 0u32;
+        let mut w4 = 0u32;
         for _ in 0..symbols {
             x14 |= u64_le(payload, x11) >> w10;
-            let w19 = x14 >> 0x3e; // top 2 bits
-            if (w19 >> 1) & 1 != 0 {
-                x12 += 2; // "long" symbol: 2 forward bytes
+            let w19p = ((x14 >> 0x3e) & 3) as u32; // packing + w23m (top 2 bits)
+            let w19b = ((x14 >> 0x37) & 0x1ff) as u32; // branch (bit1) + reset (bit0)
+            let x24 = ((x14 >> 0x39) & 0x1f) as u32;
+            let x26 = ((x14 >> 0x35) & 3) as u32;
+            let w23m = 0u32.wrapping_sub(8) << w19p; // -8 << w19p
+            let w24 = x24 + 1;
+            let w26 = x26 + 1;
+            let bic = w7 & !w23m;
+            let w23 = w4.wrapping_add(((w23m & w7) as i32 >> 3) as u32);
+            let w25 = (bic << 16) | (w24 << 8) | (w19p << 3) | (w18 << 24) | w26;
+            let w28 = w23.wrapping_add(w16);
+            entries.push(w25);
+            cols.push(w23 as u8);
+            offsets.push(w28);
+            let wmul = w24.wrapping_mul(w26);
+            max_prod = max_prod.max(wmul);
+            if w19b & 2 != 0 {
+                // long symbol (0x10f8e28)
+                longs.push(w1 | (w5 << 8) | w18);
+                w5 = w5.wrapping_add(w13);
+                w4 = 0;
+                w7 = 0;
+                w18 = (w18.wrapping_mul(w8).wrapping_add(w5)) & w0;
+                w16 = w16.wrapping_add(w18);
+                w18 = byte_at(x12);
+                w5 = byte_at(x12 + 1);
+                x12 += 2;
+            } else {
+                // short symbol (0x10f8d70)
+                w7 = wmul.wrapping_add(w7);
+                let bias = if (w7 as i32) < 0 { 14 } else { 7 };
+                let w23s = w4.wrapping_add((w7.wrapping_add(bias) as i32 >> 3) as u32);
+                if w19b & 1 != 0 {
+                    w7 = 0;
+                    w4 = w23s;
+                }
             }
             let pre = w10;
             w10 = (w10 | 0x38).wrapping_sub(11);
             x14 <<= 11;
             x11 = x11.wrapping_sub(((pre >> 3) ^ 7) as usize);
+            w1 = w1.wrapping_add(0x10000);
         }
+        // done (0x10f8e68): final long marker + ctx[0x2c8] total.
+        longs.push(((symbols << 16).wrapping_sub(0x10000)) | (w5 << 8) | w18);
+        let w13f = ((w18.wrapping_mul(w8)).wrapping_add(w5.wrapping_add(w13))) & w0;
+        byte_group_total = w16.wrapping_add(w13f);
     }
 
     // final direction bit (0x10f900c..0x10f9028)
@@ -245,6 +314,12 @@ pub fn state0_table_builder(
         w8,
         symbols,
         dir_bit,
+        entries,
+        offsets,
+        cols,
+        longs,
+        byte_group_total,
+        max_prod,
     }
 }
 
@@ -322,7 +397,9 @@ pub fn decode_first_subblock_indices(
     let hdr = parse_sub_block_header(&mut fwd)
         .ok_or_else(|| super::McError::MeshFraming("empty first sub-block".into()))?;
 
-    let tb = state0_table_builder(payload, fwd.pos, sub_a.wrapping_sub(8), 0, 0);
+    // `w13 = 0`: the table values are unused on the index path (only the cursor
+    // advance matters, which is `w13`-independent).
+    let tb = state0_table_builder(payload, fwd.pos, sub_a.wrapping_sub(8), 0, 0, 0);
 
     // State 3 decodes the shared code (zstd) + data (raw) streams; the forward
     // cursor (`fwd`) then carries each subsequent sub-mesh's transform header.
@@ -422,11 +499,21 @@ mod tests {
 
         // State-0 table builder cursor transition (the hard, validated piece).
         let sub_a = section.first_chunk.sub_a_size as usize;
-        let tb = state0_table_builder(payload, fwd.pos, sub_a - 8, 0, 0);
+        let tb = state0_table_builder(payload, fwd.pos, sub_a - 8, 0, 0, 7);
         assert_eq!(tb.fwd, 15, "forward cursor after table builder");
         assert_eq!(tb.rev_ptr, sub_a - 8 - 18, "reverse-A ptr (P+32807)");
         assert_eq!(tb.rev_bitpos, 50, "reverse-A bit position");
         assert_eq!((tb.w8, tb.symbols, tb.dir_bit), (3327, 8, 1));
+        // Canonical-Huffman table values (golden, from the oracle/emulator).
+        assert_eq!(
+            tb.entries,
+            [0x0c00100b, 0x0c000803, 0x0c000803, 0x10000a13, 0x1000100a, 0x1000100a, 0x10000803, 0x10000801]
+        );
+        assert_eq!(tb.offsets, [0, 6, 9, 39928, 39932, 39936, 39940, 39943]);
+        assert_eq!(tb.cols, [0, 6, 9, 0, 4, 8, 12, 15]);
+        assert_eq!(tb.longs, [131340, 458768]);
+        assert_eq!(tb.byte_group_total, 93160);
+        assert_eq!(tb.max_prod, 48);
 
         // Window decode (zstd code stream + raw data stream) + index decode of
         // the whole first sub-block (idx#1 6606 + pad + idx#2 1662 = 99.3% of
