@@ -104,12 +104,13 @@ src/
 │   ├── read.rs         MCPK header parser (magic/flags/reserved/size descriptor)
 │   ├── write.rs        Verbatim writer (byte-identical no-op round-trip)
 │   ├── codec.rs        Magicless-zstd extract + repack (streaming decode; no dict)
-│   ├── mesh.rs         FMSH mesh-section framing parser (has-mesh flag, header, chunk, sizes); geometry NOT decoded
+│   ├── mesh.rs         FMSH mesh-section framing parser (has-mesh flag, header, chunk, sizes)
+│   ├── geometry.rs     FMSH geometry transport: fwd/reverse readers, super-block/sub-block header, state-0 table-builder cursor, zstd-block + raw windows, first-sub-block index decode (bufA 99.3% from scratch); vertex coder TODO
 │   └── error.rs        McError (magic/flags/reserved/size/zstd/mesh-framing context)
 ├── meshopt/            Pure-Rust meshoptimizer 0.15 codec (reference + encoder; MeshCodec uses a custom entropy backend)
 │   ├── mod.rs          Public encode/decode_{vertex_buffer,index_buffer,index_sequence} + decode_index_buffer_split + read_indices
 │   ├── vertex.rs       Vertex codec (0xa0): byte-group planes, zigzag deltas, tail
-│   ├── index.rs        Index buffer (0xe0 v0/v1, vertex/edge FIFOs) + index sequence (0xd0) + split-(code,data)-stream decode (the MeshCodec form)
+│   ├── index.rs        Index buffer (0xe0 v0/v1, vertex/edge FIFOs) + index sequence (0xd0) + split-(code,data)-stream decode (the MeshCodec form; `_split_used` returns consumed counts for multi-sub-mesh chaining)
 │   └── error.rs        MeshoptError (std + thiserror only)
 ├── sarc/               Native SARC read+write (no `sarc` crate); crate-extractable
 │   ├── mod.rs          Public API, ArcFile/ArcEntry/UnpackedFile, format constants
@@ -647,6 +648,43 @@ Standing backlog (no owner):
 - In-game runtime validation on Switch hardware (requires hardware).
 
 ## Session log
+
+### 2026-06-01 — MeshCodec geometry transport ported to Rust (`src/mc/geometry.rs`); bufA 99.3% from scratch + vertex coder mapped
+Turned the validated Python index framing into a **committable clean-room Rust
+module** and mapped the vertex coder concretely. Two outcomes:
+
+**Committed: `src/mc/geometry.rs` — the FMSH geometry transport primitives.**
+Forward (MSB var-int) + reverse readers; super-block trailer; sub-block header
+(`0x10f9570`); the **state-0 canonical-Huffman table-builder cursor math**
+(`0x10f8d20`/reverse-A `clz` reader — the hard piece, ported byte-exact: Bear
+`fwd→15`, `revA→P+32807`, `bitpos→50`, `w8=3327`, `symbols=8`, `dir=1`); and the
+**window primitive**. Key correction vs the prototype: a zstd "window" is **not**
+a bare literals block — it's a full zstd **block content** (literals **+
+sequences** that RLE/back-ref-expand, e.g. the index code stream = a few `0xf0`
+literals → 131072 bytes), so it decodes via `zstd_pure::block::BlockState::
+decode_compressed` with an external `0x20000` ceiling (the decoder's `0x5ffb90`),
+not `literals::decode`. Window located by a forward var-int = `srcsize`; raw vs
+zstd is one reverse-A flag bit (code=zstd, data=raw). End-to-end test reproduces
+**Bear `bufA[0:16540]` (99.3%) byte-exact from scratch** (super-block → table
+builder → code window via `zstd_pure` → raw data window → per-sub-mesh
+`meshopt::decode_index_buffer_split_used` ×2, align_a-aligned) — no emulator, no
+oracle file (golden bytes hardcoded). Added `meshopt::decode_index_buffer_split_used`
+(returns consumed code/data counts) so sub-meshes chain from one shared stream.
+All green: **160 lib unit** + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds.
+
+**RE: the custom VERTEX byte-group coder structure mapped** (`vtx_trace2.py`
+ground truth). bufB = **two attribute-grouped vertex streams**: stream A (3327
+verts × 12 B, attrs at cols {0,6,9} widths [6,3,3]) at `bufB[0..39928]`, stream B
+(3327 × 16 B, cols {0,4,8,12,15} widths [4,4,4,3,1]) at `bufB[39928..93160]`,
+then a 440-B direct window. The 8 `0x10fb2e0` calls each decode ONE attribute
+(table entry; offsets in `ctx+0x27c`, cols in `ctx+0x310`) into a ws staging
+buffer; the kernel transform (`0x10f9690`→`0x10fa980`) writes transposed
+delta/zigzag into bufB. `0x110d7f0`'s 2-bit mode (jump `0x2cf6acc`): 0/1 =
+canonical-Huffman symbol arrays (widths), 2 = zstd-window value stream, 3 =
+direct (sentinel bytes); `0x110d360` is the 3-stream byte-group width combiner.
+Porting `0x10f8d20` table VALUES + `0x110d7f0` (4 modes) + `0x110d360` + the
+kernel transform + states 4/5/2 is the remaining work (FINDINGS UPDATE #8).
 
 ### 2026-06-01 — MeshCodec INDEX transport framing VALIDATED (prototype) + vertex coder ground truth
 Continued the Stage-1b port. Built a Python framing prototype (gitignored,

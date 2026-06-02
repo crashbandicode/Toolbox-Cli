@@ -408,6 +408,22 @@ pub fn decode_index_buffer_split(
     data: &[u8],
     version: u8,
 ) -> Result<Vec<u8>> {
+    decode_index_buffer_split_used(index_count, index_size, code, data, version).map(|(out, _, _)| out)
+}
+
+/// Like [`decode_index_buffer_split`] but also returns how many `code` and
+/// `data` bytes were consumed (`(indices, code_used, data_used)`).
+///
+/// The MeshCodec transport packs several sub-meshes back-to-back into one shared
+/// `code`/`data` stream pair; the consumed counts let a caller decode the next
+/// sub-mesh by resuming at `code[code_used..]` / `data[data_used..]`.
+pub fn decode_index_buffer_split_used(
+    index_count: usize,
+    index_size: usize,
+    code: &[u8],
+    data: &[u8],
+    version: u8,
+) -> Result<(Vec<u8>, usize, usize)> {
     if !index_count.is_multiple_of(3) {
         return Err(MeshoptError::Invalid(format!(
             "index_count {index_count} must be a multiple of 3"
@@ -422,15 +438,14 @@ pub fn decode_index_buffer_split(
         return Err(MeshoptError::Invalid(format!("index version {version} > 1")));
     }
     let fecmax: i32 = if version >= 1 { 13 } else { 15 };
-    let (out, _code_used, _data_used) = decode_index_core(
+    decode_index_core(
         index_count,
         index_size,
         code,
         data,
         &CODE_AUX_ENCODING_TABLE,
         fecmax,
-    )?;
-    Ok(out)
+    )
 }
 
 // ---------------------------------------------------------------------------
