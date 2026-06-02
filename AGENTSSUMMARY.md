@@ -693,14 +693,21 @@ bits 62-63, but the long/short branch tests **bit 56** and the stream-reset test
 also fixed a latent cursor bug. `w13 = ctx[0x2c0]` (=7 across fixtures, alignment-
 like) is a param (index path passes 0).
 
-**Remaining vertex work — now de-risked by an I/O dump (`trace_rans.py`):** the
-symbol reader `0x110d7f0` modes 0/1 are **standard rANS** (`0x110e270`): `M=2^6`,
-decode table `step_u32[M]=(freq<<16)|(i-cumfreq)` @`+0` + `sym_u16[M]` @`+0x2000`
-(built by `0x110de80`), step `state=(state>>6)*freq+low`, 32-bit renorm at the
-2^31 threshold, 4 interleaved states (`0x110ef70` = 3-lane variant, `0x110f930` =
-RLE fill). Plus the 3-stream width combiner `0x110d360`, the kernel transform
-(delta/zigzag/transpose), and states 4/5/2. Disasm in `local-assets/re/
-_symdec.txt`; rANS I/O ground truth in `_rans.txt` (FINDINGS UPDATE #8).
+**Committed `87e8508`: the rANS decode loop (`0x110e270`) is ported + validated**
+(`geometry::rans_decode`): `M=2^6`, decode table `step[idx]=(freq<<16)|(idx-
+cumfreq)` + spread `sym[idx]`, step `state=(state>>6)*freq+low`, 32-bit forward
+renorm at the 2^31 threshold, 4 interleaved states. Byte-exact vs the emulator-
+dumped I/O (Bear's first rANS call: table + states + stream → all 228 symbols).
+The table's spread is **contiguous** (symbol `s` owns the slot range
+`[cumfreq[s], cumfreq[s]+freq[s])`), not the FSE scatter.
+
+**Remaining vertex work:** the rANS **table build** `0x110de80` (read normalized
+freqs from the stream → fill the contiguous `step`/`sym` tables + init the 4
+states) + the 3-lane variant `0x110ef70` + RLE fill `0x110f930` + the segment
+loop `0x110dc30`; then the 3-stream width combiner `0x110d360`, the kernel
+transform (delta/zigzag/transpose), and states 4/5/2. Disasm `local-assets/re/
+_symdec.txt`; rANS ground truth `_rans.txt` + `vtxgt/rans/`; ports validated in
+`tbl_port.py`/`rans_port.py` (FINDINGS UPDATE #8).
 
 ### 2026-06-01 — MeshCodec INDEX transport framing VALIDATED (prototype) + vertex coder ground truth
 Continued the Stage-1b port. Built a Python framing prototype (gitignored,
