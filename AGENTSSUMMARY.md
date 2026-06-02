@@ -701,13 +701,18 @@ dumped I/O (Bear's first rANS call: table + states + stream → all 228 symbols)
 The table's spread is **contiguous** (symbol `s` owns the slot range
 `[cumfreq[s], cumfreq[s]+freq[s])`), not the FSE scatter.
 
-**Remaining vertex work:** the rANS **table build** `0x110de80` (read normalized
-freqs from the stream → fill the contiguous `step`/`sym` tables + init the 4
-states) + the 3-lane variant `0x110ef70` + RLE fill `0x110f930` + the segment
-loop `0x110dc30`; then the 3-stream width combiner `0x110d360`, the kernel
-transform (delta/zigzag/transpose), and states 4/5/2. Disasm `local-assets/re/
-_symdec.txt`; rANS ground truth `_rans.txt` + `vtxgt/rans/`; ports validated in
-`tbl_port.py`/`rans_port.py` (FINDINGS UPDATE #8).
+**Remaining vertex work:** the rANS **table build** `0x110de80`. Its **frequency
+decoder `0x110e7b0` is reversed + verified per-symbol** (FINDINGS UPDATE #8):
+adaptive `clz`-prefix code, `nbits = width + 2*clz + 1`, `w18 = val - (1<<width)`,
+delta = `unzigzag(w18)` from the previous freq (init `M//nsym`), plus the adaptive
+`width` update — all fields match the trace (Bear M=512 → `[95,408,7,1,1]`). The
+only blocker for the freq port is the reverse bit reader's exact reload/step
+(refill-traced in `trace_refill.py`; `rans_freq_port.py` reproduces freq[0] then
+diverges). Then the contiguous spread + 4-state init + the 3-lane (`0x110ef70`)/
+RLE (`0x110f930`) variants + segment loop `0x110dc30`; then the 3-stream width
+combiner `0x110d360`, the kernel transform (delta/zigzag/transpose), and states
+4/5/2. Disasm `_symdec.txt`/`_tblbuild.txt`; ground truth `_rans.txt`/`_freq*.txt`/
+`vtxgt/`; ports `tbl_port.py`/`rans_port.py` (FINDINGS UPDATE #8).
 
 ### 2026-06-01 — MeshCodec INDEX transport framing VALIDATED (prototype) + vertex coder ground truth
 Continued the Stage-1b port. Built a Python framing prototype (gitignored,
