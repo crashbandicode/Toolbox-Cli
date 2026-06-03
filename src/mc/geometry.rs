@@ -2873,7 +2873,21 @@ pub struct TransformTailCopy1Spec<'a> {
     pub source: &'a [u8],
 }
 
-/// Errors from the `0x10fc5e0` transform tail.
+/// Inputs for the two-byte transform tail (`0x10fc680`).
+pub struct TransformTailCopy2Spec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Source stream pointer at `[x4]`.
+    pub source: &'a [u8],
+}
+
+/// Errors from fixed-width transform copy tails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransformTailCopyError {
     ZeroStride,
@@ -2881,6 +2895,18 @@ pub enum TransformTailCopyError {
     SourceTooSmall,
     CopyBeforeOutput,
     ArithmeticOverflow,
+    UnobservedRecordShape,
+}
+
+struct TransformTailCopyUnitsSpec<'a> {
+    output_stride: usize,
+    block_index: usize,
+    out_offset: usize,
+    records: &'a [TransformTailRecord],
+    source: &'a [u8],
+    unit_size: usize,
+    allow_zero_literal: bool,
+    allow_zero_copy: bool,
 }
 
 /// Apply the observed single-byte copy transform tail (`0x10fc5e0`).
@@ -2893,6 +2919,51 @@ pub fn transform_tail_copy1_into(
     out: &mut [u8],
     spec: TransformTailCopy1Spec<'_>,
 ) -> Result<usize, TransformTailCopyError> {
+    transform_tail_copy_units_into(
+        out,
+        TransformTailCopyUnitsSpec {
+            output_stride: spec.output_stride,
+            block_index: spec.block_index,
+            out_offset: spec.out_offset,
+            records: spec.records,
+            source: spec.source,
+            unit_size: 1,
+            allow_zero_literal: true,
+            allow_zero_copy: true,
+        },
+    )
+}
+
+/// Apply the observed two-byte copy transform tail (`0x10fc680`).
+///
+/// This is the `ldrh`/`strh` sibling of `0x10fc5e0`: literals and copies move
+/// two bytes per record unit, while cursor advance and back-distance remain
+/// byte counts (`0x10fc6c0..0x10fc6fc`). The sole observed call has non-zero
+/// literal and copy counts in every record, so zero-count branch shapes are
+/// rejected until captured.
+pub fn transform_tail_copy2_into(
+    out: &mut [u8],
+    spec: TransformTailCopy2Spec<'_>,
+) -> Result<usize, TransformTailCopyError> {
+    transform_tail_copy_units_into(
+        out,
+        TransformTailCopyUnitsSpec {
+            output_stride: spec.output_stride,
+            block_index: spec.block_index,
+            out_offset: spec.out_offset,
+            records: spec.records,
+            source: spec.source,
+            unit_size: 2,
+            allow_zero_literal: false,
+            allow_zero_copy: false,
+        },
+    )
+}
+
+fn transform_tail_copy_units_into(
+    out: &mut [u8],
+    spec: TransformTailCopyUnitsSpec<'_>,
+) -> Result<usize, TransformTailCopyError> {
     if spec.output_stride == 0 {
         return Err(TransformTailCopyError::ZeroStride);
     }
@@ -2902,34 +2973,57 @@ pub fn transform_tail_copy1_into(
         .and_then(|offset| offset.checked_add(spec.out_offset))
         .ok_or(TransformTailCopyError::ArithmeticOverflow)?;
     let mut source_pos = 0usize;
+    let mut chunk = [0u8; 8];
 
     for record in spec.records {
+        if (!spec.allow_zero_literal && record.literal_count == 0)
+            || (!spec.allow_zero_copy && record.copy_count == 0)
+        {
+            return Err(TransformTailCopyError::UnobservedRecordShape);
+        }
+
         for _ in 0..record.literal_count {
-            let value = *spec
+            let source_end = source_pos
+                .checked_add(spec.unit_size)
+                .ok_or(TransformTailCopyError::ArithmeticOverflow)?;
+            let cursor_end = cursor
+                .checked_add(spec.unit_size)
+                .ok_or(TransformTailCopyError::ArithmeticOverflow)?;
+            let value = spec
                 .source
-                .get(source_pos)
+                .get(source_pos..source_end)
                 .ok_or(TransformTailCopyError::SourceTooSmall)?;
             let slot = out
-                .get_mut(cursor)
+                .get_mut(cursor..cursor_end)
                 .ok_or(TransformTailCopyError::OutputTooSmall)?;
-            *slot = value;
-            source_pos += 1;
+            slot.copy_from_slice(value);
+            source_pos = source_end;
             cursor = cursor
                 .checked_add(spec.output_stride)
                 .ok_or(TransformTailCopyError::ArithmeticOverflow)?;
         }
 
         for _ in 0..record.copy_count {
+            if record.back_distance == 0 {
+                return Err(TransformTailCopyError::CopyBeforeOutput);
+            }
             let source = cursor
                 .checked_sub(record.back_distance)
                 .ok_or(TransformTailCopyError::CopyBeforeOutput)?;
-            let value = *out
-                .get(source)
+            let source_end = source
+                .checked_add(spec.unit_size)
+                .ok_or(TransformTailCopyError::ArithmeticOverflow)?;
+            let cursor_end = cursor
+                .checked_add(spec.unit_size)
+                .ok_or(TransformTailCopyError::ArithmeticOverflow)?;
+            let value = out
+                .get(source..source_end)
                 .ok_or(TransformTailCopyError::CopyBeforeOutput)?;
+            chunk[..spec.unit_size].copy_from_slice(value);
             let slot = out
-                .get_mut(cursor)
+                .get_mut(cursor..cursor_end)
                 .ok_or(TransformTailCopyError::OutputTooSmall)?;
-            *slot = value;
+            slot.copy_from_slice(&chunk[..spec.unit_size]);
             cursor = cursor
                 .checked_add(spec.output_stride)
                 .ok_or(TransformTailCopyError::ArithmeticOverflow)?;
@@ -4838,6 +4932,100 @@ mod tests {
         assert_eq!(out[55 * 16], source[7], "zero-literal record copies only");
     }
 
+    /// Transform tail `0x10fc680`: two-byte literals plus copy-back.
+    ///
+    /// Provenance: `capture_transform_tails.py`, Animal_Dragonfly
+    /// `0x10fc680` call, all three records from entry `0x0a000802`:
+    /// `(1,435,10)`, `(1,77,760)`, `(1,8,100)`. This covers the full
+    /// observed population for the two-byte copy tail and keeps the stride-10
+    /// byte-distance copy units replayed by `verify_transform_tail_copy2.py`.
+    #[test]
+    fn transform_tail_copy2_dragonfly_two_byte_runs() {
+        let source = hex_bytes("ff007f807f80");
+        let records = [
+            TransformTailRecord {
+                literal_count: 1,
+                copy_count: 435,
+                back_distance: 10,
+            },
+            TransformTailRecord {
+                literal_count: 1,
+                copy_count: 77,
+                back_distance: 760,
+            },
+            TransformTailRecord {
+                literal_count: 1,
+                copy_count: 8,
+                back_distance: 100,
+            },
+        ];
+        let expected_lane = hex_bytes(concat!(
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff007f80",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff007f80",
+            "ff007f80ff00ff00ff00ff00ff00ff00ff007f80",
+        ));
+        let mut out = vec![0xee; (expected_lane.len() / 2) * 10];
+
+        let consumed = transform_tail_copy2_into(
+            &mut out,
+            TransformTailCopy2Spec {
+                output_stride: 10,
+                block_index: 0,
+                out_offset: 0,
+                records: &records,
+                source: &source,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(consumed, 6);
+        for (unit_index, expected) in expected_lane.chunks_exact(2).enumerate() {
+            let base = unit_index * 10;
+            assert_eq!(&out[base..base + 2], expected);
+        }
+        for (index, &byte) in out.iter().enumerate() {
+            if index % 10 >= 2 {
+                assert_eq!(byte, 0xee, "non-lane byte {index} changed");
+            }
+        }
+        assert_eq!(&out[10..12], &source[0..2], "rules out a contiguous cursor");
+        assert_eq!(
+            &out[436 * 10..436 * 10 + 2],
+            &source[2..4],
+            "second literal follows a long copy run"
+        );
+        assert_eq!(
+            &out[512 * 10..512 * 10 + 2],
+            &source[2..4],
+            "copy-back distance is in bytes across prior literals"
+        );
+    }
+
     #[test]
     fn transform_tail_copy1_rejects_malformed_inputs() {
         let records = [TransformTailRecord {
@@ -4905,6 +5093,114 @@ mod tests {
                 },
             ),
             Err(TransformTailCopyError::CopyBeforeOutput)
+        );
+    }
+
+    #[test]
+    fn transform_tail_copy2_rejects_unobserved_and_malformed_inputs() {
+        let records = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 1,
+            back_distance: 2,
+        }];
+        let mut out = [0u8; 4];
+        assert_eq!(
+            transform_tail_copy2_into(
+                &mut out,
+                TransformTailCopy2Spec {
+                    output_stride: 0,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &records,
+                    source: &[1, 2],
+                },
+            ),
+            Err(TransformTailCopyError::ZeroStride)
+        );
+        assert_eq!(
+            transform_tail_copy2_into(
+                &mut out,
+                TransformTailCopy2Spec {
+                    output_stride: 2,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &records,
+                    source: &[1],
+                },
+            ),
+            Err(TransformTailCopyError::SourceTooSmall)
+        );
+
+        let mut short_out = [0u8; 1];
+        assert_eq!(
+            transform_tail_copy2_into(
+                &mut short_out,
+                TransformTailCopy2Spec {
+                    output_stride: 2,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &records,
+                    source: &[1, 2],
+                },
+            ),
+            Err(TransformTailCopyError::OutputTooSmall)
+        );
+
+        let copy_before = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 1,
+            back_distance: 4,
+        }];
+        assert_eq!(
+            transform_tail_copy2_into(
+                &mut out,
+                TransformTailCopy2Spec {
+                    output_stride: 2,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &copy_before,
+                    source: &[1, 2],
+                },
+            ),
+            Err(TransformTailCopyError::CopyBeforeOutput)
+        );
+
+        let zero_literal = [TransformTailRecord {
+            literal_count: 0,
+            copy_count: 1,
+            back_distance: 2,
+        }];
+        assert_eq!(
+            transform_tail_copy2_into(
+                &mut out,
+                TransformTailCopy2Spec {
+                    output_stride: 2,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &zero_literal,
+                    source: &[1, 2],
+                },
+            ),
+            Err(TransformTailCopyError::UnobservedRecordShape)
+        );
+
+        let zero_copy = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 0,
+            back_distance: 0,
+        }];
+        assert_eq!(
+            transform_tail_copy2_into(
+                &mut out,
+                TransformTailCopy2Spec {
+                    output_stride: 2,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &zero_copy,
+                    source: &[1, 2],
+                },
+            ),
+            Err(TransformTailCopyError::UnobservedRecordShape)
         );
     }
 
