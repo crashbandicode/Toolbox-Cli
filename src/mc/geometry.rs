@@ -2529,6 +2529,325 @@ pub fn rans_segment_loop_into(
     Ok(dispatch_count)
 }
 
+/// Result of the `0x110d360` width combiner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WidthCombinerResult {
+    /// `w0` on return: sum of the first stream's decoded widths.
+    pub ret: u32,
+    /// Bytes consumed from the three stream pointers stored at `x2`.
+    pub consumed: [usize; 3],
+}
+
+/// Inputs for the 3-stream width combiner (`0x110d360`).
+pub struct WidthCombinerSpec<'a> {
+    /// Number of 8-byte records to write (`w1`).
+    pub count: usize,
+    /// Stride multiplier (`w4`).
+    pub stride: u32,
+    /// High-group shift for third-stream special codes (`w5`).
+    pub shift: u32,
+    /// Attribute byte width added to the second stream (`w6`).
+    pub attr_width: u32,
+    /// Vertex/count limit used by the tail clamp (`w7`).
+    pub limit: u32,
+    /// Payload bytes addressed by the reversed forward bit reader.
+    pub payload: &'a [u8],
+    /// First byte stream (`x2+0`).
+    pub stream0: &'a [u8],
+    /// Second byte stream (`x2+8`).
+    pub stream1: &'a [u8],
+    /// Third little-endian u16 stream (`x2+0x10`).
+    pub stream2: &'a [u8],
+    /// Reversed forward bit reader at `x3`.
+    pub reader: &'a mut RansThreeLaneReader,
+}
+
+/// Errors from the 3-stream width combiner (`0x110d360`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WidthCombinerError {
+    /// The captured population has `count >= 2`; the tail-only branch is guarded.
+    UnobservedTailOnlyCount(usize),
+    /// Output must contain `count` records.
+    OutputTooSmall,
+    /// The reversed forward bit reader tried to load outside the payload.
+    PayloadTooSmall,
+    /// A stream ended before the disassembly would read from it.
+    StreamTooShort { stream: u8 },
+    /// Byte expansion code was outside the observed 0x10..0x1f table.
+    ExpansionCodeTooLarge(u8),
+    /// Reader bit arithmetic underflowed.
+    ReaderUnderflow,
+    /// A small third-stream history reference pointed before the output history.
+    HistoryOutOfBounds,
+    /// Shift/count arithmetic overflowed.
+    ArithmeticOverflow,
+}
+
+const WIDTH_EXPAND_TABLE: [(u32, u32); 16] = [
+    (1, 0),
+    (1, 2),
+    (1, 4),
+    (1, 6),
+    (2, 8),
+    (2, 12),
+    (3, 16),
+    (3, 24),
+    (4, 32),
+    (5, 48),
+    (6, 80),
+    (7, 144),
+    (8, 272),
+    (9, 528),
+    (10, 1040),
+    (11, 2064),
+];
+
+fn checked_width_u64_le(buf: &[u8], ptr: usize) -> Result<u64, WidthCombinerError> {
+    let end = ptr
+        .checked_add(8)
+        .ok_or(WidthCombinerError::PayloadTooSmall)?;
+    let bytes = buf
+        .get(ptr..end)
+        .ok_or(WidthCombinerError::PayloadTooSmall)?;
+    Ok(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+fn reload_width_reader(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+) -> Result<(), WidthCombinerError> {
+    let bitpos = reader.bitpos;
+    let word = checked_width_u64_le(payload, reader.ptr)?.swap_bytes();
+    let step = ((bitpos >> 3) ^ 7) as usize;
+    reader.ptr = reader
+        .ptr
+        .checked_add(step)
+        .ok_or(WidthCombinerError::PayloadTooSmall)?;
+    reader.acc |= word >> (bitpos & 63);
+    reader.bitpos = bitpos | 0x38;
+    Ok(())
+}
+
+fn take_width_bits(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+    bits: u32,
+) -> Result<u32, WidthCombinerError> {
+    let bitpos = reader
+        .bitpos
+        .checked_sub(bits)
+        .ok_or(WidthCombinerError::ReaderUnderflow)?;
+    let extra = if bits == 0 {
+        0
+    } else {
+        reader.acc >> (64 - bits)
+    };
+    let shifted = if bits == 64 { 0 } else { reader.acc << bits };
+    let word = checked_width_u64_le(payload, reader.ptr)?.swap_bytes();
+    let step = ((bitpos >> 3) ^ 7) as usize;
+    reader.ptr = reader
+        .ptr
+        .checked_add(step)
+        .ok_or(WidthCombinerError::PayloadTooSmall)?;
+    reader.acc = shifted | (word >> (bitpos & 63));
+    reader.bitpos = bitpos | 0x38;
+    Ok(extra as u32)
+}
+
+fn decode_width_byte(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+    byte: u8,
+) -> Result<u32, WidthCombinerError> {
+    if byte < 0x10 {
+        return Ok(byte as u32);
+    }
+    let (bits, base) = *WIDTH_EXPAND_TABLE
+        .get((byte - 0x10) as usize)
+        .ok_or(WidthCombinerError::ExpansionCodeTooLarge(byte))?;
+    take_width_bits(payload, reader, bits).map(|extra| base + extra + 0x10)
+}
+
+fn read_width_u8(stream: &[u8], pos: &mut usize, stream_id: u8) -> Result<u8, WidthCombinerError> {
+    let byte = stream
+        .get(*pos)
+        .copied()
+        .ok_or(WidthCombinerError::StreamTooShort { stream: stream_id })?;
+    *pos += 1;
+    Ok(byte)
+}
+
+fn read_width_u16(
+    stream: &[u8],
+    pos: &mut usize,
+    stream_id: u8,
+) -> Result<u16, WidthCombinerError> {
+    let end = pos
+        .checked_add(2)
+        .ok_or(WidthCombinerError::StreamTooShort { stream: stream_id })?;
+    let bytes = stream
+        .get(*pos..end)
+        .ok_or(WidthCombinerError::StreamTooShort { stream: stream_id })?;
+    *pos = end;
+    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn decode_width_third_special(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+    code: u16,
+    stride: u32,
+    shift: u32,
+) -> Result<u32, WidthCombinerError> {
+    let raw = (code - 3) as u32;
+    let bits = raw & 0x1f;
+    let high = raw >> 5;
+    let extra = take_width_bits(payload, reader, bits)?;
+    let low = extra
+        .checked_add((1u32 << bits) - 1)
+        .ok_or(WidthCombinerError::ArithmeticOverflow)?;
+    let scaled_low = low
+        .checked_mul(stride)
+        .ok_or(WidthCombinerError::ArithmeticOverflow)?;
+    let scaled_high = high
+        .checked_shl(shift)
+        .ok_or(WidthCombinerError::ArithmeticOverflow)?;
+    scaled_low
+        .checked_add(scaled_high)
+        .ok_or(WidthCombinerError::ArithmeticOverflow)
+}
+
+fn width_history_value(
+    out: &[[u32; 2]],
+    history_index: i64,
+    index: u32,
+) -> Result<u32, WidthCombinerError> {
+    let source = history_index
+        .checked_sub(index as i64)
+        .ok_or(WidthCombinerError::HistoryOutOfBounds)?;
+    if source < 0 {
+        return Err(WidthCombinerError::HistoryOutOfBounds);
+    }
+    out.get(source as usize)
+        .map(|record| record[1])
+        .ok_or(WidthCombinerError::HistoryOutOfBounds)
+}
+
+/// Combine three width streams into `count` records (`0x110d360`).
+///
+/// Stream 0 and stream 1 store inline values for bytes below `0x10`; larger
+/// bytes index the table at `0x2cf69fc`, then pull MSB-first bits from the
+/// reversed forward reader (`0x110d498..0x110d4d4` and `0x110d4e4..0x110d520`).
+/// Stream 2 either references output history for codes `0..=2` or expands a
+/// special code via `(code-3)&0x1f` reader bits plus `(code-3)>>5` shifted by
+/// `w5` (`0x110d3d0..0x110d420`, mirrored in the tail at `0x110d574..0x110d5cc`).
+pub fn width_combiner_into(
+    out: &mut [[u32; 2]],
+    spec: WidthCombinerSpec<'_>,
+) -> Result<WidthCombinerResult, WidthCombinerError> {
+    if spec.count < 2 {
+        return Err(WidthCombinerError::UnobservedTailOnlyCount(spec.count));
+    }
+    if out.len() < spec.count {
+        return Err(WidthCombinerError::OutputTooSmall);
+    }
+
+    reload_width_reader(spec.payload, spec.reader)?;
+
+    let mut pos0 = 0usize;
+    let mut pos1 = 0usize;
+    let mut pos2 = 0usize;
+    let mut sum_first = 0u32;
+    let mut sum_width = 0u32;
+    let mut zero_history = 0i64;
+    let mut history_index = -1i64;
+
+    for output_index in 0..(spec.count - 1) {
+        let first_raw = read_width_u8(spec.stream0, &mut pos0, 0)?;
+        let first = decode_width_byte(spec.payload, spec.reader, first_raw)?;
+        let second_raw = read_width_u8(spec.stream1, &mut pos1, 1)?;
+        let second = decode_width_byte(spec.payload, spec.reader, second_raw)?;
+        let third_code = read_width_u16(spec.stream2, &mut pos2, 2)?;
+        let (third, advance) = if third_code > 2 {
+            (
+                decode_width_third_special(
+                    spec.payload,
+                    spec.reader,
+                    third_code,
+                    spec.stride,
+                    spec.shift,
+                )?,
+                zero_history + 1,
+            )
+        } else {
+            let index = third_code as u32 + u32::from(first == 0);
+            let third = width_history_value(out, history_index, index)?;
+            if index == 0 {
+                zero_history += 1;
+                (third, 0)
+            } else {
+                let advance = zero_history + 1;
+                zero_history = 0;
+                (third, advance)
+            }
+        };
+        if third_code > 2 {
+            zero_history = 0;
+        }
+
+        let second_width = second
+            .checked_add(spec.attr_width)
+            .ok_or(WidthCombinerError::ArithmeticOverflow)?;
+        sum_first = sum_first
+            .checked_add(first)
+            .ok_or(WidthCombinerError::ArithmeticOverflow)?;
+        sum_width = sum_width
+            .checked_add(first)
+            .and_then(|v| v.checked_add(second_width))
+            .ok_or(WidthCombinerError::ArithmeticOverflow)?;
+        out[output_index] = [first | (second_width << 16), third];
+        history_index = history_index
+            .checked_add(advance)
+            .ok_or(WidthCombinerError::ArithmeticOverflow)?;
+    }
+
+    let first_raw = read_width_u8(spec.stream0, &mut pos0, 0)?;
+    let first = decode_width_byte(spec.payload, spec.reader, first_raw)?;
+    let used_width = sum_width
+        .checked_add(first)
+        .ok_or(WidthCombinerError::ArithmeticOverflow)?;
+    let (remaining_limit, third) = if spec.limit <= used_width {
+        (0, 0)
+    } else {
+        let remaining = spec.limit - used_width;
+        let third_code = read_width_u16(spec.stream2, &mut pos2, 2)?;
+        let third = if third_code > 2 {
+            decode_width_third_special(
+                spec.payload,
+                spec.reader,
+                third_code,
+                spec.stride,
+                spec.shift,
+            )?
+        } else {
+            let index = third_code as u32 + u32::from(first == 0);
+            width_history_value(out, history_index, index)?
+        };
+        (remaining, third)
+    };
+
+    out[spec.count - 1] = [first | (remaining_limit << 16), third];
+    let ret = sum_first
+        .checked_add(first)
+        .ok_or(WidthCombinerError::ArithmeticOverflow)?;
+    Ok(WidthCombinerResult {
+        ret,
+        consumed: [pos0, pos1, pos2],
+    })
+}
+
 /// Decode a **raw window**: read the forward var-int `srcsize`, then copy
 /// `srcsize` literal bytes. Returns the bytes and the new forward position.
 pub fn decode_raw_window(payload: &[u8], fwd_pos: usize) -> (Vec<u8>, usize) {
@@ -4145,6 +4464,233 @@ mod tests {
         );
     }
 
+    /// Width combiner (`0x110d360`) with expanded stream bytes, history refs,
+    /// special third-stream codes, and a non-clamped tail.
+    ///
+    /// Provenance: `capture_width_combiner.py`, Animal_Bear call 7. This is the
+    /// compact discriminating call: `count=10,stride=16,shift=0,attr_width=3`,
+    /// first-stream expansion, seven second-stream expansions, one history
+    /// reference, nine special third-stream codes, and tail high half `699`.
+    #[test]
+    fn width_combiner_bear_expanded_history_tail_limit() {
+        let payload = sparse_payload(
+            28357,
+            &[(
+                28328,
+                "a5f1856977d98c4c451d3db51f0c79400101013c00140a000c00822d14",
+            )],
+        );
+        let stream0 = hex_bytes("16001700010000000000");
+        let stream1 = hex_bytes("0f17191d1c1d1c0f19");
+        let stream2 = hex_bytes("08000800090001000b000d000d000b0009000e00");
+        let mut reader = RansThreeLaneReader {
+            ptr: 28328,
+            acc: 0,
+            bitpos: 0,
+        };
+        let mut out = hex_width_records(
+            "0700020010000000040002001000000001000200100000000100020010000000\
+             0100020010000000010002001000000001000200100000000100020010000000\
+             01000200100000000100020010000000",
+        );
+
+        let result = width_combiner_into(
+            &mut out,
+            WidthCombinerSpec {
+                count: 10,
+                stride: 16,
+                shift: 0,
+                attr_width: 3,
+                limit: 3327,
+                payload: &payload,
+                stream0: &stream0,
+                stream1: &stream1,
+                stream2: &stream2,
+                reader: &mut reader,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            out,
+            hex_width_records(
+                "250012004002000000003200000300002c004800900500000000de0240020000\
+                 01000f02501c000000006f023051000000009701a07d000000001200001500\
+                 0000006100500400000000bb02409e0000"
+            )
+        );
+        assert_eq!(
+            result,
+            WidthCombinerResult {
+                ret: 82,
+                consumed: [10, 9, 20],
+            }
+        );
+        assert_eq!(
+            reader,
+            RansThreeLaneReader {
+                ptr: 28351,
+                acc: 0x0004_0404_f000_5028,
+                bitpos: 62,
+            }
+        );
+    }
+
+    /// Width combiner (`0x110d360`) clamped-tail branch.
+    ///
+    /// Provenance: `capture_width_combiner.py`, Animal_Dragonfly call 2:
+    /// `count=2,stride=20,shift=2,attr_width=1,limit=523`. The tail's
+    /// `limit - (sum_width + first)` is non-positive, so the final record's
+    /// high half and second word are both zero.
+    #[test]
+    fn width_combiner_dragonfly_tail_clamps() {
+        let payload = sparse_payload(1207, &[(1190, "1c20c064a5a1c25aa7991d081e287cf867")]);
+        let stream0 = hex_bytes("1a1c");
+        let stream1 = hex_bytes("00");
+        let stream2 = hex_bytes("0700");
+        let mut reader = RansThreeLaneReader {
+            ptr: 1190,
+            acc: 0,
+            bitpos: 0,
+        };
+        let mut out = hex_width_records("0100b3010a00000001004d00f8020000");
+
+        let result = width_combiner_into(
+            &mut out,
+            WidthCombinerSpec {
+                count: 2,
+                stride: 20,
+                shift: 2,
+                attr_width: 1,
+                limit: 523,
+                payload: &payload,
+                stream0: &stream0,
+                stream1: &stream1,
+                stream2: &stream2,
+                reader: &mut reader,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(out, hex_width_records("670001002c010000a301000000000000"));
+        assert_eq!(
+            result,
+            WidthCombinerResult {
+                ret: 522,
+                consumed: [2, 1, 2],
+            }
+        );
+        assert_eq!(
+            reader,
+            RansThreeLaneReader {
+                ptr: 1200,
+                acc: 0x0192_9687_096a_9e64,
+                bitpos: 62,
+            }
+        );
+    }
+
+    #[test]
+    fn width_combiner_rejects_unobserved_and_malformed_inputs() {
+        let mut reader = RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        };
+        let mut one = [[0u32; 2]; 1];
+        assert_eq!(
+            width_combiner_into(
+                &mut one,
+                WidthCombinerSpec {
+                    count: 1,
+                    stride: 1,
+                    shift: 0,
+                    attr_width: 1,
+                    limit: 1,
+                    payload: &[0; 8],
+                    stream0: &[0],
+                    stream1: &[],
+                    stream2: &[0, 0],
+                    reader: &mut reader,
+                },
+            ),
+            Err(WidthCombinerError::UnobservedTailOnlyCount(1))
+        );
+
+        let mut reader = RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        };
+        assert_eq!(
+            width_combiner_into(
+                &mut one,
+                WidthCombinerSpec {
+                    count: 2,
+                    stride: 1,
+                    shift: 0,
+                    attr_width: 1,
+                    limit: 1,
+                    payload: &[0; 8],
+                    stream0: &[0, 0],
+                    stream1: &[0],
+                    stream2: &[3, 0, 3, 0],
+                    reader: &mut reader,
+                },
+            ),
+            Err(WidthCombinerError::OutputTooSmall)
+        );
+
+        let mut two = [[0u32; 2]; 2];
+        let mut reader = RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        };
+        assert_eq!(
+            width_combiner_into(
+                &mut two,
+                WidthCombinerSpec {
+                    count: 2,
+                    stride: 1,
+                    shift: 0,
+                    attr_width: 1,
+                    limit: 1,
+                    payload: &[],
+                    stream0: &[0, 0],
+                    stream1: &[0],
+                    stream2: &[3, 0, 3, 0],
+                    reader: &mut reader,
+                },
+            ),
+            Err(WidthCombinerError::PayloadTooSmall)
+        );
+
+        let mut reader = RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        };
+        assert_eq!(
+            width_combiner_into(
+                &mut two,
+                WidthCombinerSpec {
+                    count: 2,
+                    stride: 1,
+                    shift: 0,
+                    attr_width: 1,
+                    limit: 10,
+                    payload: &[0; 8],
+                    stream0: &[1, 1],
+                    stream1: &[0],
+                    stream2: &[0, 0],
+                    reader: &mut reader,
+                },
+            ),
+            Err(WidthCombinerError::HistoryOutOfBounds)
+        );
+    }
+
     fn hex_bytes(s: &str) -> Vec<u8> {
         let h: Vec<u8> = s.bytes().filter(|b| b.is_ascii_hexdigit()).collect();
         h.chunks(2)
@@ -4167,6 +4713,20 @@ mod tests {
         bytes
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect()
+    }
+
+    fn hex_width_records(s: &str) -> Vec<[u32; 2]> {
+        let bytes = hex_bytes(s);
+        assert_eq!(bytes.len() % 8, 0);
+        bytes
+            .chunks_exact(8)
+            .map(|c| {
+                [
+                    u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+                    u32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+                ]
+            })
             .collect()
     }
 
