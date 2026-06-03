@@ -643,6 +643,21 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec CP1 second-model rANS init cold golden
+**Committed:** CP1 chunk 1a adds a second-model, fixture-free cold-start golden
+for `geometry::rans_init_states_with_cursor` (`0x110dfa0`): Animal_Bass call 0
+at stream `P+394`, `flag=0`, `log=7`, `prod=568`, freqs `[6,118,3,1]`.
+The inline test asserts the byte-exact cold output, real cursor use
+`soff 0->58`, and a warm-only zero-state discriminator that produces different
+states. Durable local evidence: `capture_init_all.py`, `verify_init_invariant.py`,
+and gitignored `local-assets/re/init_bass_p394_golden.json`
+(`capture_init_bass_golden.py`). Replay remains **16/16** init calls across
+Bear/Bass/Dragonfly; scalar `prod<4` and `prod&3` tail remain typed-error guards
+because the enumerate-all population still does not hit them. Next: CP2,
+`0x110ef70` / stride-3 rANS decode for Bass (`count=960`, `w2=320`, `stride=3`).
+All green: **161 lib unit** (incl. **15** `mc::geometry`) + all integration;
+clippy `--all-targets` clean; `--no-default-features` builds.
+
 ### 2026-06-03 — MeshCodec `0x110dfa0` generic rANS init completed
 **Committed:** `geometry::rans_init_states_with_cursor` now covers the generic
 four-lane rANS init primitive (`0x110dfa0`) instead of only the warm, offset-0

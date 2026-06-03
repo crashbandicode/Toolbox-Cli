@@ -1223,6 +1223,47 @@ mod tests {
         assert_ne!(reset, AFTER_CONT);
     }
 
+    /// Second-model cold-start coverage for the generic init (`0x110dfa0`).
+    ///
+    /// Provenance: `capture_init_all.py` + `verify_init_invariant.py` over all
+    /// fixtures, with the minimal inline bytes dumped by
+    /// `capture_init_bass_golden.py` to `local-assets/re/init_bass_p394_golden.json`.
+    /// Animal_Bass call 0 enters at stream `P+394` with `flag=0`, `log=7`,
+    /// `prod=568`, and freqs `[6,118,3,1]`. This cross-model cold call rules out
+    /// the warm-only implementation independently of the Bear continuation test.
+    #[test]
+    fn rans_init_states_cold_start_bass_p394() {
+        const COLD_FREQS: [u16; 4] = [6, 118, 3, 1];
+        const AFTER_COLD: [u64; 4] = [0x3901a31f71085, 0x4552634d0a, 0x2e32d8bbfce, 0x186072316a8];
+        const WARM_ONLY_ZERO_STATES: [u64; 4] = [
+            0x6911728ba,
+            0x6d5b56bbf6335,
+            0x8f75efe56b1a856,
+            0x1ea79cf8bde9ddb,
+        ];
+        let stream = hex_bytes(
+            "06b1d9f57282a6854e36f8f582058fa2643c3f96dbfe7fed52044497928f64d\
+             6e86b8418cf7502f4d95c243c19f0e372b0e6680ab7e79cdd9e7f8a31da5742a7",
+        );
+        let table = rans_spread(7, &COLD_FREQS);
+        let mut state = RansStateBuffer::cold();
+        let mut cursor = RansStreamCursor::default();
+
+        let cold =
+            rans_init_states_with_cursor(&table, &stream, 568, 1, &mut state, &mut cursor).unwrap();
+        assert_eq!(cold.states, AFTER_COLD);
+        assert_eq!(cold.flag, 0xf);
+        assert_eq!((cold.stream_used, cold.stream_offset), (58, 58));
+        assert_eq!(state.flag, 0xf);
+        assert_eq!(cursor.offset, 58);
+
+        let warm_only = rans_init_states(&table, &stream, 568, 1, [0; 4])
+            .unwrap()
+            .states;
+        assert_eq!(warm_only, WARM_ONLY_ZERO_STATES);
+        assert_ne!(warm_only, AFTER_COLD);
+    }
+
     #[test]
     fn rans_init_states_rejects_truncated_cold_loader() {
         let table = rans_spread(9, &[95, 408, 7, 1, 1]);
