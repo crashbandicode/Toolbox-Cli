@@ -643,6 +643,21 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP2 checkpoint segment loop
+**Committed:** B2-CP2 landed in `52664f8`, porting the `0x110dc30`
+segment loop as `geometry::rans_segment_loop_into`. It threads the shared
+reverse reader, forward rANS stream pointer, descriptor-workspace states, and
+lane-interleaved output while composing the B2-CP1 `0x110de80` descriptor
+builder and `0x110de00` dispatch wrapper. Durable local evidence:
+`capture_segment_loop.py` enumerated the full local population as exactly one
+loop call (Bear 0 / Bass 1 / Dragonfly 0), and `verify_segment_loop.py`
+replays **1/1** final output/context/state/schedule with dispatch modes
+{0:1, 2:3}. Mode 1 inside this loop is guarded as unobserved. Fixture-free
+Rust tests cover the Bass full 968-slot padded output plus malformed bounds.
+All green: **179 lib unit** (incl. **33** `mc::geometry`) + all integration;
+clippy `--all-targets` clean; `--no-default-features` builds. Next: B2-CP3
+3-stream width combiner `0x110d360`.
+
 ### 2026-06-03 - MeshCodec B2-CP1 checkpoint green
 **Committed:** B2-CP1 checkpoint is now fully green after cleanup commit
 `bda3c17` removed the redundant `u32` casts that made clippy warn in
