@@ -643,6 +643,25 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP4 chunk four-byte transform tail
+**Committed:** B2-CP4 chunk landed in `7206bcc`, porting the observed
+`0x10fc7d0` four-byte transform tail as
+`geometry::transform_tail_copy4_into`. It uses the shared fixed-width copy
+routine with four-byte literal/copy units while keeping stride and
+back-distance in bytes. Durable local evidence: `capture_transform_tails.py`
+found 2 calls to this address (Bear and Bass, both stride 16), and
+`verify_transform_tail_copy4.py` replayed **2/2**. Coverage: record counts
+{31,143}, 150 literal runs, 24 zero-literal runs, 172 copy runs, 2 zero-copy
+runs, 3516 literal units, and 370 copy units. Rust coverage: fixture-free Bear
+golden for first entry `0x1000100a` record, observed zero-literal and zero-copy
+branch tests, plus defensive rejection for zero stride, source underflow,
+output underflow, and copy-before-output. Per-chunk sample green:
+`cargo test --lib transform_tail_copy` (7 passed) and `cargo build`. Last
+checkpoint baseline remains: All green: **182 lib unit** (incl. **36**
+`mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds. Next: continue B2-CP4 with observed
+delta-match tails `0x10fbcc0` and `0x10fbdc0`.
+
 ### 2026-06-03 - MeshCodec B2-CP4 chunk two-byte transform tail
 **Committed:** B2-CP4 chunk landed in `0ac04ab`, porting the observed
 `0x10fc680` two-byte transform tail as
