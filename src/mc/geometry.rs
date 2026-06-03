@@ -838,15 +838,15 @@ pub fn rans_read_segment_header(
     } else {
         let high_bits = bits << 9;
         let low_count = (short_class | (((bits >> 0x33) as u32) & 0x70)).wrapping_add(0x11);
-        let mid_count = ((((bits >> 0x2d) as u32) & 0x180)
+        let mid_count = (((bits >> 0x2d) as u32) & 0x180)
             .wrapping_add(low_count)
-            .wrapping_add(0x80)) as u32;
+            .wrapping_add(0x80);
 
         let wide_bits = bits << 0x0c;
         let wider_bits = bits << 0x13;
-        let wide_count = ((((wide_bits >> 0x30) as u32) & 0xfe00)
+        let wide_count = (((wide_bits >> 0x30) as u32) & 0xfe00)
             .wrapping_add(mid_count)
-            .wrapping_add(0x200)) as u32;
+            .wrapping_add(0x200);
 
         let (selected_bits, selected_count, selected_bitpos) = if high_bits >> 63 == 0 {
             (wide_bits, mid_count, refill_bitpos.wrapping_sub(0x0c))
