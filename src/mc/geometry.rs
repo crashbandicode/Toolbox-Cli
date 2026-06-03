@@ -2887,6 +2887,20 @@ pub struct TransformTailCopy2Spec<'a> {
     pub source: &'a [u8],
 }
 
+/// Inputs for the four-byte transform tail (`0x10fc7d0`).
+pub struct TransformTailCopy4Spec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Source stream pointer at `[x4]`.
+    pub source: &'a [u8],
+}
+
 /// Errors from fixed-width transform copy tails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransformTailCopyError {
@@ -2956,6 +2970,30 @@ pub fn transform_tail_copy2_into(
             unit_size: 2,
             allow_zero_literal: false,
             allow_zero_copy: false,
+        },
+    )
+}
+
+/// Apply the observed four-byte copy transform tail (`0x10fc7d0`).
+///
+/// This is the `ldr`/`str` sibling of `0x10fc5e0`: literals and copies move
+/// four bytes per record unit, while cursor advance and back-distance remain
+/// byte counts (`0x10fc810..0x10fc84c`).
+pub fn transform_tail_copy4_into(
+    out: &mut [u8],
+    spec: TransformTailCopy4Spec<'_>,
+) -> Result<usize, TransformTailCopyError> {
+    transform_tail_copy_units_into(
+        out,
+        TransformTailCopyUnitsSpec {
+            output_stride: spec.output_stride,
+            block_index: spec.block_index,
+            out_offset: spec.out_offset,
+            records: spec.records,
+            source: spec.source,
+            unit_size: 4,
+            allow_zero_literal: true,
+            allow_zero_copy: true,
         },
     )
 }
@@ -5026,6 +5064,121 @@ mod tests {
         );
     }
 
+    /// Transform tail `0x10fc7d0`: four-byte literals plus copy-back.
+    ///
+    /// Provenance: `capture_transform_tails.py`, Animal_Bear `0x10fc7d0` call,
+    /// first record from entry `0x1000100a`: `(101,2,1616)`. The replay script
+    /// covers the full 2-call population; this compact golden keeps the
+    /// observed stride-16 cursor and byte-distance copy units fixture-free.
+    #[test]
+    fn transform_tail_copy4_bear_u32_runs() {
+        let source = hex_bytes(concat!(
+            "3b064795f0051595bf055795f9021688a6033888df0323872307b08ede07e78e7307778ea07fd736f77f913833800638",
+            "4a75cc0b6f746907cf71010d9229a03a132bd13f022daa3a3c1774076e15e80162134f07a43fb316b941bf1b12438917",
+            "ad0e22417e0d023cab0ba23f815191035c4fd8015650b7067a81fa0c7b821012f3831c0cd46c1e030a6f78087c6faf01",
+            "3a0c046f3b0b556a630a796d9b605507025f3602f65d7005b50952f66704bcf7cf0f71fad02d1d0fcb348a117730290f",
+            "dff8009fadf8be9e63f8f09ec1f6ec96faf60198a7f7de9703f8a09a98f7109b54f8d89afe8305383b8490389184d636",
+            "5f8c2b03858e79071a8f0a04bef9b1027dfbe9072efdc702f7d1b203aed33709d0d5c903b39de10eee9bd40a5f9a1010",
+            "3ef12d705ff213747af4416faab1440f1eb2520a2bb0430cfe88840c6189a312468bce0d6ba1750612a05f01309fc405",
+            "a2fe704c6cfdf247fffba54e19b83b040db7010175b52006caece3f933f82ef7e5f2c4f571cce81991c7b21af5cec01a",
+            "b806389451060395b7063a95b8063894d505d094",
+        ));
+        let records = [TransformTailRecord {
+            literal_count: 101,
+            copy_count: 2,
+            back_distance: 1616,
+        }];
+        let expected_lane = hex_bytes(concat!(
+            "3b064795f0051595bf055795f9021688a6033888df0323872307b08ede07e78e7307778ea07fd736f77f913833800638",
+            "4a75cc0b6f746907cf71010d9229a03a132bd13f022daa3a3c1774076e15e80162134f07a43fb316b941bf1b12438917",
+            "ad0e22417e0d023cab0ba23f815191035c4fd8015650b7067a81fa0c7b821012f3831c0cd46c1e030a6f78087c6faf01",
+            "3a0c046f3b0b556a630a796d9b605507025f3602f65d7005b50952f66704bcf7cf0f71fad02d1d0fcb348a117730290f",
+            "dff8009fadf8be9e63f8f09ec1f6ec96faf60198a7f7de9703f8a09a98f7109b54f8d89afe8305383b8490389184d636",
+            "5f8c2b03858e79071a8f0a04bef9b1027dfbe9072efdc702f7d1b203aed33709d0d5c903b39de10eee9bd40a5f9a1010",
+            "3ef12d705ff213747af4416faab1440f1eb2520a2bb0430cfe88840c6189a312468bce0d6ba1750612a05f01309fc405",
+            "a2fe704c6cfdf247fffba54e19b83b040db7010175b52006caece3f933f82ef7e5f2c4f571cce81991c7b21af5cec01a",
+            "b806389451060395b7063a95b8063894d505d0943b064795f0051595",
+        ));
+        let mut out = vec![0xee; (expected_lane.len() / 4) * 16];
+
+        let consumed = transform_tail_copy4_into(
+            &mut out,
+            TransformTailCopy4Spec {
+                output_stride: 16,
+                block_index: 0,
+                out_offset: 0,
+                records: &records,
+                source: &source,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(consumed, 404);
+        for (unit_index, expected) in expected_lane.chunks_exact(4).enumerate() {
+            let base = unit_index * 16;
+            assert_eq!(&out[base..base + 4], expected);
+        }
+        for (index, &byte) in out.iter().enumerate() {
+            if index % 16 >= 4 {
+                assert_eq!(byte, 0xee, "non-lane byte {index} changed");
+            }
+        }
+        assert_eq!(&out[101 * 16..101 * 16 + 4], &source[0..4]);
+        assert_eq!(&out[102 * 16..102 * 16 + 4], &source[4..8]);
+    }
+
+    #[test]
+    fn transform_tail_copy4_allows_observed_zero_literal_and_zero_copy() {
+        let zero_literal = [TransformTailRecord {
+            literal_count: 0,
+            copy_count: 2,
+            back_distance: 5440,
+        }];
+        let mut out = vec![0xee; 5460];
+        out[0..4].copy_from_slice(&[0x30, 0x2a, 0x03, 0xdd]);
+        out[16..20].copy_from_slice(&[0x61, 0x1f, 0x3c, 0xd7]);
+        let consumed = transform_tail_copy4_into(
+            &mut out,
+            TransformTailCopy4Spec {
+                output_stride: 16,
+                block_index: 0,
+                out_offset: 5440,
+                records: &zero_literal,
+                source: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(consumed, 0);
+        assert_eq!(&out[5440..5444], &[0x30, 0x2a, 0x03, 0xdd]);
+        assert_eq!(&out[5456..5460], &[0x61, 0x1f, 0x3c, 0xd7]);
+
+        let zero_copy = [TransformTailRecord {
+            literal_count: 10,
+            copy_count: 0,
+            back_distance: 0,
+        }];
+        let source = hex_bytes(
+            "0a22dae92211dcd3462878d7f0382deca11d35bccb3153c77e33ccd50b4b0fe61b3850c3b251aed4",
+        );
+        let mut out = vec![0xee; 10 * 16];
+        let consumed = transform_tail_copy4_into(
+            &mut out,
+            TransformTailCopy4Spec {
+                output_stride: 16,
+                block_index: 0,
+                out_offset: 0,
+                records: &zero_copy,
+                source: &source,
+            },
+        )
+        .unwrap();
+        assert_eq!(consumed, 40);
+        for (unit_index, expected) in source.chunks_exact(4).enumerate() {
+            let base = unit_index * 16;
+            assert_eq!(&out[base..base + 4], expected);
+        }
+    }
+
     #[test]
     fn transform_tail_copy1_rejects_malformed_inputs() {
         let records = [TransformTailRecord {
@@ -5201,6 +5354,76 @@ mod tests {
                 },
             ),
             Err(TransformTailCopyError::UnobservedRecordShape)
+        );
+    }
+
+    #[test]
+    fn transform_tail_copy4_rejects_malformed_inputs() {
+        let records = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 1,
+            back_distance: 4,
+        }];
+        let mut out = [0u8; 8];
+        assert_eq!(
+            transform_tail_copy4_into(
+                &mut out,
+                TransformTailCopy4Spec {
+                    output_stride: 0,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &records,
+                    source: &[1, 2, 3, 4],
+                },
+            ),
+            Err(TransformTailCopyError::ZeroStride)
+        );
+        assert_eq!(
+            transform_tail_copy4_into(
+                &mut out,
+                TransformTailCopy4Spec {
+                    output_stride: 4,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &records,
+                    source: &[1, 2, 3],
+                },
+            ),
+            Err(TransformTailCopyError::SourceTooSmall)
+        );
+
+        let mut short_out = [0u8; 3];
+        assert_eq!(
+            transform_tail_copy4_into(
+                &mut short_out,
+                TransformTailCopy4Spec {
+                    output_stride: 4,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &records,
+                    source: &[1, 2, 3, 4],
+                },
+            ),
+            Err(TransformTailCopyError::OutputTooSmall)
+        );
+
+        let copy_before = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 1,
+            back_distance: 8,
+        }];
+        assert_eq!(
+            transform_tail_copy4_into(
+                &mut out,
+                TransformTailCopy4Spec {
+                    output_stride: 4,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &copy_before,
+                    source: &[1, 2, 3, 4],
+                },
+            ),
+            Err(TransformTailCopyError::CopyBeforeOutput)
         );
     }
 
