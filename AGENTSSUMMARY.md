@@ -643,6 +643,26 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP4 chunk two-byte transform tail
+**Committed:** B2-CP4 chunk landed in `0ac04ab`, porting the observed
+`0x10fc680` two-byte transform tail as
+`geometry::transform_tail_copy2_into`. It shares the fixed-width copy routine
+with the `0x10fc5e0` byte tail but uses two-byte literal/copy units while
+keeping stride and back-distance in bytes. Durable local evidence:
+`capture_transform_tails.py` found exactly 1 call to this address in
+Dragonfly, and `verify_transform_tail_copy2.py` replayed it **1/1**.
+Coverage: stride {10}, block index {0}, 3 records, 3 literal runs, 0
+zero-literal runs, 3 copy runs, 0 zero-copy runs, 3 literal units, 520 copy
+units, and 6 source bytes. Rust coverage: fixture-free Dragonfly golden for
+the full entry `0x0a000802` record population plus defensive rejection for
+zero stride, source underflow, output underflow, copy-before-output, and the
+unobserved zero-literal or zero-copy record shapes. Per-chunk sample green:
+`cargo test --lib transform_tail_copy` (4 passed) and `cargo build`. Last
+checkpoint baseline remains: All green: **182 lib unit** (incl. **36**
+`mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds. Next: continue B2-CP4 with `0x10fc7d0`
+four-byte copy tail or the delta-match tails.
+
 ### 2026-06-03 - MeshCodec B2-CP4 chunk single-byte transform tail
 **Committed:** B2-CP4 chunk landed in `bbc0cf7`, porting the observed
 `0x10fc5e0` single-byte transform tail as
