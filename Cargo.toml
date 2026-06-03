@@ -11,8 +11,8 @@ readme = "README.md"
 keywords = ["nintendo", "switch", "bflyt", "bntx", "modding"]
 categories = ["command-line-utilities", "parser-implementations"]
 default-run = "nx-layout-toolbox"
-# Internal dev log; not useful to crate consumers.
-exclude = ["/AGENTSSUMMARY.md"]
+# Internal dev log + agent guidance; not useful to crate consumers.
+exclude = ["/AGENTSSUMMARY.md", "/AGENTS.md", "/CURSOR.md"]
 
 [features]
 default = ["cli"]
