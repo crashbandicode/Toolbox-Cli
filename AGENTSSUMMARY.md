@@ -643,6 +643,27 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP1 chunk segment header parser
+**Committed:** B2-CP1 chunk 1c ports the header parser portion of `0x110de80`
+as `geometry::rans_read_segment_header`. It consumes the reverse-bit segment
+header and returns mode, log, table-count for modes 0/1, RLE value for mode 2,
+and the advanced reader state. Durable local evidence: refreshed
+`capture_segment_dispatch.py` now records 87 non-RLE header snapshots
+(`0x110df48`) plus the 12 RLE headers in the build rows; new
+`verify_segment_header.py` replays the parser **99/99** over all table-build
+headers with mode counts {0:40, 1:47, 2:12}. Fixture-free tests cover the short
+non-RLE form, all three observed long-form count-width branches, the mode-2 RLE
+value form, and truncated payload rejection. The long-form gotcha is the
+`csel ... eq` polarity after `tst`: eq means the tested top bit is clear. Next:
+port/connect the
+mode-specific table builders after this header (`0x110e540` for mode 0 and
+`0x110f3c0` for mode 1) so segment descriptors no longer come from capture
+fixtures, then run the B2-CP1 checkpoint full gate.
+Sample green: **27 `mc::geometry` lib unit**; `verify_segment_header.py` and
+`verify_segment_dispatch.py` green. Last checkpoint full-suite baseline remains:
+All green: **163 lib unit** (incl. **17** `mc::geometry`) + all integration;
+clippy `--all-targets` clean; `--no-default-features` builds.
+
 ### 2026-06-03 - MeshCodec B2-CP1 chunk three-lane segment decoder
 **Committed:** B2-CP1 chunk 1b ports `0x110ef70` as
 `geometry::rans_three_lane_decode_into` and wires mode 1 through

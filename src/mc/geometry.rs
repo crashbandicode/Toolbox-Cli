@@ -747,6 +747,138 @@ pub fn rans_rle_fill(
     Ok(())
 }
 
+/// Parsed segment header from `0x110de80`, before the mode-specific table build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RansSegmentHeader {
+    /// Descriptor mode: 0 = rANS, 1 = three-lane, 2 = RLE.
+    pub mode: u32,
+    /// Table log for modes 0 and 1.
+    pub log: u32,
+    /// Count argument passed to `0x110e540` or `0x110f3c0` for modes 0 and 1.
+    pub table_count: Option<u32>,
+    /// RLE value for mode 2.
+    pub value: u32,
+    /// Reader state after consuming the segment header.
+    pub reader: RansFreqReader,
+}
+
+/// Errors from the segment-header parser (`0x110de80`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RansSegmentHeaderError {
+    /// The header reader tried to load an 8-byte word outside the payload.
+    PayloadTooSmall,
+    /// Mode-2 value varint did not terminate inside the 32-bit field shape.
+    VarintTooLong,
+}
+
+#[inline]
+fn checked_header_u64_le(buf: &[u8], ptr: usize) -> Result<u64, RansSegmentHeaderError> {
+    let end = ptr
+        .checked_add(8)
+        .ok_or(RansSegmentHeaderError::PayloadTooSmall)?;
+    let bytes = buf
+        .get(ptr..end)
+        .ok_or(RansSegmentHeaderError::PayloadTooSmall)?;
+    Ok(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+/// Parse the reverse-bit segment header (`0x110de80`) without running the
+/// following mode-specific table build.
+///
+/// The first five bits select either the short mode-0 form, the mode-2 RLE
+/// value form, or the long form. The long form's two `csel ... eq` blocks are
+/// polarity-sensitive: after `tst`, `eq` means the tested top bit is clear.
+pub fn rans_read_segment_header(
+    payload: &[u8],
+    reader: RansFreqReader,
+) -> Result<RansSegmentHeader, RansSegmentHeaderError> {
+    const MASK64: u64 = u64::MAX;
+
+    let bitpos = reader.bitpos;
+    let ptr_step = ((bitpos >> 3) ^ 7) as usize;
+    let ptr = reader
+        .ptr
+        .checked_sub(ptr_step)
+        .ok_or(RansSegmentHeaderError::PayloadTooSmall)?;
+    let bits =
+        ((checked_header_u64_le(payload, reader.ptr)? >> (bitpos & 63)) | reader.acc) & MASK64;
+    let mut shifted = bits << 5;
+    let short_class = ((bits >> 59) & 0xf) as u32;
+    let refill_bitpos = bitpos | 0x38;
+
+    let (table_count, next_bitpos) = if bits >> 63 == 0 {
+        let next_bitpos = refill_bitpos.wrapping_sub(5);
+        if short_class == 0 {
+            let mut value = 0u32;
+            for _ in 0..5 {
+                let prev = value;
+                let byte = (shifted >> 56) as u32;
+                shifted <<= 8;
+                value = (byte & 0x7f) | ((prev & 0x01ff_ffff) << 7);
+                let value_bitpos = next_bitpos.wrapping_sub(8);
+                if byte <= 0x7f {
+                    return Ok(RansSegmentHeader {
+                        mode: 2,
+                        log: 0,
+                        table_count: None,
+                        value,
+                        reader: RansFreqReader {
+                            ptr,
+                            acc: shifted,
+                            bitpos: value_bitpos,
+                        },
+                    });
+                }
+            }
+            return Err(RansSegmentHeaderError::VarintTooLong);
+        }
+        (short_class + 1, next_bitpos)
+    } else {
+        let high_bits = bits << 9;
+        let low_count = (short_class | (((bits >> 0x33) as u32) & 0x70)).wrapping_add(0x11);
+        let mid_count = ((((bits >> 0x2d) as u32) & 0x180)
+            .wrapping_add(low_count)
+            .wrapping_add(0x80)) as u32;
+
+        let wide_bits = bits << 0x0c;
+        let wider_bits = bits << 0x13;
+        let wide_count = ((((wide_bits >> 0x30) as u32) & 0xfe00)
+            .wrapping_add(mid_count)
+            .wrapping_add(0x200)) as u32;
+
+        let (selected_bits, selected_count, selected_bitpos) = if high_bits >> 63 == 0 {
+            (wide_bits, mid_count, refill_bitpos.wrapping_sub(0x0c))
+        } else {
+            (wider_bits, wide_count, refill_bitpos.wrapping_sub(0x13))
+        };
+
+        if shifted >> 63 == 0 {
+            (low_count, refill_bitpos.wrapping_sub(9))
+        } else {
+            shifted = selected_bits;
+            (selected_count, selected_bitpos)
+        }
+    };
+
+    let mode = ((shifted >> 63) & 1) as u32;
+    let log = ((shifted >> 59) & 0xf) as u32;
+    shifted <<= 5;
+    let next_bitpos = next_bitpos.wrapping_sub(5);
+    Ok(RansSegmentHeader {
+        mode,
+        log,
+        table_count: Some(table_count),
+        value: 0,
+        reader: RansFreqReader {
+            ptr,
+            acc: shifted,
+            bitpos: next_bitpos,
+        },
+    })
+}
+
 /// Reverse-reader state for the 3-lane segment decoder (`0x110ef70`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RansThreeLaneReader {
@@ -1877,6 +2009,182 @@ mod tests {
         assert_eq!(
             rans_rle_fill(&mut bass, 0, 1, 0),
             Err(RansRleFillError::ZeroStride)
+        );
+    }
+
+    /// Short segment-header form for mode 0 (`0x110de80`).
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Bear table-build 1.
+    /// The top bit is clear and the 4-bit class is nonzero, so
+    /// `0x110deb4..0x110df54` yields mode 0, log 9, and table count 5.
+    #[test]
+    fn rans_segment_header_short_mode0() {
+        let payload = hex_bytes("1117eda742422e81");
+        let header = rans_read_segment_header(
+            &payload,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0x227f1b04e40cc5e4,
+                bitpos: 61,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            header,
+            RansSegmentHeader {
+                mode: 0,
+                log: 9,
+                table_count: Some(5),
+                value: 0,
+                reader: RansFreqReader {
+                    ptr: 0,
+                    acc: 0xfc6c139033179000,
+                    bitpos: 51,
+                },
+            }
+        );
+    }
+
+    /// Long segment-header form for mode 1 (`0x110de80`).
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Bear table-build 0.
+    /// This covers the long path at `0x110dec4..0x110df60`; the `csel ... eq`
+    /// polarity after `tst` is the discriminating rule.
+    #[test]
+    fn rans_segment_header_long_mode1() {
+        let payload = hex_bytes("5555f9abcff355b5");
+        let header = rans_read_segment_header(
+            &payload,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0x0c736b6abdf6deec,
+                bitpos: 58,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            header,
+            RansSegmentHeader {
+                mode: 1,
+                log: 1,
+                table_count: Some(2),
+                value: 0,
+                reader: RansFreqReader {
+                    ptr: 0,
+                    acc: 0xcdadaaf7db7bb400,
+                    bitpos: 48,
+                },
+            }
+        );
+    }
+
+    /// Long segment-header form selecting the mid-width count.
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Bear table-build 6.
+    /// This covers the `high_bits`/`wide_bits` branch where the second `tst`
+    /// finds a clear top bit and selects the 12-bit form.
+    #[test]
+    fn rans_segment_header_long_mid_width() {
+        let payload = hex_bytes("00a03c61c56d6014");
+        let header = rans_read_segment_header(
+            &payload,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0xbf044239f0e66c14,
+                bitpos: 56,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            header,
+            RansSegmentHeader {
+                mode: 0,
+                log: 8,
+                table_count: Some(248),
+                value: 0,
+                reader: RansFreqReader {
+                    ptr: 0,
+                    acc: 0x8473e1ccd8280000,
+                    bitpos: 39,
+                },
+            }
+        );
+    }
+
+    /// Long segment-header form selecting the widest observed count.
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Bear table-build 26.
+    /// This covers the `high_bits`/`wider_bits` branch where the long path
+    /// consumes 19 header bits before reading mode/log.
+    #[test]
+    fn rans_segment_header_long_wide_width() {
+        let payload = hex_bytes("a814d2b6402520a7");
+        let header = rans_read_segment_header(
+            &payload,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0xbf401a00400000f4,
+                bitpos: 59,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            header,
+            RansSegmentHeader {
+                mode: 1,
+                log: 10,
+                table_count: Some(760),
+                value: 0,
+                reader: RansFreqReader {
+                    ptr: 0,
+                    acc: 0x00400000f4000000,
+                    bitpos: 35,
+                },
+            }
+        );
+    }
+
+    /// RLE segment-header value form for mode 2 (`0x110de80`).
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Dragonfly table-build
+    /// 18. The short class is zero, so `0x110df64..0x110df98` decodes the value
+    /// varint and returns without a table build.
+    #[test]
+    fn rans_segment_header_rle_value127() {
+        let payload = hex_bytes("f1a106940000623a");
+        let header = rans_read_segment_header(
+            &payload,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0x03fbfd0221c04704,
+                bitpos: 59,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            header,
+            RansSegmentHeader {
+                mode: 2,
+                log: 0,
+                table_count: None,
+                value: 127,
+                reader: RansFreqReader {
+                    ptr: 0,
+                    acc: 0x7fa0443808e0e000,
+                    bitpos: 46,
+                },
+            }
+        );
+        assert_eq!(
+            rans_read_segment_header(
+                &payload[..7],
+                RansFreqReader {
+                    ptr: 0,
+                    acc: 0x03fbfd0221c04704,
+                    bitpos: 59,
+                },
+            ),
+            Err(RansSegmentHeaderError::PayloadTooSmall)
         );
     }
 
