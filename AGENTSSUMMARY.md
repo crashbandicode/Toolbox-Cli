@@ -643,6 +643,24 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP4 chunk single-byte transform tail
+**Committed:** B2-CP4 chunk landed in `bbc0cf7`, porting the observed
+`0x10fc5e0` single-byte transform tail as
+`geometry::transform_tail_copy1_into`. Durable local evidence:
+`capture_transform_tails.py` found 8 transform-tail calls total across
+Bear/Bass/Dragonfly and `verify_transform_tail_copy1.py` replayed the
+`0x10fc5e0` subset **3/3**. Parameter coverage for this tail: strides
+{16,20}, block index {0}, record counts {1,10,12}, 14 literal runs, 9
+zero-literal runs, 22 copy runs, 686 literal bytes, and 3723 copy bytes.
+Rust coverage: fixture-free Bear golden for the first two entry
+`0x10000801` records plus defensive rejection for zero stride, source
+underflow, output underflow, and copy-before-output. Per-chunk sample green:
+`cargo test --lib transform_tail_copy1` (2 passed) and `cargo build`. Last
+checkpoint baseline remains: All green: **182 lib unit** (incl. **36**
+`mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds. Next: continue B2-CP4 with another observed
+transform tail, likely `0x10fc7d0` or `0x10fc680`.
+
 ### 2026-06-03 - MeshCodec B2-CP3 checkpoint width combiner
 **Committed:** B2-CP3 landed in `f3e4673`, porting the `0x110d360`
 3-stream width combiner as `geometry::width_combiner_into`. It decodes
