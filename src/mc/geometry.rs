@@ -2848,6 +2848,97 @@ pub fn width_combiner_into(
     })
 }
 
+/// One run/copy record consumed by the `0x10fc5e0` byte-copy transform tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransformTailRecord {
+    /// Number of literal bytes copied from source stream 0.
+    pub literal_count: u16,
+    /// Number of bytes copied from earlier output at `back_distance`.
+    pub copy_count: u16,
+    /// Byte distance from the current output position to the copy source.
+    pub back_distance: usize,
+}
+
+/// Inputs for the single-byte transform tail (`0x10fc5e0`).
+pub struct TransformTailCopy1Spec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Source stream pointer at `[x4]`.
+    pub source: &'a [u8],
+}
+
+/// Errors from the `0x10fc5e0` transform tail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransformTailCopyError {
+    ZeroStride,
+    OutputTooSmall,
+    SourceTooSmall,
+    CopyBeforeOutput,
+    ArithmeticOverflow,
+}
+
+/// Apply the observed single-byte copy transform tail (`0x10fc5e0`).
+///
+/// Each record first writes `literal_count` bytes from source stream 0, stepping
+/// the output cursor by `entry >> 24`; if the high halfword is non-zero, it then
+/// copies that many bytes from `back_distance` bytes behind the current cursor.
+/// The copy distance is in bytes, not vertex slots (`0x10fc610..0x10fc664`).
+pub fn transform_tail_copy1_into(
+    out: &mut [u8],
+    spec: TransformTailCopy1Spec<'_>,
+) -> Result<usize, TransformTailCopyError> {
+    if spec.output_stride == 0 {
+        return Err(TransformTailCopyError::ZeroStride);
+    }
+    let mut cursor = spec
+        .block_index
+        .checked_mul(spec.output_stride)
+        .and_then(|offset| offset.checked_add(spec.out_offset))
+        .ok_or(TransformTailCopyError::ArithmeticOverflow)?;
+    let mut source_pos = 0usize;
+
+    for record in spec.records {
+        for _ in 0..record.literal_count {
+            let value = *spec
+                .source
+                .get(source_pos)
+                .ok_or(TransformTailCopyError::SourceTooSmall)?;
+            let slot = out
+                .get_mut(cursor)
+                .ok_or(TransformTailCopyError::OutputTooSmall)?;
+            *slot = value;
+            source_pos += 1;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailCopyError::ArithmeticOverflow)?;
+        }
+
+        for _ in 0..record.copy_count {
+            let source = cursor
+                .checked_sub(record.back_distance)
+                .ok_or(TransformTailCopyError::CopyBeforeOutput)?;
+            let value = *out
+                .get(source)
+                .ok_or(TransformTailCopyError::CopyBeforeOutput)?;
+            let slot = out
+                .get_mut(cursor)
+                .ok_or(TransformTailCopyError::OutputTooSmall)?;
+            *slot = value;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailCopyError::ArithmeticOverflow)?;
+        }
+    }
+
+    Ok(source_pos)
+}
+
 /// Decode a **raw window**: read the forward var-int `srcsize`, then copy
 /// `srcsize` literal bytes. Returns the bytes and the new forward position.
 pub fn decode_raw_window(payload: &[u8], fwd_pos: usize) -> (Vec<u8>, usize) {
@@ -4688,6 +4779,132 @@ mod tests {
                 },
             ),
             Err(WidthCombinerError::HistoryOutOfBounds)
+        );
+    }
+
+    /// Transform tail `0x10fc5e0`: literal bytes plus overlapping copy-back.
+    ///
+    /// Provenance: `capture_transform_tails.py`, Animal_Bear `0x10fc5e0` call,
+    /// first two records from entry `0x10000801`: `(37,18,576)` then
+    /// `(0,50,768)`. This compact slice keeps the observed stride-16 cursor and
+    /// byte-distance copy units that `verify_transform_tail_copy1.py` replays
+    /// over the full 3-call population.
+    #[test]
+    fn transform_tail_copy1_bear_literal_and_copy_back() {
+        let source =
+            hex_bytes("7f7f7f7f7f7f7f7f7f8181817f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f");
+        let records = [
+            TransformTailRecord {
+                literal_count: 37,
+                copy_count: 18,
+                back_distance: 576,
+            },
+            TransformTailRecord {
+                literal_count: 0,
+                copy_count: 50,
+                back_distance: 768,
+            },
+        ];
+        let expected_lane = hex_bytes(
+            "7f7f7f7f7f7f7f7f7f8181817f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f\
+             7f7f7f7f7f7f7f7f7f7f8181817f7f7f7f7f7f7f7f7f8181817f7f7f7f7f7f7f7f7f7f\
+             7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f8181817f7f7f7f7f7f7f7f7f",
+        );
+        let mut out = vec![0xee; expected_lane.len() * 16];
+
+        let consumed = transform_tail_copy1_into(
+            &mut out,
+            TransformTailCopy1Spec {
+                output_stride: 16,
+                block_index: 0,
+                out_offset: 0,
+                records: &records,
+                source: &source,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(consumed, 37);
+        for (index, &expected) in expected_lane.iter().enumerate() {
+            assert_eq!(out[index * 16], expected);
+        }
+        for (index, &byte) in out.iter().enumerate() {
+            if index % 16 != 0 {
+                assert_eq!(byte, 0xee, "non-lane byte {index} changed");
+            }
+        }
+        assert_eq!(out[1], 0xee, "rules out a contiguous cursor");
+        assert_eq!(out[37 * 16], source[1], "copy-back distance is in bytes");
+        assert_eq!(out[55 * 16], source[7], "zero-literal record copies only");
+    }
+
+    #[test]
+    fn transform_tail_copy1_rejects_malformed_inputs() {
+        let records = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 0,
+            back_distance: 0,
+        }];
+        let mut out = [0u8; 1];
+        assert_eq!(
+            transform_tail_copy1_into(
+                &mut out,
+                TransformTailCopy1Spec {
+                    output_stride: 0,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &records,
+                    source: &[1],
+                },
+            ),
+            Err(TransformTailCopyError::ZeroStride)
+        );
+        assert_eq!(
+            transform_tail_copy1_into(
+                &mut out,
+                TransformTailCopy1Spec {
+                    output_stride: 1,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &records,
+                    source: &[],
+                },
+            ),
+            Err(TransformTailCopyError::SourceTooSmall)
+        );
+
+        let mut empty = [];
+        assert_eq!(
+            transform_tail_copy1_into(
+                &mut empty,
+                TransformTailCopy1Spec {
+                    output_stride: 1,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &records,
+                    source: &[1],
+                },
+            ),
+            Err(TransformTailCopyError::OutputTooSmall)
+        );
+
+        let copy_first = [TransformTailRecord {
+            literal_count: 0,
+            copy_count: 1,
+            back_distance: 1,
+        }];
+        assert_eq!(
+            transform_tail_copy1_into(
+                &mut out,
+                TransformTailCopy1Spec {
+                    output_stride: 1,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &copy_first,
+                    source: &[],
+                },
+            ),
+            Err(TransformTailCopyError::CopyBeforeOutput)
         );
     }
 
