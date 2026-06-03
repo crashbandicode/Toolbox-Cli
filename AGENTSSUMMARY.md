@@ -643,6 +643,24 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP1 chunk segment descriptor builder
+**Committed:** B2-CP1 chunk 1f wires the parsed segment header and mode-specific
+table builders into `geometry::rans_build_segment_descriptor`, the composed
+`0x110de80` descriptor builder. It returns mode/log/value, mode-0 step+sym
+tables or mode-1 packed entries, and the advanced reverse reader state. It does
+not initialize mode-0 rANS states; those remain owned by the surrounding segment
+loop (`0x110dc30`). Durable local evidence: new gitignored
+`verify_segment_descriptor_builder.py` replays **99/99** table builds from
+`segment_dispatch_capture.json` with mode counts {0:40, 1:47, 2:12}. The
+fixture-free dispatch tests now feed descriptors built from the reverse stream
+into mode 0, mode 1, and mode 2 dispatch paths. Next: run the B2-CP1 checkpoint
+full gate, append the checkpoint ledger, then proceed to B2-CP2 (`0x110dc30`
+segment loop).
+Sample green: **31 `mc::geometry` lib unit**; `verify_segment_descriptor_builder.py`
+and `verify_segment_dispatch.py` green. Last checkpoint full-suite baseline
+remains: All green: **163 lib unit** (incl. **17** `mc::geometry`) + all
+integration; clippy `--all-targets` clean; `--no-default-features` builds.
+
 ### 2026-06-03 - MeshCodec B2-CP1 chunk mode-1 table builder
 **Committed:** B2-CP1 chunk 1e ports the mode-1 segment table builder
 `0x110f3c0` as `geometry::rans_build_mode1_table`. It builds the packed

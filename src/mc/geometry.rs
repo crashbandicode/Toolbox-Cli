@@ -2192,6 +2192,93 @@ pub fn rans_build_mode1_table(
     })
 }
 
+/// Segment descriptor built by `0x110de80`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RansBuiltSegmentDescriptor {
+    pub mode: u32,
+    pub log: u32,
+    pub value: u16,
+    /// Mode-0 step table or mode-1 packed table.
+    pub step: Vec<u32>,
+    /// Mode-0 symbol spread. Mode 1 stores symbols in `step` low halfwords.
+    pub sym: Vec<u16>,
+    /// Reverse reader state after the header and any table build.
+    pub reader: RansFreqReader,
+}
+
+/// Errors from the full segment descriptor builder (`0x110de80`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RansSegmentDescriptorBuildError {
+    Header(RansSegmentHeaderError),
+    MissingTableCount,
+    Mode0(RansMode0TableBuildError),
+    Mode1(RansMode1TableBuildError),
+    RleValueTooLarge(u32),
+    UnknownMode(u32),
+}
+
+/// Build one segment descriptor from the reverse-bit stream (`0x110de80`).
+///
+/// This composes the validated header parser with the observed mode-specific
+/// table builders. It intentionally does not initialize or mutate the four rANS
+/// states used by mode 0 dispatch; those states live in the surrounding
+/// `0x110dc30` segment loop and are passed through `0x110de00`.
+pub fn rans_build_segment_descriptor(
+    payload: &[u8],
+    reader: RansFreqReader,
+) -> Result<RansBuiltSegmentDescriptor, RansSegmentDescriptorBuildError> {
+    let header = rans_read_segment_header(payload, reader)
+        .map_err(RansSegmentDescriptorBuildError::Header)?;
+    match header.mode {
+        0 => {
+            let table_count = header
+                .table_count
+                .ok_or(RansSegmentDescriptorBuildError::MissingTableCount)?;
+            let built = rans_build_mode0_table(payload, header.reader, table_count, header.log)
+                .map_err(RansSegmentDescriptorBuildError::Mode0)?;
+            Ok(RansBuiltSegmentDescriptor {
+                mode: 0,
+                log: header.log,
+                value: 0,
+                step: built.table.step,
+                sym: built.table.sym,
+                reader: built.reader,
+            })
+        }
+        1 => {
+            let table_count = header
+                .table_count
+                .ok_or(RansSegmentDescriptorBuildError::MissingTableCount)?;
+            let built = rans_build_mode1_table(payload, header.reader, table_count, header.log)
+                .map_err(RansSegmentDescriptorBuildError::Mode1)?;
+            Ok(RansBuiltSegmentDescriptor {
+                mode: 1,
+                log: header.log,
+                value: 0,
+                step: built.table,
+                sym: Vec::new(),
+                reader: built.reader,
+            })
+        }
+        2 => {
+            if header.value > u16::MAX as u32 {
+                return Err(RansSegmentDescriptorBuildError::RleValueTooLarge(
+                    header.value,
+                ));
+            }
+            Ok(RansBuiltSegmentDescriptor {
+                mode: 2,
+                log: 0,
+                value: header.value as u16,
+                step: Vec::new(),
+                sym: Vec::new(),
+                reader: header.reader,
+            })
+        }
+        mode => Err(RansSegmentDescriptorBuildError::UnknownMode(mode)),
+    }
+}
+
 /// Decode a **raw window**: read the forward var-int `srcsize`, then copy
 /// `srcsize` literal bytes. Returns the bytes and the new forward position.
 pub fn decode_raw_window(payload: &[u8], fwd_pos: usize) -> (Vec<u8>, usize) {
@@ -3222,17 +3309,36 @@ mod tests {
         );
     }
 
-    /// Segment dispatch wrapper (`0x110de00`) for mode 0 rANS.
+    /// Segment descriptor builder (`0x110de80`) feeding mode-0 dispatch (`0x110de00`).
     ///
-    /// Provenance: `capture_segment_dispatch.py`, Animal_Bear dispatch 3. The
-    /// segment descriptor is already built (`mode=0, log=6, state flag warm`);
-    /// `0x110de14..0x110de48` builds a stack output spec then tail-calls
-    /// `0x110e270`. This fixture-free check proves the wrapper preserves the
-    /// stream cursor accounting and writes back the final four rANS states.
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Bear table-build 25 +
+    /// dispatch 3. The descriptor is now built from the reverse stream
+    /// (`count=12,log=6`) and then passed to the mode-0 dispatch wrapper. This
+    /// proves the header/table builder output satisfies the existing rANS
+    /// dispatch contract.
     #[test]
     fn rans_segment_dispatch_mode0_updates_output_cursor_and_states() {
-        const DEC_FREQS: [u16; 15] = [5, 1, 1, 0, 1, 0, 1, 1, 0, 1, 3, 6, 13, 23, 8];
         const FINAL_STATES: [u64; 4] = [0x3e69fd3c25, 0x1eb070dcc1aa, 0x7af49bc9b0fd, 0x14d2c33bcc];
+        let descriptor_payload = hex_bytes("d2b6402520a707000002d000faed3d27");
+        let descriptor = rans_build_segment_descriptor(
+            &descriptor_payload,
+            RansFreqReader {
+                ptr: 8,
+                acc: 0x59aebc4278522890,
+                bitpos: 57,
+            },
+        )
+        .unwrap();
+        assert_eq!(descriptor.mode, 0);
+        assert_eq!(descriptor.log, 6);
+        assert_eq!(
+            descriptor.reader,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0xf7b7e80340080000,
+                bitpos: 54,
+            }
+        );
         let mut states = [
             0x1670c7fb0e5cc107u64,
             0x80581303,
@@ -3243,20 +3349,19 @@ mod tests {
             "44d69beb2784028b6a39382a036f90a250ebc749203fa34e0d60353e5071548d51aa7a26\
              943ad95a422eea145dab83d860ba542ed7bf85ec1c78e11fedddfb9ceaf8b9031988e12f",
         );
-        let table = rans_spread(6, &DEC_FREQS);
         let mut out = vec![0xbeefu16; 228];
 
         let used = rans_segment_dispatch_into(
             &mut out,
             RansSegmentDispatchSpec {
-                mode: 0,
-                log: 6,
-                value: 0,
+                mode: descriptor.mode,
+                log: descriptor.log,
+                value: descriptor.value,
                 count: 228,
                 stride: 1,
                 states: &mut states,
-                step: &table.step,
-                sym: &table.sym,
+                step: &descriptor.step,
+                sym: &descriptor.sym,
                 stream: &stream,
                 payload: &[],
                 three_lane_readers: None,
@@ -3274,26 +3379,45 @@ mod tests {
         assert_eq!(out.iter().map(|&s| s as u32).sum::<u32>(), 2565);
     }
 
-    /// Segment dispatch wrapper (`0x110de00`) for mode 2 RLE.
+    /// Segment descriptor builder (`0x110de80`) feeding mode-2 RLE dispatch.
     ///
-    /// Provenance: `capture_segment_dispatch.py`, Animal_Dragonfly dispatch 5:
-    /// `mode=2,value=11,count=3,stride=1`, which branches at
-    /// `0x110de70..0x110de78` into `0x110f930`.
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Dragonfly table-build
+    /// 14 + dispatch 5: `mode=2,value=11,count=3,stride=1`.
     #[test]
     fn rans_segment_dispatch_mode2_rle_fills_dense_segment() {
+        let descriptor_payload = hex_bytes("d244781d50f180ec");
+        let descriptor = rans_build_segment_descriptor(
+            &descriptor_payload,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0x005f479f43193ebc,
+                bitpos: 59,
+            },
+        )
+        .unwrap();
+        assert_eq!(descriptor.mode, 2);
+        assert_eq!(descriptor.value, 11);
+        assert_eq!(
+            descriptor.reader,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0xe8f3e86327d7a000,
+                bitpos: 46,
+            }
+        );
         let mut states = [0u64; 4];
         let mut out = [6u16, 6, 120];
         let used = rans_segment_dispatch_into(
             &mut out,
             RansSegmentDispatchSpec {
-                mode: 2,
-                log: 9,
-                value: 11,
+                mode: descriptor.mode,
+                log: descriptor.log,
+                value: descriptor.value,
                 count: 3,
                 stride: 1,
                 states: &mut states,
-                step: &[],
-                sym: &[],
+                step: &descriptor.step,
+                sym: &descriptor.sym,
                 stream: &[],
                 payload: &[],
                 three_lane_readers: None,
@@ -3410,15 +3534,35 @@ mod tests {
         );
     }
 
-    /// Segment dispatch wrapper for mode 1 tail (`count < 12`).
+    /// Segment descriptor builder feeding mode-1 tail dispatch (`count < 12`).
     ///
-    /// Provenance: `capture_segment_dispatch.py`, Animal_Dragonfly dispatch 6
-    /// (`mode=1,log=1,count=2,stride=1`). This exercises the tail path at
-    /// `0x110f1f8..0x110f380`, which still reloads all three readers even though
-    /// only readers 0 and 1 emit symbols.
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Dragonfly table-build
+    /// 15 + dispatch 6 (`mode=1,log=1,count=2,stride=1`). This exercises the
+    /// tail path at `0x110f1f8..0x110f380`, with the table built from the
+    /// reverse stream instead of hardcoded.
     #[test]
     fn rans_segment_dispatch_mode1_three_lane_tail() {
-        const TABLE: [u32; 2] = [0x0001_0000, 0x0001_0004];
+        let descriptor_payload = hex_bytes("5b22b1399b96d244781d");
+        let descriptor = rans_build_segment_descriptor(
+            &descriptor_payload,
+            RansFreqReader {
+                ptr: 2,
+                acc: 0x0c64faf64078a80c,
+                bitpos: 57,
+            },
+        )
+        .unwrap();
+        assert_eq!(descriptor.mode, 1);
+        assert_eq!(descriptor.log, 1);
+        assert_eq!(descriptor.step, [0x0001_0000, 0x0001_0004]);
+        assert_eq!(
+            descriptor.reader,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0xfaf64078a80ebc20,
+                bitpos: 57,
+            }
+        );
         let payload = sparse_payload(
             463,
             &[
@@ -3449,13 +3593,13 @@ mod tests {
         let used = rans_segment_dispatch_into(
             &mut out,
             RansSegmentDispatchSpec {
-                mode: 1,
-                log: 1,
-                value: 11,
+                mode: descriptor.mode,
+                log: descriptor.log,
+                value: descriptor.value,
                 count: 2,
                 stride: 1,
                 states: &mut states,
-                step: &TABLE,
+                step: &descriptor.step,
                 sym: &[],
                 stream: &[],
                 payload: &payload,
@@ -3496,7 +3640,7 @@ mod tests {
                     count: 2,
                     log: 1,
                     stride: 1,
-                    table: &TABLE,
+                    table: &descriptor.step,
                     readers: &mut short_readers,
                     payload: &[0; 7],
                 },
