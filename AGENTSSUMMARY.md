@@ -643,6 +643,24 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP1 chunk mode-1 table builder
+**Committed:** B2-CP1 chunk 1e ports the mode-1 segment table builder
+`0x110f3c0` as `geometry::rans_build_mode1_table`. It builds the packed
+three-lane table consumed by `0x110ef70`: high 16 bits are bits consumed and low
+16 bits are the emitted symbol. Durable local evidence: new gitignored
+`verify_mode1_table_builder.py` replays **47/47** captured mode-1 table builds
+from `segment_dispatch_capture.json`; branch coverage is log<2 special path
+9/47 and log>=2 general path 38/47, with observed logs 1..11. Fixture-free
+tests cover the log=1 special expansion, a log=4 general prefix table, exact
+packed entries, advanced reader state, truncated payload rejection, zero count,
+unsupported log, and count greater than mass. Next: wire
+`rans_read_segment_header` + `rans_build_mode0_table` + `rans_build_mode1_table`
+into a full segment descriptor builder and run the B2-CP1 checkpoint full gate.
+Sample green: **31 `mc::geometry` lib unit**; `verify_mode1_table_builder.py`
+and `verify_segment_dispatch.py` green. Last checkpoint full-suite baseline
+remains: All green: **163 lib unit** (incl. **17** `mc::geometry`) + all
+integration; clippy `--all-targets` clean; `--no-default-features` builds.
+
 ### 2026-06-03 - MeshCodec B2-CP1 chunk mode-0 table builder
 **Committed:** B2-CP1 chunk 1d ports the mode-0 segment table builder
 `0x110e540` as `geometry::rans_build_mode0_table`. It consumes the parsed

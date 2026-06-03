@@ -1869,6 +1869,329 @@ pub fn rans_build_mode0_table(
     })
 }
 
+/// Mode-1 segment table built by `0x110f3c0`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RansMode1TableBuild {
+    /// Packed three-lane table entries: low 16 bits = symbol, high 16 bits =
+    /// number of bits consumed by `0x110ef70`.
+    pub table: Vec<u32>,
+    /// Reverse reader state after the table builder.
+    pub reader: RansFreqReader,
+}
+
+/// Errors from the mode-1 segment table builder (`0x110f3c0`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RansMode1TableBuildError {
+    TableCountZero,
+    UnsupportedLog(u32),
+    TableCountExceedsMass { count: u32, mass: u32 },
+    PayloadTooSmall,
+    MalformedTable,
+}
+
+#[inline]
+fn checked_mode1_u64_le(buf: &[u8], ptr: usize) -> Result<u64, RansMode1TableBuildError> {
+    let end = ptr
+        .checked_add(8)
+        .ok_or(RansMode1TableBuildError::PayloadTooSmall)?;
+    let bytes = buf
+        .get(ptr..end)
+        .ok_or(RansMode1TableBuildError::PayloadTooSmall)?;
+    Ok(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+#[inline]
+fn checked_mode1_sub_ptr(ptr: usize, step: u32) -> Result<usize, RansMode1TableBuildError> {
+    ptr.checked_sub(step as usize)
+        .ok_or(RansMode1TableBuildError::PayloadTooSmall)
+}
+
+#[inline]
+fn mode1_low(workspace: &[u32; 0x800], index: usize) -> Result<u16, RansMode1TableBuildError> {
+    workspace
+        .get(index)
+        .map(|entry| (entry & 0xffff) as u16)
+        .ok_or(RansMode1TableBuildError::MalformedTable)
+}
+
+#[inline]
+fn mode1_high(workspace: &[u32; 0x800], index: usize) -> Result<u16, RansMode1TableBuildError> {
+    workspace
+        .get(index)
+        .map(|entry| (entry >> 16) as u16)
+        .ok_or(RansMode1TableBuildError::MalformedTable)
+}
+
+#[inline]
+fn mode1_store_low(
+    workspace: &mut [u32; 0x800],
+    index: usize,
+    value: u32,
+) -> Result<(), RansMode1TableBuildError> {
+    let slot = workspace
+        .get_mut(index)
+        .ok_or(RansMode1TableBuildError::MalformedTable)?;
+    *slot = (*slot & 0xffff_0000) | (value & 0xffff);
+    Ok(())
+}
+
+#[inline]
+fn mode1_store_high(
+    workspace: &mut [u32; 0x800],
+    index: usize,
+    value: u32,
+) -> Result<(), RansMode1TableBuildError> {
+    let slot = workspace
+        .get_mut(index)
+        .ok_or(RansMode1TableBuildError::MalformedTable)?;
+    *slot = (*slot & 0x0000_ffff) | ((value & 0xffff) << 16);
+    Ok(())
+}
+
+#[inline]
+fn mode1_store_pair(
+    workspace: &mut [u32; 0x800],
+    index: usize,
+    value: u32,
+) -> Result<(), RansMode1TableBuildError> {
+    let end = index
+        .checked_add(1)
+        .ok_or(RansMode1TableBuildError::MalformedTable)?;
+    if end >= workspace.len() {
+        return Err(RansMode1TableBuildError::MalformedTable);
+    }
+    workspace[index] = value;
+    workspace[end] = value;
+    Ok(())
+}
+
+/// Build a mode-1 segment decode table (`0x110f3c0`).
+///
+/// The function first reads the number of symbols assigned to each bit length
+/// into high halfwords of the scratch table (`0x110f404..0x110f4bc`), then reads
+/// grouped sparse symbol IDs into low halfwords (`0x110f4c8..0x110f558`), and
+/// finally expands those groups into the first `1 << log` packed entries
+/// (`0x110f558..0x110f718`) consumed by the three-lane decoder.
+pub fn rans_build_mode1_table(
+    payload: &[u8],
+    reader: RansFreqReader,
+    table_count: u32,
+    log: u32,
+) -> Result<RansMode1TableBuild, RansMode1TableBuildError> {
+    const M32: u32 = u32::MAX;
+    const MASK64: u64 = u64::MAX;
+
+    if table_count == 0 {
+        return Err(RansMode1TableBuildError::TableCountZero);
+    }
+    if log == 0 || log > 11 {
+        return Err(RansMode1TableBuildError::UnsupportedLog(log));
+    }
+    let mass = 1u32 << log;
+    if table_count > mass {
+        return Err(RansMode1TableBuildError::TableCountExceedsMass {
+            count: table_count,
+            mass,
+        });
+    }
+
+    let mut workspace = [0u32; 0x800];
+    let mut ptr = reader.ptr;
+    let mut acc = reader.acc;
+    let mut bitpos = reader.bitpos;
+    let count_base = 0x800usize - log as usize;
+    let symbol_base = 0x800usize - table_count as usize;
+
+    let chunk = checked_mode1_u64_le(payload, ptr)?;
+    ptr = checked_mode1_sub_ptr(ptr, (bitpos >> 3) ^ 7)?;
+    acc = ((chunk >> (bitpos & 63)) | acc) & MASK64;
+    bitpos |= 0x38;
+
+    if log >= 2 {
+        let mut count_index = count_base;
+        let mut length_index = 0u32;
+        let mut remaining = table_count;
+        loop {
+            if bitpos <= 9 {
+                let chunk = checked_mode1_u64_le(payload, ptr)?;
+                ptr = checked_mode1_sub_ptr(ptr, (bitpos >> 3) ^ 7)?;
+                acc = ((chunk >> (bitpos & 63)) | acc) & MASK64;
+                bitpos |= 0x38;
+            }
+
+            length_index = length_index.wrapping_add(1);
+            let neg_remaining = remaining.wrapping_neg();
+            let mask = M32 << (length_index & 31);
+            let selected = if (mask as i32) > (neg_remaining as i32) {
+                mask
+            } else {
+                neg_remaining
+            };
+            let leading = clz32(!selected);
+            let bits = 32u32.wrapping_sub(leading);
+            let value = acc >> ((leading + 32) & 63);
+            acc = (acc << (bits & 63)) & MASK64;
+            bitpos = bitpos.wrapping_sub(bits);
+            mode1_store_high(&mut workspace, count_index, value as u32)?;
+            remaining = remaining.wrapping_sub(value as u32);
+
+            if length_index == log - 1 {
+                mode1_store_high(&mut workspace, 0x7ff, remaining)?;
+                break;
+            }
+            count_index += 1;
+        }
+    } else {
+        mode1_store_high(&mut workspace, count_base, table_count)?;
+    }
+
+    let mut symbol_write = symbol_base;
+    let mut count_read = count_base;
+    let mut current_bucket = 0u32;
+    let mut previous_plus_one = 0u32;
+    let mut width_state = 0u32;
+    let mut remaining_symbols = table_count;
+    while remaining_symbols != 0 {
+        if current_bucket == 0 {
+            current_bucket = mode1_high(&workspace, count_read)? as u32;
+            count_read += 1;
+            if current_bucket == 0 {
+                continue;
+            }
+            previous_plus_one = 0;
+        }
+
+        let chunk = checked_mode1_u64_le(payload, ptr)?;
+        let width = width_state >> 10;
+        width_state = width_state.wrapping_mul(12);
+        remaining_symbols = remaining_symbols.wrapping_sub(1);
+        current_bucket = current_bucket.wrapping_sub(1);
+        ptr = checked_mode1_sub_ptr(ptr, (bitpos >> 3) ^ 7)?;
+        acc = ((chunk >> (bitpos & 63)) | acc) & MASK64;
+        bitpos |= 0x38;
+
+        let leading = clz64(acc);
+        let nbits_minus_one = width.wrapping_add(leading << 1);
+        let raw = (M32 << (width & 31)).wrapping_add((acc >> ((!nbits_minus_one) & 63)) as u32);
+        acc = (acc << (nbits_minus_one.wrapping_add(1) & 63)) & MASK64;
+        bitpos = bitpos.wrapping_sub(nbits_minus_one.wrapping_add(1));
+
+        let symbol = previous_plus_one.wrapping_add(raw);
+        mode1_store_low(&mut workspace, symbol_write, symbol)?;
+        symbol_write += 1;
+        previous_plus_one = symbol.wrapping_add(1);
+        width_state = width_state
+            .wrapping_add(0x0002_0000)
+            .wrapping_sub(clz32(raw).wrapping_shl(12));
+        width_state >>= 4;
+    }
+
+    let mut output = 0usize;
+    let mut symbol_read = symbol_base;
+    if log >= 2 {
+        let mut block = 1usize << (log - 1);
+        let mut length = 1u32;
+        let mut count_index = count_base;
+        while length != log {
+            let mut bucket_count = mode1_high(&workspace, count_index)? as u32;
+            if bucket_count == 0 || block == 0 {
+                symbol_read = symbol_read
+                    .checked_add(bucket_count as usize)
+                    .ok_or(RansMode1TableBuildError::MalformedTable)?;
+            } else {
+                let entry_high = length << 16;
+                if bucket_count & 1 != 0 {
+                    let entry = entry_high | mode1_low(&workspace, symbol_read)? as u32;
+                    symbol_read += 1;
+                    let mut fill = 0usize;
+                    loop {
+                        mode1_store_pair(&mut workspace, output + fill, entry)?;
+                        fill += 2;
+                        if fill >= block {
+                            break;
+                        }
+                    }
+                    output += fill;
+                    bucket_count -= 1;
+                    if bucket_count == 0 {
+                        length += 1;
+                        count_index += 1;
+                        block >>= 1;
+                        continue;
+                    }
+                }
+                while bucket_count != 0 {
+                    let entry = entry_high | mode1_low(&workspace, symbol_read)? as u32;
+                    symbol_read += 1;
+                    let mut fill = 0usize;
+                    loop {
+                        mode1_store_pair(&mut workspace, output + fill, entry)?;
+                        fill += 2;
+                        if fill >= block {
+                            break;
+                        }
+                    }
+                    output += fill;
+
+                    let entry = entry_high | mode1_low(&workspace, symbol_read)? as u32;
+                    symbol_read += 1;
+                    let mut fill = 0usize;
+                    loop {
+                        mode1_store_pair(&mut workspace, output + fill, entry)?;
+                        fill += 2;
+                        if fill >= block {
+                            break;
+                        }
+                    }
+                    output += fill;
+                    bucket_count = bucket_count.wrapping_sub(2);
+                }
+            }
+            length += 1;
+            count_index += 1;
+            block >>= 1;
+        }
+    }
+
+    let mut final_count = mode1_high(&workspace, 0x7ff)? as u32;
+    if final_count != 0 {
+        let entry_high = log << 16;
+        if final_count & 1 != 0 {
+            let entry = entry_high | mode1_low(&workspace, symbol_read)? as u32;
+            let slot = workspace
+                .get_mut(output)
+                .ok_or(RansMode1TableBuildError::MalformedTable)?;
+            *slot = entry;
+            output += 1;
+            symbol_read += 1;
+            final_count -= 1;
+        }
+        while final_count != 0 {
+            let first = entry_high | mode1_low(&workspace, symbol_read)? as u32;
+            let second = entry_high | mode1_low(&workspace, symbol_read + 1)? as u32;
+            let next = output
+                .checked_add(1)
+                .ok_or(RansMode1TableBuildError::MalformedTable)?;
+            if next >= workspace.len() {
+                return Err(RansMode1TableBuildError::MalformedTable);
+            }
+            workspace[output] = first;
+            workspace[next] = second;
+            output += 2;
+            symbol_read += 2;
+            final_count = final_count.wrapping_sub(2);
+        }
+    }
+
+    let table_len = 1usize << log;
+    Ok(RansMode1TableBuild {
+        table: workspace[..table_len].to_vec(),
+        reader: RansFreqReader { ptr, acc, bitpos },
+    })
+}
+
 /// Decode a **raw window**: read the forward var-int `srcsize`, then copy
 /// `srcsize` literal bytes. Returns the bytes and the new forward position.
 pub fn decode_raw_window(payload: &[u8], fwd_pos: usize) -> (Vec<u8>, usize) {
@@ -2801,6 +3124,100 @@ mod tests {
             Err(RansMode0TableBuildError::TableCountExceedsMass {
                 count: 65,
                 mass: 64
+            })
+        );
+    }
+
+    /// Mode-1 table builder (`0x110f3c0`) special `log < 2` path.
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Bear table-build 0,
+    /// replayed by `verify_mode1_table_builder.py`. This covers
+    /// `0x110f3d8` branching to `0x110f498`, then the final single-bit table
+    /// expansion consumed by `0x110ef70`.
+    #[test]
+    fn rans_mode1_table_builder_log1() {
+        let payload = hex_bytes("55c55555f9abcff355b5");
+        let built = rans_build_mode1_table(
+            &payload,
+            RansFreqReader {
+                ptr: 2,
+                acc: 0xcdadaaf7db7bb400,
+                bitpos: 48,
+            },
+            2,
+            1,
+        )
+        .unwrap();
+        assert_eq!(built.table, [65536, 65537]);
+        assert_eq!(
+            built.reader,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0x36b6abdf6deed556,
+                bitpos: 62,
+            }
+        );
+        assert_eq!(
+            rans_build_mode1_table(
+                &payload[..9],
+                RansFreqReader {
+                    ptr: 2,
+                    acc: 0xcdadaaf7db7bb400,
+                    bitpos: 48,
+                },
+                2,
+                1,
+            ),
+            Err(RansMode1TableBuildError::PayloadTooSmall)
+        );
+    }
+
+    /// Mode-1 table builder (`0x110f3c0`) general prefix-table expansion.
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Bass table-build 7,
+    /// replayed by `verify_mode1_table_builder.py`. This covers the
+    /// length-count reader, grouped sparse-symbol reader, and replicated table
+    /// expansion at `0x110f558..0x110f718`.
+    #[test]
+    fn rans_mode1_table_builder_log4() {
+        const TABLE: [u32; 16] = [
+            65547, 65547, 65547, 65547, 65547, 65547, 65547, 65547, 262144, 262145, 262148, 262149,
+            262151, 262152, 262153, 262154,
+        ];
+        let payload = hex_bytes("cd090074f80f006a8a3fe021");
+        let built = rans_build_mode1_table(
+            &payload,
+            RansFreqReader {
+                ptr: 4,
+                acc: 0x806575ea0e731000,
+                bitpos: 53,
+            },
+            9,
+            4,
+        )
+        .unwrap();
+        assert_eq!(built.table, TABLE);
+        assert_eq!(
+            built.reader,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0xa839cc443c07f14c,
+                bitpos: 59,
+            }
+        );
+        assert_eq!(
+            rans_build_mode1_table(&payload, built.reader, 0, 4),
+            Err(RansMode1TableBuildError::TableCountZero)
+        );
+        assert_eq!(
+            rans_build_mode1_table(&payload, built.reader, 9, 0),
+            Err(RansMode1TableBuildError::UnsupportedLog(0))
+        );
+        assert_eq!(
+            rans_build_mode1_table(&payload, built.reader, 17, 4),
+            Err(RansMode1TableBuildError::TableCountExceedsMass {
+                count: 17,
+                mass: 16
             })
         );
     }
