@@ -643,6 +643,23 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP3 checkpoint width combiner
+**Committed:** B2-CP3 landed in `f3e4673`, porting the `0x110d360`
+3-stream width combiner as `geometry::width_combiner_into`. It decodes
+the three `0x110d7f0`-produced width streams into `[u32; 2]` records,
+threads the reversed forward bit reader, returns the game's `w0` sum, and
+reports exact stream byte consumption. Durable local evidence:
+`capture_width_combiner.py` enumerated **23** calls across Bear/Bass/
+Dragonfly; `verify_width_combiner.py` replays **23/23** final records,
+reader states, return values, and consumed stream lengths. Covered
+branches include first/second inline and expanded bytes, third-stream
+history and special codes, clamped and non-clamped tails; the unobserved
+tail-only `count < 2` path is guarded. Fixture-free Rust goldens cover
+Bear call 7 and Dragonfly call 2 plus malformed bounds. All green:
+**182 lib unit** (incl. **36** `mc::geometry`) + all integration; clippy
+`--all-targets` clean; `--no-default-features` builds. Next: B2-CP4
+kernel transform `0x10f9690` -> `0x10fa980`/`0x10fab60`/`0x10facf0`.
+
 ### 2026-06-03 - MeshCodec B2-CP2 checkpoint segment loop
 **Committed:** B2-CP2 landed in `52664f8`, porting the `0x110dc30`
 segment loop as `geometry::rans_segment_loop_into`. It threads the shared
