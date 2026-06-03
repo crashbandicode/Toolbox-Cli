@@ -643,6 +643,21 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec CP2 stride rANS decode output layout
+**Committed:** CP2 ports the observed stride output behavior of `0x110e270`.
+`geometry::rans_decode` is now fallible and strided via `RansDecodeSpec`, with
+`rans_decode_into` for preserving sibling lanes in the caller's output buffer.
+The Bass stride case is fixture-free: `prod=960`, decoded `w2=320`, `stride=3`,
+`log=5`; it writes symbol `i` to `out[i*3]`, consumes 16 forward renorm bytes,
+and leaves the other two lanes untouched for sibling streams. Durable local
+evidence: `capture_decode_stride3.py` and gitignored
+`local-assets/re/decode_stride3_capture.json`. Enumerate-all found one stride>1
+`0x110e270` call (Bass) and `0x110ef70` calls only with output stride 1 in the
+three-fixture population. Next: CP3 per-segment orchestration
+(`0x110de80`/`0x110de00`, RLE `0x110f930`, segment loop `0x110dc30`).
+All green: **162 lib unit** (incl. **16** `mc::geometry`) + all integration;
+clippy `--all-targets` clean; `--no-default-features` builds.
+
 ### 2026-06-03 - MeshCodec CP1 second-model rANS init cold golden
 **Committed:** CP1 chunk 1a adds a second-model, fixture-free cold-start golden
 for `geometry::rans_init_states_with_cursor` (`0x110dfa0`): Animal_Bass call 0

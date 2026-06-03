@@ -586,64 +586,122 @@ pub fn rans_init_states(
     rans_init_states_with_cursor(table, stream, prod, stride, &mut state, &mut cursor)
 }
 
-/// Decode `count` symbols with the vertex coder's rANS decoder (`0x110e270`).
+/// Errors from the vertex coder's rANS decoder (`0x110e270`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RansDecodeError {
+    /// `step`/`sym` length must equal `1 << log`.
+    TableSizeMismatch,
+    /// A zero stride would repeatedly overwrite the same output slot.
+    ZeroStride,
+    /// `count * stride` overflowed or does not fit the caller-provided output.
+    OutputTooSmall,
+    /// Forward renorm could not read four bytes.
+    StreamTooShort,
+}
+
+/// Inputs for one `0x110e270` rANS decode call.
+#[derive(Debug, Clone, Copy)]
+pub struct RansDecodeSpec<'a> {
+    /// Number of symbols this call writes (`w2` at `x1+0xc`).
+    pub count: usize,
+    /// `log2(M)` for the decode table.
+    pub log: u32,
+    /// Output spacing in u16 slots.
+    pub stride: usize,
+    /// Decode table steps (`freq << 16 | low`).
+    pub step: &'a [u32],
+    /// Decode table symbols.
+    pub sym: &'a [u16],
+    /// Four interleaved rANS states.
+    pub init_states: [u64; 4],
+    /// Forward renorm bytes.
+    pub stream: &'a [u8],
+}
+
+/// Decode `count` symbols with the vertex coder's rANS decoder (`0x110e270`) into
+/// an existing output buffer.
 ///
-/// Four interleaved lanes decode in round-robin; each round writes lanes 0..3 to
-/// output positions `base + lane*stride`. The `count % 4` tail then continues the
-/// **first `count&3` lanes** — tail symbol `k` reads and advances `states[k]`,
-/// not `states[0]`. This is the `0x110e410` tail loop: after the main loop stores
-/// the four lane states to `x0[0..4]` (`stp` at `0x110e3f0`), the tail does
-/// `ldr x17,[x0]` + `str x17,[x0],#8` (post-increment by one state slot per
-/// symbol), so successive tail symbols consume successive lanes.
+/// Four interleaved lanes decode in round-robin; symbol index `i` writes to
+/// output position `i * stride`. In the `0x110de00` wrapper the product at
+/// `x1+8` is the caller's full buffer length, while `w2` at `x1+0xc` is the
+/// number of symbols this rANS call writes. For the observed stride-3 case
+/// (Bass), `w2=320` and `stride=3`, so this function writes 320 symbols into
+/// every third slot of a 960-slot buffer and leaves sibling lanes untouched.
 ///
-/// VALIDATED for `stride == 1` (the single-stream decode). `stride > 1` is the
-/// 3-lane interleave where only `w2 < count` symbols are produced into a wider
-/// `count`-slot buffer; that mode is not yet reproduced —
-/// `// TODO(0x110ef70): 3-lane (stride>1) decode + sibling streams`. Callers
-/// must pass `stride == 1` until then.
-pub fn rans_decode(
-    count: usize,
-    log: u32,
-    stride: usize,
-    step: &[u32],
-    sym: &[u16],
-    init_states: [u64; 4],
-    stream: &[u8],
-) -> Vec<u16> {
+/// The `count % 4` tail continues the **first `count&3` lanes** — tail symbol
+/// `k` reads and advances `states[k]`, not `states[0]`. This is the `0x110e410`
+/// tail loop: after the main loop stores the four lane states to `x0[0..4]`
+/// (`stp` at `0x110e3f0`), the tail does `ldr x17,[x0]` +
+/// `str x17,[x0],#8` (post-increment by one state slot per symbol), so
+/// successive tail symbols consume successive lanes.
+pub fn rans_decode_into(
+    out: &mut [u16],
+    spec: RansDecodeSpec<'_>,
+) -> Result<usize, RansDecodeError> {
+    let RansDecodeSpec {
+        count,
+        log,
+        stride,
+        step,
+        sym,
+        init_states,
+        stream,
+    } = spec;
+    let m = 1usize
+        .checked_shl(log)
+        .ok_or(RansDecodeError::TableSizeMismatch)?;
+    if step.len() != m || sym.len() != m {
+        return Err(RansDecodeError::TableSizeMismatch);
+    }
+    if stride == 0 {
+        return Err(RansDecodeError::ZeroStride);
+    }
+    let min_len = count
+        .checked_mul(stride)
+        .ok_or(RansDecodeError::OutputTooSmall)?;
+    if out.len() < min_len {
+        return Err(RansDecodeError::OutputTooSmall);
+    }
+
     let mask = (1u64 << log) - 1;
     let mut states = init_states;
     let mut spos = 0usize;
-    let mut out = vec![0u16; count];
 
-    let decode_lane = |st: u64, spos: &mut usize| -> (u16, u64) {
+    let decode_lane = |st: u64, spos: &mut usize| -> Result<(u16, u64), RansDecodeError> {
         let idx = (st & mask) as usize;
         let s = sym[idx];
         let e = step[idx];
         let mut ns = (st >> log) * (e >> 16) as u64 + (e & 0xffff) as u64;
         if ns >> 31 == 0 {
-            if let Some(b) = stream.get(*spos..*spos + 4) {
-                ns = (ns << 32) | u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64;
-                *spos += 4;
-            }
+            let b = stream
+                .get(*spos..*spos + 4)
+                .ok_or(RansDecodeError::StreamTooShort)?;
+            ns = (ns << 32) | u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64;
+            *spos += 4;
         }
-        (s, ns)
+        Ok((s, ns))
     };
 
-    let iters = count / 4;
-    for it in 0..iters {
-        let base = it * 4 * stride;
-        for lane in 0..4 {
-            let (s, ns) = decode_lane(states[lane], &mut spos);
-            out[base + lane * stride] = s;
-            states[lane] = ns;
-        }
+    for i in 0..count {
+        let lane = i & 3;
+        let (s, ns) = decode_lane(states[lane], &mut spos)?;
+        out[i * stride] = s;
+        states[lane] = ns;
     }
-    for k in 0..(count & 3) {
-        let (s, ns) = decode_lane(states[k], &mut spos);
-        out[iters * 4 * stride + k * stride] = s;
-        states[k] = ns;
-    }
-    out
+
+    Ok(spos)
+}
+
+/// Decode `count` symbols with `0x110e270`, returning a freshly zeroed output
+/// buffer of length `count * stride`.
+pub fn rans_decode(spec: RansDecodeSpec<'_>) -> Result<Vec<u16>, RansDecodeError> {
+    let out_len = spec
+        .count
+        .checked_mul(spec.stride)
+        .ok_or(RansDecodeError::OutputTooSmall)?;
+    let mut out = vec![0u16; out_len];
+    rans_decode_into(&mut out, spec)?;
+    Ok(out)
 }
 
 /// Reverse bit-reader state for the vertex frequency decoder (`0x110e7b0`).
@@ -1294,15 +1352,16 @@ mod tests {
             .unwrap()
             .states;
         let dec_tbl = rans_spread(6, &DEC_FREQS);
-        let out = rans_decode(
-            228,
-            6,
-            1,
-            &dec_tbl.step,
-            &dec_tbl.sym,
-            states,
-            &decode_stream,
-        );
+        let out = rans_decode(RansDecodeSpec {
+            count: 228,
+            log: 6,
+            stride: 1,
+            step: &dec_tbl.step,
+            sym: &dec_tbl.sym,
+            init_states: states,
+            stream: &decode_stream,
+        })
+        .unwrap();
         assert_eq!(out.len(), 228);
         assert_eq!(
             &out[..24],
@@ -1340,7 +1399,16 @@ mod tests {
             "44d69beb2784028b6a39382a036f90a250ebc749203fa34e0d60353e5071548d51aa7a26\
              943ad95a422eea145dab83d860ba542ed7bf85ec1c78e11fedddfb9ceaf8b9031988e12f",
         );
-        let out = rans_decode(228, 6, 1, &STEP, &SYM, states, &stream);
+        let out = rans_decode(RansDecodeSpec {
+            count: 228,
+            log: 6,
+            stride: 1,
+            step: &STEP,
+            sym: &SYM,
+            init_states: states,
+            stream: &stream,
+        })
+        .unwrap();
         assert_eq!(out.len(), 228);
         assert_eq!(
             &out[..24],
@@ -1370,7 +1438,16 @@ mod tests {
              e7238315b6ebcb1ce861fedaff21bcbd",
         );
         let t = rans_spread(6, &FREQS);
-        let out = rans_decode(142, 6, 1, &t.step, &t.sym, states, &stream);
+        let out = rans_decode(RansDecodeSpec {
+            count: 142,
+            log: 6,
+            stride: 1,
+            step: &t.step,
+            sym: &t.sym,
+            init_states: states,
+            stream: &stream,
+        })
+        .unwrap();
         assert_eq!(out.len(), 142);
         assert_eq!(&out[..8], &[9, 5, 4, 6, 11, 10, 8, 13]);
         // The two-symbol tail: lanes 0 and 1 continue -> [14, 14]. The
@@ -1378,10 +1455,101 @@ mod tests {
         assert_eq!(&out[138..], &[12, 13, 14, 14]);
     }
 
+    /// Stride-3 output layout for `0x110e270`.
+    ///
+    /// Provenance: `capture_decode_stride3.py` on Animal_Bass call 2
+    /// (`prod=960`, decoded `w2=320`, `stride=3`, `log=5`). The wrapper at
+    /// `0x110de14..0x110de48` stores the product at `x1+8` but passes `w2` at
+    /// `x1+0xc` to `0x110e270`; the decode loop stores symbol `i` at
+    /// `out[i*stride]` (`strh w22,[x11]`, then `add x11,x11,x20` where
+    /// `x20 = 4*stride*2`). Sibling lanes are not touched by this call. This
+    /// rules out both the old count-sized buffer and a dense stride-1 writer.
+    #[test]
+    fn rans_decode_stride3_writes_lane_slots() {
+        const STEP: [u32; 32] = [
+            1966080, 1966081, 1966082, 1966083, 1966084, 1966085, 1966086, 1966087, 1966088,
+            1966089, 1966090, 1966091, 1966092, 1966093, 1966094, 1966095, 1966096, 1966097,
+            1966098, 1966099, 1966100, 1966101, 1966102, 1966103, 1966104, 1966105, 1966106,
+            1966107, 1966108, 1966109, 65536, 65536,
+        ];
+        const SYM: [u16; 32] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 2, 1022,
+        ];
+        let states = [0x68007d0ef80f, 0x674a999ea5a, 0x647f7484a3f513e, 0xd7a40fe0];
+        let expected_lane = hex_u16s(
+            "00000000020000000000000000000000000000000000000000000000000000000000000000000000\
+             0000000000000000000000000000000000000000fe030000fe030000fe0300000000000000000000\
+             00000000fe03fe030000000000000000020002000200000000000200000000000200000002000000\
+             02000000020000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000020000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             00000000000000000000000000000000000000000000000000000000000000000000000000000000\
+             fe0300000000000000000000000000000000000000000000fe030000000000000200000000000000\
+             02000000020000000000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert_eq!(expected_lane.len(), 320);
+        let stream = hex_bytes("87e2163f7eff1a365ef3a7f6a5e841a3");
+        let spec = RansDecodeSpec {
+            count: 320,
+            log: 5,
+            stride: 3,
+            step: &STEP,
+            sym: &SYM,
+            init_states: states,
+            stream: &stream,
+        };
+
+        let mut out = vec![0xbeefu16; 960];
+        let used = rans_decode_into(&mut out, spec).unwrap();
+        assert_eq!(used, 16);
+        for (i, &expected) in expected_lane.iter().enumerate() {
+            assert_eq!(out[i * 3], expected, "lane symbol {i}");
+        }
+        assert!(out
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 3 != 0)
+            .all(|(_, &v)| v == 0xbeef));
+
+        let fresh = rans_decode(spec).unwrap();
+        assert_eq!(fresh.len(), 960);
+        for (i, &expected) in expected_lane.iter().enumerate() {
+            assert_eq!(fresh[i * 3], expected, "fresh lane symbol {i}");
+        }
+        assert!(fresh
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 3 != 0)
+            .all(|(_, &v)| v == 0));
+
+        let mut too_small = vec![0u16; 320];
+        assert_eq!(
+            rans_decode_into(&mut too_small, spec),
+            Err(RansDecodeError::OutputTooSmall)
+        );
+    }
+
     fn hex_bytes(s: &str) -> Vec<u8> {
         let h: Vec<u8> = s.bytes().filter(|b| b.is_ascii_hexdigit()).collect();
         h.chunks(2)
             .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    fn hex_u16s(s: &str) -> Vec<u16> {
+        let bytes = hex_bytes(s);
+        assert_eq!(bytes.len() % 2, 0);
+        bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect()
     }
 
