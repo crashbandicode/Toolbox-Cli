@@ -747,15 +747,185 @@ pub fn rans_rle_fill(
     Ok(())
 }
 
+/// Reverse-reader state for the 3-lane segment decoder (`0x110ef70`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RansThreeLaneReader {
+    /// Payload-relative byte pointer.
+    pub ptr: usize,
+    /// Pending high bits, with the next bit at the MSB.
+    pub acc: u64,
+    /// Bit position inside the next loaded `u64`.
+    pub bitpos: u32,
+}
+
+/// Errors from the 3-lane segment decoder (`0x110ef70`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RansThreeLaneDecodeError {
+    /// `table` length must equal `1 << log`.
+    TableSizeMismatch,
+    /// A zero stride would repeatedly overwrite the same output slot.
+    ZeroStride,
+    /// `count * stride` overflowed or does not fit the caller-provided output.
+    OutputTooSmall,
+    /// A reader tried to load an 8-byte word outside the payload.
+    PayloadTooSmall,
+    /// A table entry consumed more bits than the reloaded reader had available.
+    ReaderUnderflow,
+}
+
+/// Inputs for `0x110ef70`, the mode-1 3-lane segment decoder.
+pub struct RansThreeLaneDecodeSpec<'a> {
+    /// Number of symbols this call writes (`w2`).
+    pub count: usize,
+    /// `log2` table selector width (`w5`).
+    pub log: u32,
+    /// Output spacing in u16 slots (`w1`).
+    pub stride: usize,
+    /// Packed decode table. Low 16 bits are the symbol; high 16 bits are bits consumed.
+    pub table: &'a [u32],
+    /// Three reader states at `x3+0`, `x3+0x18`, and `x3+0x30`. Updated in place.
+    pub readers: &'a mut [RansThreeLaneReader; 3],
+    /// Payload bytes addressed by the payload-relative reader pointers.
+    pub payload: &'a [u8],
+}
+
+#[inline]
+fn checked_u64_le(buf: &[u8], ptr: usize) -> Result<u64, RansThreeLaneDecodeError> {
+    let end = ptr
+        .checked_add(8)
+        .ok_or(RansThreeLaneDecodeError::PayloadTooSmall)?;
+    let bytes = buf
+        .get(ptr..end)
+        .ok_or(RansThreeLaneDecodeError::PayloadTooSmall)?;
+    Ok(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+fn reload_backward(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+) -> Result<(), RansThreeLaneDecodeError> {
+    let bitpos = reader.bitpos;
+    let chunk = checked_u64_le(payload, reader.ptr)?;
+    let step = ((bitpos >> 3) ^ 7) as usize;
+    reader.ptr = reader
+        .ptr
+        .checked_sub(step)
+        .ok_or(RansThreeLaneDecodeError::PayloadTooSmall)?;
+    reader.acc |= chunk >> (bitpos & 63);
+    reader.bitpos = bitpos | 0x38;
+    Ok(())
+}
+
+fn reload_forward_rev(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+) -> Result<(), RansThreeLaneDecodeError> {
+    let bitpos = reader.bitpos;
+    let chunk = checked_u64_le(payload, reader.ptr)?.swap_bytes();
+    let step = ((bitpos >> 3) ^ 7) as usize;
+    reader.ptr = reader
+        .ptr
+        .checked_add(step)
+        .filter(|&p| p <= payload.len())
+        .ok_or(RansThreeLaneDecodeError::PayloadTooSmall)?;
+    reader.acc |= chunk >> (bitpos & 63);
+    reader.bitpos = bitpos | 0x38;
+    Ok(())
+}
+
+fn take_three_lane_symbol(
+    reader: &mut RansThreeLaneReader,
+    table: &[u32],
+    log: u32,
+) -> Result<u16, RansThreeLaneDecodeError> {
+    let idx = if log == 0 {
+        0
+    } else {
+        (reader.acc >> (64 - log)) as usize
+    };
+    let entry = *table
+        .get(idx)
+        .ok_or(RansThreeLaneDecodeError::TableSizeMismatch)?;
+    let bits = entry >> 16;
+    if bits > reader.bitpos {
+        return Err(RansThreeLaneDecodeError::ReaderUnderflow);
+    }
+    reader.acc <<= bits;
+    reader.bitpos -= bits;
+    Ok((entry & 0xffff) as u16)
+}
+
+/// Decode mode-1 symbols with the 3-lane bit decoder (`0x110ef70`).
+///
+/// The main loop decodes groups of 12 symbols: four table-coded symbols from
+/// each of three readers. Readers 0 and 2 reload by little-endian `u64` loads and
+/// post-decrement their payload pointer by `(bitpos >> 3) ^ 7`; reader 1 uses
+/// `rev` on the loaded word and post-increments by the same expression
+/// (`0x110f030..0x110f080`). A final reload handles `count % 12` tail symbols
+/// in reader order 0, 1, 2 (`0x110f1f8..0x110f380`).
+pub fn rans_three_lane_decode_into(
+    out: &mut [u16],
+    spec: RansThreeLaneDecodeSpec<'_>,
+) -> Result<(), RansThreeLaneDecodeError> {
+    let table_len = 1usize
+        .checked_shl(spec.log)
+        .ok_or(RansThreeLaneDecodeError::TableSizeMismatch)?;
+    if spec.table.len() != table_len || spec.log > 63 {
+        return Err(RansThreeLaneDecodeError::TableSizeMismatch);
+    }
+    if spec.stride == 0 {
+        return Err(RansThreeLaneDecodeError::ZeroStride);
+    }
+    let min_len = spec
+        .count
+        .checked_mul(spec.stride)
+        .ok_or(RansThreeLaneDecodeError::OutputTooSmall)?;
+    if out.len() < min_len {
+        return Err(RansThreeLaneDecodeError::OutputTooSmall);
+    }
+
+    let mut written = 0usize;
+    while spec.count - written >= 12 {
+        reload_backward(spec.payload, &mut spec.readers[0])?;
+        reload_forward_rev(spec.payload, &mut spec.readers[1])?;
+        reload_backward(spec.payload, &mut spec.readers[2])?;
+        for _ in 0..4 {
+            for lane in 0..3 {
+                out[written * spec.stride] =
+                    take_three_lane_symbol(&mut spec.readers[lane], spec.table, spec.log)?;
+                written += 1;
+            }
+        }
+    }
+
+    if written < spec.count {
+        reload_backward(spec.payload, &mut spec.readers[0])?;
+        reload_forward_rev(spec.payload, &mut spec.readers[1])?;
+        reload_backward(spec.payload, &mut spec.readers[2])?;
+        while written < spec.count {
+            let lane = written % 3;
+            out[written * spec.stride] =
+                take_three_lane_symbol(&mut spec.readers[lane], spec.table, spec.log)?;
+            written += 1;
+        }
+    }
+
+    Ok(())
+}
+
 /// Errors from the segment dispatch wrapper (`0x110de00`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RansSegmentDispatchError {
-    /// Mode 1 tail-calls `0x110ef70`, the 3-lane bit decoder, which is not ported yet.
-    UnsupportedThreeLane,
+    /// Mode 1 requires the three reverse-reader states from `x5`.
+    MissingThreeLaneReaders,
     /// The observed dispatch modes are 0, 1, and 2.
     UnknownMode(u32),
     /// Mode 0 rANS decode rejected the segment.
     Decode(RansDecodeError),
+    /// Mode 1 three-lane decode rejected the segment.
+    ThreeLane(RansThreeLaneDecodeError),
     /// Mode 2 RLE fill rejected the segment.
     Rle(RansRleFillError),
 }
@@ -780,6 +950,10 @@ pub struct RansSegmentDispatchSpec<'a> {
     pub sym: &'a [u16],
     /// Forward renorm bytes for mode 0.
     pub stream: &'a [u8],
+    /// Payload bytes for mode 1 reader loads.
+    pub payload: &'a [u8],
+    /// Three mode-1 reader states from `x5`, when dispatching mode 1.
+    pub three_lane_readers: Option<&'a mut [RansThreeLaneReader; 3]>,
 }
 
 /// Dispatch one built symbol segment (`0x110de00`).
@@ -787,9 +961,9 @@ pub struct RansSegmentDispatchSpec<'a> {
 /// Mode 0 builds the same stack output spec as `0x110de14..0x110de48`:
 /// `prod=count*stride` is the caller's full u16 buffer size, while `count`
 /// remains the number of symbols passed to `0x110e270`; this is what preserves
-/// sibling lanes for stride-3 segments. Mode 2 maps to the strided fill at
-/// `0x110de70..0x110de78` / `0x110f930`. Mode 1 is explicitly guarded until
-/// `0x110ef70` is ported.
+/// sibling lanes for stride-3 segments. Mode 1 maps to `0x110ef70` with the
+/// reader context passed in `x5`. Mode 2 maps to the strided fill at
+/// `0x110de70..0x110de78` / `0x110f930`.
 pub fn rans_segment_dispatch_into(
     out: &mut [u16],
     spec: RansSegmentDispatchSpec<'_>,
@@ -812,7 +986,24 @@ pub fn rans_segment_dispatch_into(
             *spec.states = states;
             Ok(used)
         }
-        1 => Err(RansSegmentDispatchError::UnsupportedThreeLane),
+        1 => {
+            let readers = spec
+                .three_lane_readers
+                .ok_or(RansSegmentDispatchError::MissingThreeLaneReaders)?;
+            rans_three_lane_decode_into(
+                out,
+                RansThreeLaneDecodeSpec {
+                    count: spec.count,
+                    log: spec.log,
+                    stride: spec.stride,
+                    table: spec.step,
+                    readers,
+                    payload: spec.payload,
+                },
+            )
+            .map_err(RansSegmentDispatchError::ThreeLane)?;
+            Ok(0)
+        }
         2 => {
             rans_rle_fill(out, spec.value, spec.count, spec.stride)
                 .map_err(RansSegmentDispatchError::Rle)?;
@@ -1725,6 +1916,8 @@ mod tests {
                 step: &table.step,
                 sym: &table.sym,
                 stream: &stream,
+                payload: &[],
+                three_lane_readers: None,
             },
         )
         .unwrap();
@@ -1760,6 +1953,8 @@ mod tests {
                 step: &[],
                 sym: &[],
                 stream: &[],
+                payload: &[],
+                three_lane_readers: None,
             },
         )
         .unwrap();
@@ -1768,7 +1963,7 @@ mod tests {
     }
 
     #[test]
-    fn rans_segment_dispatch_guards_unported_mode1() {
+    fn rans_segment_dispatch_mode1_requires_reader_state() {
         let mut states = [0u64; 4];
         let mut out = [0u16; 1];
         assert_eq!(
@@ -1784,9 +1979,187 @@ mod tests {
                     step: &[],
                     sym: &[],
                     stream: &[],
+                    payload: &[],
+                    three_lane_readers: None,
                 },
             ),
-            Err(RansSegmentDispatchError::UnsupportedThreeLane)
+            Err(RansSegmentDispatchError::MissingThreeLaneReaders)
+        );
+    }
+
+    /// Three-lane mode-1 decoder (`0x110ef70`) main loop (`count >= 12`).
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Bass dispatch 13
+    /// (`mode=1,log=3,count=12,stride=1`). This covers the group-of-12 path at
+    /// `0x110f030..0x110f1b4`, including reader 1's `rev` load and forward
+    /// pointer movement. It rules out treating all three readers as the same
+    /// backwards little-endian reader.
+    #[test]
+    fn rans_three_lane_decode_bass_count12_main_loop() {
+        const TABLE: [u32; 8] = [
+            0x0002_0000,
+            0x0002_0000,
+            0x0003_0001,
+            0x0003_0004,
+            0x0003_0007,
+            0x0003_0009,
+            0x0003_000a,
+            0x0003_000b,
+        ];
+        let payload = sparse_payload(
+            834,
+            &[
+                (1, "c1927cb097255b04"),
+                (826, "c1d38107e0871e88"),
+                (814, "80a21d403e668f86"),
+            ],
+        );
+        let mut readers = [
+            RansThreeLaneReader {
+                ptr: 1,
+                acc: 0x84b8f4310101be08,
+                bitpos: 55,
+            },
+            RansThreeLaneReader {
+                ptr: 826,
+                acc: 0x668f867594cc9ac0,
+                bitpos: 56,
+            },
+            RansThreeLaneReader {
+                ptr: 814,
+                acc: 0x0e9e0cd664a3ac00,
+                bitpos: 53,
+            },
+        ];
+        let mut out = [0u16, 2, 6464, 0, 8, 2, 6400, 0, 0, 3, 6384, 0];
+        rans_three_lane_decode_into(
+            &mut out,
+            RansThreeLaneDecodeSpec {
+                count: 12,
+                log: 3,
+                stride: 1,
+                table: &TABLE,
+                readers: &mut readers,
+                payload: &payload,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(out, [7, 4, 0, 0, 0, 0, 7, 10, 11, 9, 7, 1]);
+        assert_eq!(
+            readers,
+            [
+                RansThreeLaneReader {
+                    ptr: 0,
+                    acc: 0xc7a188080df04000,
+                    bitpos: 52,
+                },
+                RansThreeLaneReader {
+                    ptr: 826,
+                    acc: 0x7c33aca664d60800,
+                    bitpos: 45,
+                },
+                RansThreeLaneReader {
+                    ptr: 813,
+                    acc: 0x783359928eb0d000,
+                    bitpos: 51,
+                },
+            ]
+        );
+    }
+
+    /// Segment dispatch wrapper for mode 1 tail (`count < 12`).
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Dragonfly dispatch 6
+    /// (`mode=1,log=1,count=2,stride=1`). This exercises the tail path at
+    /// `0x110f1f8..0x110f380`, which still reloads all three readers even though
+    /// only readers 0 and 1 emit symbols.
+    #[test]
+    fn rans_segment_dispatch_mode1_three_lane_tail() {
+        const TABLE: [u32; 2] = [0x0001_0000, 0x0001_0004];
+        let payload = sparse_payload(
+            463,
+            &[
+                (0, "5b22b1399b96d244"),
+                (431, "63ffffe917bfb0c8"),
+                (455, "20f89bc3f9ff5f37"),
+            ],
+        );
+        let mut states = [0u64; 4];
+        let mut readers = [
+            RansThreeLaneReader {
+                ptr: 0,
+                acc: 0xfaf64078a80ebc20,
+                bitpos: 57,
+            },
+            RansThreeLaneReader {
+                ptr: 431,
+                acc: 0x226000043fffcc00,
+                bitpos: 51,
+            },
+            RansThreeLaneReader {
+                ptr: 455,
+                acc: 0x910a0801fffb9a00,
+                bitpos: 49,
+            },
+        ];
+        let mut out = [0u16; 2];
+        let used = rans_segment_dispatch_into(
+            &mut out,
+            RansSegmentDispatchSpec {
+                mode: 1,
+                log: 1,
+                value: 11,
+                count: 2,
+                stride: 1,
+                states: &mut states,
+                step: &TABLE,
+                sym: &[],
+                stream: &[],
+                payload: &payload,
+                three_lane_readers: Some(&mut readers),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(used, 0);
+        assert_eq!(out, [4, 0]);
+        assert_eq!(
+            readers,
+            [
+                RansThreeLaneReader {
+                    ptr: 0,
+                    acc: 0xf5ec80f1501d7844,
+                    bitpos: 56,
+                },
+                RansThreeLaneReader {
+                    ptr: 432,
+                    acc: 0x44c000087fff98fe,
+                    bitpos: 58,
+                },
+                RansThreeLaneReader {
+                    ptr: 454,
+                    acc: 0x910a0801fffb9baf,
+                    bitpos: 57,
+                },
+            ]
+        );
+
+        let mut short_readers = readers;
+        let mut short_out = [0u16; 2];
+        assert_eq!(
+            rans_three_lane_decode_into(
+                &mut short_out,
+                RansThreeLaneDecodeSpec {
+                    count: 2,
+                    log: 1,
+                    stride: 1,
+                    table: &TABLE,
+                    readers: &mut short_readers,
+                    payload: &[0; 7],
+                },
+            ),
+            Err(RansThreeLaneDecodeError::PayloadTooSmall)
         );
     }
 
@@ -1795,6 +2168,15 @@ mod tests {
         h.chunks(2)
             .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
             .collect()
+    }
+
+    fn sparse_payload(len: usize, chunks: &[(usize, &str)]) -> Vec<u8> {
+        let mut payload = vec![0u8; len];
+        for &(offset, hex) in chunks {
+            let bytes = hex_bytes(hex);
+            payload[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        }
+        payload
     }
 
     fn hex_u16s(s: &str) -> Vec<u16> {

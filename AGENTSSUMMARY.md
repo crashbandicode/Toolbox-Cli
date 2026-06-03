@@ -643,6 +643,28 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP1 chunk three-lane segment decoder
+**Committed:** B2-CP1 chunk 1b ports `0x110ef70` as
+`geometry::rans_three_lane_decode_into` and wires mode 1 through
+`geometry::rans_segment_dispatch_into`. The decoder uses three table readers:
+readers 0 and 2 reload little-endian u64 words and post-decrement by
+`(bitpos >> 3) ^ 7`; reader 1 applies the `rev` load and post-increments by the
+same expression. Main groups decode 12 symbols (four from each reader), then the
+tail reload at `0x110f1f8..0x110f380` emits `count % 12` in reader order.
+Durable local evidence: refreshed `capture_segment_dispatch.py` now stores
+per-model payload bytes in gitignored `segment_dispatch_capture.json`, and
+`verify_segment_dispatch.py` replays all dispatch modes. Replay status:
+mode 0 12/12, mode 1 17/17, mode 2 4/4. Fixture-free tests cover Animal_Bass
+dispatch 13 (`count=12`, main loop, log 3) and Animal_Dragonfly dispatch 6
+(`count=2`, tail, log 1), including final reader state writeback and truncated
+payload rejection. Next: port/connect the `0x110de80` table-build path so the
+segment descriptor is produced from the reverse header rather than supplied by a
+capture, then run the B2-CP1 checkpoint full gate.
+Sample green: **22 `mc::geometry` lib unit**; `verify_segment_dispatch.py` green.
+Last checkpoint full-suite baseline remains: All green: **163 lib unit** (incl.
+**17** `mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds.
+
 ### 2026-06-03 - MeshCodec B2-CP1 chunk segment dispatch wrapper
 **Committed:** B2-CP1 chunk 1a ports the observed `0x110de00` segment
 dispatch wrapper as `geometry::rans_segment_dispatch_into` for mode 0 rANS and
