@@ -643,6 +643,23 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP1 checkpoint green
+**Committed:** B2-CP1 checkpoint is now fully green after cleanup commit
+`bda3c17` removed the redundant `u32` casts that made clippy warn in
+`rans_read_segment_header`. The completed B2-CP1 chain is `e290e74`
+(`0x110de00` dispatch), `b5ed5bc` (`0x110ef70` three-lane decode),
+`43eafb0` (`0x110de80` header), `bb864aa` (`0x110e540` mode-0 table),
+`c2dc036` (`0x110f3c0` mode-1 table), `279511b` (`0x110de80`
+descriptor builder), plus `bda3c17` checkpoint cleanup.
+Durable local evidence remains gitignored under `local-assets/re/`:
+`verify_segment_descriptor_builder.py` replays **99/99** descriptors
+with mode counts {0:40, 1:47, 2:12}; `verify_mode0_table_builder.py`
+replays **40/40**; `verify_mode1_table_builder.py` replays **47/47**;
+`verify_segment_dispatch.py` replays mode 0 **12/12**, mode 1 **17/17**,
+and mode 2 **4/4**. All green: **177 lib unit** (incl. **31**
+`mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds. Next: B2-CP2 segment loop `0x110dc30`.
+
 ### 2026-06-03 - MeshCodec B2-CP1 chunk segment descriptor builder
 **Committed:** B2-CP1 chunk 1f wires the parsed segment header and mode-specific
 table builders into `geometry::rans_build_segment_descriptor`, the composed
