@@ -1374,6 +1374,501 @@ enum FreqSite {
     Return,
 }
 
+/// Mode-0 segment table built by `0x110e540`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RansMode0TableBuild {
+    pub table: RansDecodeTable,
+    /// Sparse symbol IDs decoded before the frequency table.
+    pub symbols: Vec<u16>,
+    /// Frequencies paired with `symbols`; the last entry is the implicit tail mass.
+    pub freqs: Vec<u16>,
+    /// Reverse reader state after the symbol-list and frequency readers.
+    pub reader: RansFreqReader,
+}
+
+/// Errors from the mode-0 segment table builder (`0x110e540`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RansMode0TableBuildError {
+    /// `0x110e540` expects at least one sparse symbol.
+    TableCountZero,
+    /// The descriptor reserves 2048 entries for the mode-0 table (`log <= 11`).
+    UnsupportedLog(u32),
+    /// A sparse alphabet with more symbols than rANS states cannot assign
+    /// positive frequency to every symbol.
+    TableCountExceedsMass { count: u32, mass: u32 },
+    /// A reverse-reader load would read outside the provided payload.
+    PayloadTooSmall,
+    /// Decoded frequencies did not sum to `1 << log`.
+    FrequencyMassMismatch { expected: u32, actual: u64 },
+}
+
+#[inline]
+fn checked_mode0_u64_le(buf: &[u8], ptr: usize) -> Result<u64, RansMode0TableBuildError> {
+    let end = ptr
+        .checked_add(8)
+        .ok_or(RansMode0TableBuildError::PayloadTooSmall)?;
+    let bytes = buf
+        .get(ptr..end)
+        .ok_or(RansMode0TableBuildError::PayloadTooSmall)?;
+    Ok(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+#[inline]
+fn checked_sub_ptr(ptr: usize, step: u32) -> Result<usize, RansMode0TableBuildError> {
+    ptr.checked_sub(step as usize)
+        .ok_or(RansMode0TableBuildError::PayloadTooSmall)
+}
+
+fn rans_mode0_small_symbols(
+    payload: &[u8],
+    reader: RansFreqReader,
+    count: usize,
+) -> Result<(Vec<u16>, RansFreqReader), RansMode0TableBuildError> {
+    const M32: u32 = u32::MAX;
+    const MASK64: u64 = u64::MAX;
+
+    let mut ptr = reader.ptr;
+    let mut acc = reader.acc;
+    let mut bitpos = reader.bitpos;
+    let mut width_state = 0u32;
+    let mut prev_plus_one = 0u32;
+    let mut symbols = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let chunk = checked_mode0_u64_le(payload, ptr)?;
+        let width = width_state >> 10;
+        width_state = width_state.wrapping_mul(12);
+        ptr = checked_sub_ptr(ptr, (bitpos >> 3) ^ 7)?;
+        acc = ((chunk >> (bitpos & 63)) | acc) & MASK64;
+
+        let leading_zeroes = clz64(acc);
+        let nbits_minus_one = width.wrapping_add(leading_zeroes << 1);
+        let raw = (M32 << (width & 31)).wrapping_add((acc >> ((!nbits_minus_one) & 63)) as u32);
+        acc = (acc << (nbits_minus_one.wrapping_add(1) & 63)) & MASK64;
+        bitpos = (bitpos | 0x38).wrapping_sub(nbits_minus_one.wrapping_add(1));
+
+        let symbol = raw.wrapping_add(prev_plus_one);
+        symbols.push(symbol as u16);
+        prev_plus_one = symbol.wrapping_add(1);
+
+        width_state = width_state
+            .wrapping_add(0x0002_0000)
+            .wrapping_sub(clz32(raw).wrapping_shl(12));
+        width_state >>= 4;
+    }
+
+    Ok((symbols, RansFreqReader { ptr, acc, bitpos }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode0SymbolSite {
+    Slow,
+    RunLength,
+    RunBody,
+    AfterRun,
+}
+
+fn rans_mode0_large_symbols(
+    payload: &[u8],
+    reader: RansFreqReader,
+    count: usize,
+) -> Result<(Vec<u16>, RansFreqReader), RansMode0TableBuildError> {
+    const M32: u32 = u32::MAX;
+    const MASK64: u64 = u64::MAX;
+
+    let mut ptr = reader.ptr;
+    let mut acc = reader.acc;
+    let mut bitpos = reader.bitpos;
+    let mut run_bitpos = 0u32;
+    let mut width_state = 0u32;
+    let mut previous_plus_one = 0u32;
+    let mut remaining = count as u32;
+    let mut remaining_after_run = 0u32;
+    let mut prime = 0u32;
+    let mut site = Mode0SymbolSite::Slow;
+    let mut symbols = Vec::with_capacity(count);
+
+    loop {
+        match site {
+            Mode0SymbolSite::AfterRun => {
+                let width = width_state >> 10;
+                prime = 1u32 << (width & 31);
+                remaining = remaining_after_run;
+                bitpos = run_bitpos;
+                if remaining == 0 {
+                    break;
+                }
+                site = Mode0SymbolSite::Slow;
+            }
+            Mode0SymbolSite::Slow => {
+                let chunk = checked_mode0_u64_le(payload, ptr)?;
+                remaining = remaining.wrapping_sub(1);
+                let at_end = remaining == 0;
+                ptr = checked_sub_ptr(ptr, (bitpos >> 3) ^ 7)?;
+                acc = ((chunk >> (bitpos & 63)) | acc) & MASK64;
+
+                let width = width_state >> 10;
+                let leading_zeroes = clz64(acc);
+                let nbits_minus_one = width.wrapping_add(leading_zeroes << 1);
+                let base = (M32 << (width & 31)).wrapping_add(prime);
+                let raw = base.wrapping_add((acc >> ((!nbits_minus_one) & 63)) as u32);
+                acc = (acc << (nbits_minus_one.wrapping_add(1) & 63)) & MASK64;
+                bitpos = (bitpos | 0x38).wrapping_sub(nbits_minus_one.wrapping_add(1));
+
+                let symbol = previous_plus_one.wrapping_add(raw);
+                symbols.push(symbol as u16);
+                previous_plus_one = symbol.wrapping_add(1);
+                if at_end {
+                    run_bitpos = bitpos;
+                    break;
+                }
+
+                width_state = width_state.wrapping_mul(13);
+                prime = 0;
+                width_state = width_state.wrapping_add(
+                    (0x8000u32.wrapping_sub(clz32(raw).wrapping_shl(10))).wrapping_mul(3),
+                );
+                width_state >>= 4;
+                site = if raw >> (width & 31) != 0 {
+                    Mode0SymbolSite::Slow
+                } else {
+                    Mode0SymbolSite::RunLength
+                };
+            }
+            Mode0SymbolSite::RunLength => {
+                let chunk = checked_mode0_u64_le(payload, ptr)?;
+                ptr = checked_sub_ptr(ptr, (bitpos >> 3) ^ 7)?;
+                acc = ((chunk >> (bitpos & 63)) | acc) & MASK64;
+                let nbits_count = 32u32.wrapping_sub(clz32(remaining));
+                let leading_zeroes = clz64(acc);
+                if nbits_count <= leading_zeroes {
+                    run_bitpos = (bitpos | 0x38).wrapping_sub(nbits_count);
+                    acc = (acc << (nbits_count & 63)) & MASK64;
+                    remaining_after_run = 0;
+                    site = Mode0SymbolSite::RunBody;
+                } else {
+                    let run_nbits = 1u32 | (leading_zeroes << 1);
+                    let top = acc >> (run_nbits.wrapping_neg() & 63);
+                    acc = (acc << (run_nbits & 63)) & MASK64;
+                    let run_len = (top as u32).wrapping_sub(1);
+                    run_bitpos = (bitpos | 0x38).wrapping_sub(run_nbits);
+                    remaining_after_run = remaining.wrapping_sub(run_len);
+                    remaining = run_len;
+                    site = if run_len == 0 {
+                        Mode0SymbolSite::AfterRun
+                    } else {
+                        Mode0SymbolSite::RunBody
+                    };
+                }
+            }
+            Mode0SymbolSite::RunBody => {
+                let chunk = checked_mode0_u64_le(payload, ptr)?;
+                remaining = remaining.wrapping_sub(1);
+                let at_end = remaining == 0;
+                ptr = checked_sub_ptr(ptr, (run_bitpos >> 3) ^ 7)?;
+                acc = ((chunk >> (run_bitpos & 63)) | acc) & MASK64;
+                run_bitpos |= 0x38;
+
+                let width = width_state >> 10;
+                width_state = width_state.wrapping_mul(13);
+                let value = ((acc >> 1) >> ((!width) & 63)) as u32;
+                acc = (acc << (width & 63)) & MASK64;
+                run_bitpos = run_bitpos.wrapping_sub(width);
+
+                let symbol = previous_plus_one.wrapping_add(value);
+                symbols.push(symbol as u16);
+                previous_plus_one = symbol.wrapping_add(1);
+
+                width_state = width_state.wrapping_add(
+                    (0x8000u32.wrapping_sub(clz32(value).wrapping_shl(10))).wrapping_mul(3),
+                );
+                width_state >>= 4;
+                site = if at_end {
+                    Mode0SymbolSite::AfterRun
+                } else {
+                    Mode0SymbolSite::RunBody
+                };
+            }
+        }
+    }
+
+    Ok((
+        symbols,
+        RansFreqReader {
+            ptr,
+            acc,
+            bitpos: run_bitpos,
+        },
+    ))
+}
+
+fn rans_read_freqs_checked(
+    buf: &[u8],
+    reader: RansFreqReader,
+    params: RansFreqParams,
+) -> Result<RansFreqRead, RansMode0TableBuildError> {
+    const M32: u32 = 0xffff_ffff;
+    const MASK64: u64 = u64::MAX;
+
+    let mut bitpos = reader.bitpos & M32;
+    let width_mul = 16u32.wrapping_sub(params.w4);
+    let mut width_state = params.w3_init << 10;
+    let mut ptr = reader.ptr;
+    let mut acc = reader.acc & MASK64;
+    let cap_base = 0x8000u32;
+    let count_bitlen_base = 0x20u32;
+    let one = 1u32;
+
+    let mut rem = params.m & M32;
+    let mut freq = params.initfreq & M32;
+    let mut remaining = params.count & M32;
+    let mut prime = 0u32;
+    let mut remaining_after_run = 0u32;
+    let mut out = Vec::with_capacity(remaining as usize);
+    let mut site = FreqSite::SlowClz;
+
+    loop {
+        match site {
+            FreqSite::AfterRun => {
+                prime = one << ((width_state >> 10) & 31);
+                if remaining == 0 {
+                    site = FreqSite::Return;
+                } else {
+                    site = FreqSite::SlowClz;
+                }
+            }
+            FreqSite::SlowClz => {
+                let chunk = checked_mode0_u64_le(buf, ptr)?;
+                remaining = remaining.wrapping_sub(1);
+                let at_end = remaining == 0;
+                acc = ((chunk >> (bitpos & 63)) | acc) & MASK64;
+
+                let width = width_state >> 10;
+                let clz = clz64(acc);
+                let mut nbits = width.wrapping_add(clz << 1);
+                let neg_nbits = !nbits;
+                nbits = nbits.wrapping_add(1);
+                let val = (acc >> (neg_nbits & 63)) & MASK64;
+                ptr = checked_sub_ptr(ptr, (bitpos >> 3) ^ 7)?;
+                bitpos = (bitpos | 0x38).wrapping_sub(nbits);
+                acc = (acc << (nbits & 63)) & MASK64;
+                let raw = (val as u32)
+                    .wrapping_sub(one << (width & 31))
+                    .wrapping_add(prime);
+                prime = 0;
+                freq = freq.wrapping_add(unzigzag32(raw));
+                rem = rem.wrapping_sub(freq);
+                out.push(freq as u16);
+
+                if at_end {
+                    site = FreqSite::Return;
+                    continue;
+                }
+
+                width_state = width_state.wrapping_mul(width_mul);
+                let raw_high = raw >> (width & 31);
+                width_state = width_state.wrapping_add(
+                    (cap_base.wrapping_sub(clz32(raw) << 10)).wrapping_mul(params.w4),
+                );
+                width_state >>= 4;
+                let cap = cap_base.wrapping_sub(clz32(rem) << 10);
+                if cap < width_state {
+                    width_state = cap;
+                }
+                site = if raw_high != 0 {
+                    FreqSite::SlowClz
+                } else {
+                    FreqSite::RunLength
+                };
+            }
+            FreqSite::RunLength => {
+                let chunk = checked_mode0_u64_le(buf, ptr)?;
+                ptr = checked_sub_ptr(ptr, (bitpos >> 3) ^ 7)?;
+                acc = ((chunk >> (bitpos & 63)) | acc) & MASK64;
+                let nbits_count = count_bitlen_base.wrapping_sub(clz32(remaining));
+                let clz = clz64(acc);
+                if nbits_count <= clz {
+                    bitpos = (bitpos | 0x38).wrapping_sub(nbits_count);
+                    acc = (acc << (nbits_count & 63)) & MASK64;
+                    site = FreqSite::RunBody;
+                } else {
+                    let run_nbits = one | (clz << 1);
+                    let top = (acc >> (run_nbits.wrapping_neg() & 63)) & MASK64;
+                    acc = (acc << (run_nbits & 63)) & MASK64;
+                    let run_len = (top as u32).wrapping_sub(1);
+                    bitpos = (bitpos | 0x38).wrapping_sub(run_nbits);
+                    remaining_after_run = remaining.wrapping_sub(run_len);
+                    remaining = run_len;
+                    site = if run_len != 0 {
+                        FreqSite::RunBody
+                    } else {
+                        remaining = remaining_after_run;
+                        FreqSite::AfterRun
+                    };
+                }
+            }
+            FreqSite::RunBody => {
+                let chunk = checked_mode0_u64_le(buf, ptr)?;
+                remaining = remaining.wrapping_sub(1);
+                let at_end = remaining == 0;
+                ptr = checked_sub_ptr(ptr, (bitpos >> 3) ^ 7)?;
+                acc = ((chunk >> (bitpos & 63)) | acc) & MASK64;
+                bitpos = (bitpos | 0x38) & M32;
+                let width = width_state >> 10;
+                width_state = width_state.wrapping_mul(width_mul);
+                let top_half = (acc >> 1) & MASK64;
+                acc = (acc << (width & 63)) & MASK64;
+                bitpos = bitpos.wrapping_sub(width);
+                let val = (top_half >> ((!width) & 63)) & MASK64;
+                freq = freq.wrapping_add(unzigzag32(val as u32));
+                rem = rem.wrapping_sub(freq);
+                out.push(freq as u16);
+                width_state = width_state.wrapping_add(
+                    (cap_base.wrapping_sub(clz32(val as u32) << 10)).wrapping_mul(params.w4),
+                );
+                width_state >>= 4;
+                let cap = cap_base.wrapping_sub(clz32(rem) << 10);
+                if cap < width_state {
+                    width_state = cap;
+                }
+                if at_end {
+                    remaining = remaining_after_run;
+                    site = FreqSite::AfterRun;
+                } else {
+                    site = FreqSite::RunBody;
+                }
+            }
+            FreqSite::Return => break,
+        }
+    }
+
+    Ok(RansFreqRead {
+        freqs: out,
+        last_freq: freq as u16,
+        rem,
+        reader: RansFreqReader { ptr, acc, bitpos },
+    })
+}
+
+fn rans_spread_sparse(
+    log: u32,
+    symbols: &[u16],
+    freqs: &[u16],
+) -> Result<RansDecodeTable, RansMode0TableBuildError> {
+    let m = 1usize << log;
+    let mut step = vec![0u32; m];
+    let mut sym = vec![0u16; m];
+    let mut cursor = 0usize;
+
+    for (&symbol, &freq) in symbols.iter().zip(freqs) {
+        let freq = freq as usize;
+        let end =
+            cursor
+                .checked_add(freq)
+                .ok_or(RansMode0TableBuildError::FrequencyMassMismatch {
+                    expected: m as u32,
+                    actual: u64::MAX,
+                })?;
+        if end > m {
+            return Err(RansMode0TableBuildError::FrequencyMassMismatch {
+                expected: m as u32,
+                actual: end as u64,
+            });
+        }
+        let high = (freq as u32) << 16;
+        for slot in cursor..end {
+            let low = (slot - cursor) as u32;
+            sym[slot] = symbol;
+            step[slot] = high | low;
+        }
+        cursor = end;
+    }
+
+    if cursor != m {
+        return Err(RansMode0TableBuildError::FrequencyMassMismatch {
+            expected: m as u32,
+            actual: cursor as u64,
+        });
+    }
+
+    Ok(RansDecodeTable { log, step, sym })
+}
+
+/// Build a mode-0 segment decode table (`0x110e540`).
+///
+/// The builder first decodes a sparse, strictly-increasing symbol list. Small
+/// alphabets (`count <= 10`) use the compact loop at `0x110e578..0x110e60c`;
+/// larger alphabets tail-call the related symbol-list reader at `0x110e9a0`
+/// with `w4=3`. It then reads `count-1` frequencies with `0x110e7b0`, using
+/// `w4=15` for small alphabets and `w4=14` for large alphabets, and spreads the
+/// implicit tail mass contiguously into the mode-0 step/symbol tables.
+pub fn rans_build_mode0_table(
+    payload: &[u8],
+    reader: RansFreqReader,
+    table_count: u32,
+    log: u32,
+) -> Result<RansMode0TableBuild, RansMode0TableBuildError> {
+    if table_count == 0 {
+        return Err(RansMode0TableBuildError::TableCountZero);
+    }
+    if log > 11 {
+        return Err(RansMode0TableBuildError::UnsupportedLog(log));
+    }
+    let mass = 1u32 << log;
+    if table_count > mass {
+        return Err(RansMode0TableBuildError::TableCountExceedsMass {
+            count: table_count,
+            mass,
+        });
+    }
+
+    let count = table_count as usize;
+    let (symbols, reader, freq_w4) = if count <= 10 {
+        let (symbols, reader) = rans_mode0_small_symbols(payload, reader, count)?;
+        (symbols, reader, 15)
+    } else {
+        let (symbols, reader) = rans_mode0_large_symbols(payload, reader, count)?;
+        (symbols, reader, 14)
+    };
+
+    let (freqs, reader) = if count == 1 {
+        (vec![mass as u16], reader)
+    } else {
+        let freq_count = table_count - 1;
+        let freq_read = rans_read_freqs_checked(
+            payload,
+            reader,
+            RansFreqParams {
+                count: freq_count,
+                w3_init: log.max(3) - 2,
+                w4: freq_w4,
+                m: mass,
+                initfreq: mass / table_count,
+            },
+        )?;
+        let mut freqs = freq_read.freqs;
+        let actual = freqs.iter().map(|&f| f as u64).sum::<u64>() + freq_read.rem as u64;
+        if freq_read.rem > u16::MAX as u32 || actual != mass as u64 {
+            return Err(RansMode0TableBuildError::FrequencyMassMismatch {
+                expected: mass,
+                actual,
+            });
+        }
+        freqs.push(freq_read.rem as u16);
+        (freqs, freq_read.reader)
+    };
+
+    let table = rans_spread_sparse(log, &symbols, &freqs)?;
+    Ok(RansMode0TableBuild {
+        table,
+        symbols,
+        freqs,
+        reader,
+    })
+}
+
 /// Decode a **raw window**: read the forward var-int `srcsize`, then copy
 /// `srcsize` literal bytes. Returns the bytes and the new forward position.
 pub fn decode_raw_window(payload: &[u8], fwd_pos: usize) -> (Vec<u8>, usize) {
@@ -2185,6 +2680,128 @@ mod tests {
                 },
             ),
             Err(RansSegmentHeaderError::PayloadTooSmall)
+        );
+    }
+
+    /// Mode-0 table builder (`0x110e540`) small-symbol branch.
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Bear table-build 2,
+    /// replayed by `verify_mode0_table_builder.py`. This covers the
+    /// `count <= 10` symbol-list loop at `0x110e578..0x110e60c` and the
+    /// `w4=15` frequency-reader call.
+    #[test]
+    fn rans_mode0_table_builder_small_branch() {
+        const STEP: [u32; 32] = [
+            196608, 196609, 196610, 1900544, 1900545, 1900546, 1900547, 1900548, 1900549, 1900550,
+            1900551, 1900552, 1900553, 1900554, 1900555, 1900556, 1900557, 1900558, 1900559,
+            1900560, 1900561, 1900562, 1900563, 1900564, 1900565, 1900566, 1900567, 1900568,
+            1900569, 1900570, 1900571, 1900572,
+        ];
+        const SYM: [u16; 32] = [
+            0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1,
+        ];
+        let payload = hex_bytes("cb8b88ff4f53860f38");
+        let built = rans_build_mode0_table(
+            &payload,
+            RansFreqReader {
+                ptr: 1,
+                acc: 0xc84854fda2e22400,
+                bitpos: 51,
+            },
+            2,
+            5,
+        )
+        .unwrap();
+        assert_eq!(built.symbols, [0, 1]);
+        assert_eq!(built.freqs, [3, 29]);
+        assert_eq!(built.table.step, STEP);
+        assert_eq!(built.table.sym, SYM);
+        assert_eq!(
+            built.reader,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0x2153f68b889c0700,
+                bitpos: 49,
+            }
+        );
+
+        assert_eq!(
+            rans_build_mode0_table(
+                &payload[..8],
+                RansFreqReader {
+                    ptr: 1,
+                    acc: 0xc84854fda2e22400,
+                    bitpos: 51,
+                },
+                2,
+                5,
+            ),
+            Err(RansMode0TableBuildError::PayloadTooSmall)
+        );
+    }
+
+    /// Mode-0 table builder (`0x110e540`) large-symbol branch.
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Bear table-build 25,
+    /// replayed by `verify_mode0_table_builder.py`. This covers the
+    /// `count > 10` call to `0x110e9a0`, the `w4=14` frequency-reader call, and
+    /// the contiguous sparse spread into the descriptor's step/symbol tables.
+    #[test]
+    fn rans_mode0_table_builder_large_branch() {
+        const STEP: [u32; 64] = [
+            327680, 327681, 327682, 327683, 327684, 65536, 65536, 65536, 65536, 65536, 65536,
+            196608, 196609, 196610, 393216, 393217, 393218, 393219, 393220, 393221, 851968, 851969,
+            851970, 851971, 851972, 851973, 851974, 851975, 851976, 851977, 851978, 851979, 851980,
+            1507328, 1507329, 1507330, 1507331, 1507332, 1507333, 1507334, 1507335, 1507336,
+            1507337, 1507338, 1507339, 1507340, 1507341, 1507342, 1507343, 1507344, 1507345,
+            1507346, 1507347, 1507348, 1507349, 1507350, 524288, 524289, 524290, 524291, 524292,
+            524293, 524294, 524295,
+        ];
+        const SYM: [u16; 64] = [
+            0, 0, 0, 0, 0, 1, 2, 4, 6, 7, 9, 10, 10, 10, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12,
+            12, 12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13,
+            13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14,
+        ];
+        let payload = hex_bytes("d2b6402520a707000002d000faed3d27");
+        let built = rans_build_mode0_table(
+            &payload,
+            RansFreqReader {
+                ptr: 8,
+                acc: 0xbaf109e148a24c00,
+                bitpos: 47,
+            },
+            12,
+            6,
+        )
+        .unwrap();
+        assert_eq!(built.symbols, [0, 1, 2, 4, 6, 7, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(built.freqs, [5, 1, 1, 1, 1, 1, 1, 3, 6, 13, 23, 8]);
+        assert_eq!(built.table.step, STEP);
+        assert_eq!(built.table.sym, SYM);
+        assert_eq!(
+            built.reader,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0xf7b7e80340080000,
+                bitpos: 54,
+            }
+        );
+
+        assert_eq!(
+            rans_build_mode0_table(&payload, built.reader, 0, 6),
+            Err(RansMode0TableBuildError::TableCountZero)
+        );
+        assert_eq!(
+            rans_build_mode0_table(&payload, built.reader, 12, 12),
+            Err(RansMode0TableBuildError::UnsupportedLog(12))
+        );
+        assert_eq!(
+            rans_build_mode0_table(&payload, built.reader, 65, 6),
+            Err(RansMode0TableBuildError::TableCountExceedsMass {
+                count: 65,
+                mass: 64
+            })
         );
     }
 

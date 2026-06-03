@@ -643,6 +643,26 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP1 chunk mode-0 table builder
+**Committed:** B2-CP1 chunk 1d ports the mode-0 segment table builder
+`0x110e540` as `geometry::rans_build_mode0_table`. It consumes the parsed
+header's table count/log plus the reverse reader state, decodes the sparse
+symbol list (`count <= 10` loop or the `0x110e9a0` large-list path), reads
+`count-1` frequencies with the validated `0x110e7b0` formula, appends the
+implicit tail mass, and builds the sparse contiguous step/symbol table consumed
+by `0x110de00` mode 0. Durable local evidence: new gitignored
+`verify_mode0_table_builder.py` replays **40/40** captured mode-0 table builds
+from `segment_dispatch_capture.json`; branch coverage is small-symbol 27/40 and
+large-symbol 13/40. Fixture-free tests cover both branches, exact table output,
+advanced reader state, truncated payload rejection, zero count, unsupported log,
+and count greater than mass. Next: port/connect the mode-1 table builder
+`0x110f3c0`, then wire header plus table builders into a descriptor builder and
+run the B2-CP1 checkpoint full gate.
+Sample green: **29 `mc::geometry` lib unit**; `verify_mode0_table_builder.py`
+and `verify_segment_dispatch.py` green. Last checkpoint full-suite baseline
+remains: All green: **163 lib unit** (incl. **17** `mc::geometry`) + all
+integration; clippy `--all-targets` clean; `--no-default-features` builds.
+
 ### 2026-06-03 - MeshCodec B2-CP1 chunk segment header parser
 **Committed:** B2-CP1 chunk 1c ports the header parser portion of `0x110de80`
 as `geometry::rans_read_segment_header`. It consumes the reverse-bit segment
