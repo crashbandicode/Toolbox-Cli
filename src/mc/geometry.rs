@@ -38,9 +38,8 @@
 //! ## What is NOT yet ported
 //!
 //! Threading the reverse-A reader through the per-window raw/zstd flag bits,
-//! the rANS 4-state stream init (`0x110dfa0`), and the kernel
-//! (`0x10fa980`) + vertex byte-group transform (`0x10fb2e0`). Tracked in
-//! `local-assets/re/FINDINGS.md`.
+//! the segment loop (`0x110dc30`), and the kernel (`0x10fa980`) + vertex
+//! byte-group transform (`0x10fb2e0`). Tracked in `local-assets/re/FINDINGS.md`.
 
 use crate::meshopt;
 use crate::zstd_pure;
@@ -410,15 +409,95 @@ pub enum RansInitError {
     StreamTooShort,
 }
 
+/// Mutable state buffer used by `0x110dfa0`.
+///
+/// The first four lanes are the rANS states at `x0+0..0x18`; `flag` is the word
+/// at `x0+0x20`. When `flag & 0xf != 0xf`, the cold loader at `0x110e1bc` reads
+/// the missing lane states from the forward stream, stores them low-lane first,
+/// and sets `flag |= 0xf` at `0x110e264`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RansStateBuffer {
+    pub states: [u64; 4],
+    pub flag: u32,
+}
+
+impl RansStateBuffer {
+    /// A warm buffer whose four states are already loaded.
+    pub fn warm(states: [u64; 4]) -> Self {
+        Self { states, flag: 0xf }
+    }
+
+    /// A cold buffer matching the first call on a stream (`flag == 0`).
+    pub fn cold() -> Self {
+        Self {
+            states: [0; 4],
+            flag: 0,
+        }
+    }
+}
+
+/// Shared forward stream cursor (`[x2+12]`) for one stream descriptor.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RansStreamCursor {
+    pub offset: usize,
+}
+
 /// Result of [`rans_init_states`]: final four states and forward bytes consumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RansInitResult {
     pub states: [u64; 4],
+    pub flag: u32,
+    /// Absolute stream offset after the call (`[x2+12]` on return).
+    pub stream_offset: usize,
+    /// Bytes consumed by this call from the stream cursor.
     pub stream_used: usize,
 }
 
-/// Advance four interleaved rANS states by `prod >> 2` rounds (`0x110dfa0`'s
-/// main loop `0x110e010`..`0x110e120`, caller `0x110ddc8` mode 0).
+fn read_stream_byte(stream: &[u8], cursor: &mut RansStreamCursor) -> Result<u8, RansInitError> {
+    let byte = stream
+        .get(cursor.offset)
+        .copied()
+        .ok_or(RansInitError::StreamTooShort)?;
+    cursor.offset += 1;
+    Ok(byte)
+}
+
+fn read_stream_u32(stream: &[u8], cursor: &mut RansStreamCursor) -> Result<u32, RansInitError> {
+    let end = cursor
+        .offset
+        .checked_add(4)
+        .ok_or(RansInitError::StreamTooShort)?;
+    let chunk = stream
+        .get(cursor.offset..end)
+        .ok_or(RansInitError::StreamTooShort)?;
+    cursor.offset = end;
+    Ok(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+}
+
+fn load_cold_rans_states(
+    stream: &[u8],
+    state: &mut RansStateBuffer,
+    cursor: &mut RansStreamCursor,
+) -> Result<(), RansInitError> {
+    let mut missing = 0xf & !state.flag;
+    while missing != 0 {
+        let head = read_stream_byte(stream, cursor)?;
+        let extra = (head & 0xf) as usize;
+        let mut value = (head >> 4) as u64;
+        for _ in 0..extra {
+            value = (value << 8) | read_stream_byte(stream, cursor)? as u64;
+        }
+
+        let lane_bit = missing & missing.wrapping_neg();
+        let lane = lane_bit.trailing_zeros() as usize;
+        state.states[lane] = value + 0x8000_0000;
+        missing ^= lane_bit;
+    }
+    state.flag |= 0xf;
+    Ok(())
+}
+
+/// Advance four interleaved rANS states with the generic `0x110dfa0` primitive.
 ///
 /// Each round, for lanes 0..3: index `state & mask`, take the spread entry, emit
 /// `table.sym[idx]` (`ldrh`/`strb`), apply the range step `state = (state >> log)
@@ -428,27 +507,25 @@ pub struct RansInitResult {
 /// `(log, table)` are per-segment data from the freq-reader + spread
 /// (`0x110de80`) — there is no fixed init table.
 ///
-/// SCOPE — this ports ONLY the warm main-loop slice and is validated for it:
-/// a state buffer whose four states are ALREADY loaded, reading a stream from
-/// offset 0. That matches Animal_Bear's segment at `P+8044` (`prod=228`,
-/// `log=5`), the one init call on its stream.
+/// The cold loader is `0x110e1bc`: the `bics w10,w10,w9` + `b.ne` at
+/// `0x110dfbc..0x110dfc4` proves it runs when `(flag & 0xf) != 0xf`. The loader
+/// reads one varint per missing lane (low nibble = extra byte count, high nibble
+/// = initial value, extra bytes appended big-endian), adds `0x80000000`, stores
+/// lanes selected by `w10 & -w10`, then sets `flag |= 0xf` at `0x110e264`.
 ///
-/// NOT ported (verified structure — see `local-assets/re/confirm_init_structure.py`):
-/// * `// TODO(0x110e1bc, FINDINGS #8): cold-start STATE LOADER.` The game takes
-///   `0x110e1bc` when `(flag & 0xf) != 0xf` (e.g. the first call on a buffer,
-///   `flag == 0`) to read the four seed states from the stream, then sets
-///   `flag |= 0xf` (`0x110e264`). Every segment's FIRST init needs this; only a
-///   warm buffer (`flag == 0xf`) skips straight to the loop.
-/// * `// TODO(0x110dfa0): shared forward stream cursor.` The stream offset
-///   (`[x2+12]`) persists ACROSS calls on the same stream and is written back;
-///   continuation calls do not restart at 0. This fn assumes offset 0.
-/// * scalar `prod < 4` (`0x110e140`) and `prod & 3` tail (`0x110e128`).
-pub fn rans_init_states(
+/// `cursor.offset` is the shared forward stream offset (`[x2+12]`): entry adds
+/// it to the base pointer (`0x110dfac..0x110dfb8`), and return writes back
+/// `stream_pos - base` (`0x110e1a0..0x110e1a8`).
+///
+/// Still guarded because the captured population does not exercise it: scalar
+/// `prod < 4` (`0x110e140`) and `prod & 3` tail (`0x110e128`).
+pub fn rans_init_states_with_cursor(
     table: &RansDecodeTable,
     stream: &[u8],
     prod: u32,
     _stride: usize,
-    states_in: [u64; 4],
+    state: &mut RansStateBuffer,
+    cursor: &mut RansStreamCursor,
 ) -> Result<RansInitResult, RansInitError> {
     let m = 1usize << table.log;
     if table.step.len() != m || table.sym.len() != m {
@@ -461,37 +538,52 @@ pub fn rans_init_states(
         return Err(RansInitError::UnsupportedProdTail);
     }
 
+    let start_offset = cursor.offset;
+    if state.flag & 0xf != 0xf {
+        load_cold_rans_states(stream, state, cursor)?;
+    }
+
     let mask = (1u64 << table.log) - 1;
     let log = table.log;
-    let mut states = states_in;
-    let mut spos = 0usize;
     let step = &table.step;
     let sym = &table.sym;
 
     for _ in 0..(prod >> 2) {
-        for state in &mut states {
-            let idx = (*state & mask) as usize;
+        for lane_state in &mut state.states {
+            let idx = (*lane_state & mask) as usize;
             let entry = step[idx];
-            let shifted = *state >> log;
+            let shifted = *lane_state >> log;
             let _ = sym[idx];
-            *state = shifted * (entry >> 16) as u64 + (entry & 0xffff) as u64;
+            *lane_state = shifted * (entry >> 16) as u64 + (entry & 0xffff) as u64;
         }
-        for state in &mut states {
-            if *state >> 31 == 0 {
-                let chunk = stream
-                    .get(spos..spos + 4)
-                    .ok_or(RansInitError::StreamTooShort)?;
-                let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                *state = (*state << 32) | word as u64;
-                spos += 4;
+        for lane_state in &mut state.states {
+            if *lane_state >> 31 == 0 {
+                let word = read_stream_u32(stream, cursor)?;
+                *lane_state = (*lane_state << 32) | word as u64;
             }
         }
     }
 
     Ok(RansInitResult {
-        states,
-        stream_used: spos,
+        states: state.states,
+        flag: state.flag,
+        stream_offset: cursor.offset,
+        stream_used: cursor.offset - start_offset,
     })
+}
+
+/// Warm-buffer convenience wrapper for the already-loaded-state slice of
+/// `0x110dfa0`. Use [`rans_init_states_with_cursor`] for the generic primitive.
+pub fn rans_init_states(
+    table: &RansDecodeTable,
+    stream: &[u8],
+    prod: u32,
+    stride: usize,
+    states_in: [u64; 4],
+) -> Result<RansInitResult, RansInitError> {
+    let mut state = RansStateBuffer::warm(states_in);
+    let mut cursor = RansStreamCursor::default();
+    rans_init_states_with_cursor(table, stream, prod, stride, &mut state, &mut cursor)
 }
 
 /// Decode `count` symbols with the vertex coder's rANS decoder (`0x110e270`).
@@ -1049,6 +1141,96 @@ mod tests {
         assert!(matches!(
             rans_init_states(&t, &init_stream, 3, 1, ST_IN),
             Err(RansInitError::ProdTooSmall)
+        ));
+        assert!(matches!(
+            rans_init_states(&t, &init_stream, 229, 1, ST_IN),
+            Err(RansInitError::UnsupportedProdTail)
+        ));
+    }
+
+    /// Cold-start + continuation for the generic four-state init (`0x110dfa0`).
+    ///
+    /// Provenance: `capture_init_all.py` + replay prototype on Animal_Bear
+    /// stream `P+1312`, calls 0 and 1. Call 0 has `flag=0`, so the branch at
+    /// `0x110dfc0` takes `0x110e1bc`, loads four seed states from the stream,
+    /// sets `flag |= 0xf`, and then runs the main loop. Call 1 reuses the same
+    /// stream descriptor, entering with `[x2+12] == 135` and writing back 187.
+    /// This rules out both the warm-only shortcut and resetting the forward
+    /// cursor to zero on continuation.
+    #[test]
+    fn rans_init_states_cold_start_and_shared_cursor_bear() {
+        const COLD_FREQS: [u16; 5] = [95, 408, 7, 1, 1];
+        const CONT_FREQS: [u16; 2] = [3, 29];
+        const AFTER_COLD: [u64; 4] = [
+            0x1bb7813ea643,
+            0x0e82d56be41e2018,
+            0x074b790c100e3297,
+            0x6e08d7b8e2e,
+        ];
+        const AFTER_CONT: [u64; 4] = [
+            0x4c075b8b626,
+            0x027cdfde572a0f44,
+            0x211ec0c84c35ac,
+            0x1f2795027,
+        ];
+        let stream = hex_bytes(
+            "8456b469510786ef7a6cd10c5407d3936e8849a3d90517c4fdb100186c6808c6\
+             efdb29f2eb95f3c58808a258f1e4fb4cae50cdf6e3fc8a8e058f6afb2b90c85c\
+             1fb1c369c65d11d916ee3b455c7e514e12136f4802a124282e1525441af02b4e\
+             96c03a1724a554aa4ec34ff2b85f9845879b2612b4052877d15b42436042d3a\
+             3eb34cf9faed765e95ae1ad8053d4b3883b8ab07455a19b5dd00fcbf44ce28ce\
+             4011185d7efb208e226b25d215d61630ba4da975ec185be977e44d63162358fbd",
+        );
+
+        let cold_table = rans_spread(9, &COLD_FREQS);
+        let cont_table = rans_spread(5, &CONT_FREQS);
+        let mut state = RansStateBuffer::cold();
+        let mut cursor = RansStreamCursor::default();
+
+        let cold =
+            rans_init_states_with_cursor(&cold_table, &stream, 1024, 1, &mut state, &mut cursor)
+                .unwrap();
+        assert_eq!(cold.states, AFTER_COLD);
+        assert_eq!(cold.flag, 0xf);
+        assert_eq!((cold.stream_used, cold.stream_offset), (135, 135));
+        assert_eq!(state.flag, 0xf);
+        assert_eq!(cursor.offset, 135);
+
+        let cont =
+            rans_init_states_with_cursor(&cont_table, &stream, 1024, 1, &mut state, &mut cursor)
+                .unwrap();
+        assert_eq!(cont.states, AFTER_CONT);
+        assert_eq!((cont.stream_used, cont.stream_offset), (52, 187));
+        assert_eq!(cursor.offset, 187);
+
+        let warm_only = rans_init_states(&cold_table, &stream, 1024, 1, [0; 4])
+            .unwrap()
+            .states;
+        assert_ne!(warm_only, AFTER_COLD);
+
+        let mut reset_state = RansStateBuffer::warm(AFTER_COLD);
+        let mut reset_cursor = RansStreamCursor::default();
+        let reset = rans_init_states_with_cursor(
+            &cont_table,
+            &stream,
+            1024,
+            1,
+            &mut reset_state,
+            &mut reset_cursor,
+        )
+        .unwrap()
+        .states;
+        assert_ne!(reset, AFTER_CONT);
+    }
+
+    #[test]
+    fn rans_init_states_rejects_truncated_cold_loader() {
+        let table = rans_spread(9, &[95, 408, 7, 1, 1]);
+        let mut state = RansStateBuffer::cold();
+        let mut cursor = RansStreamCursor::default();
+        assert!(matches!(
+            rans_init_states_with_cursor(&table, &[0x84, 0x56], 1024, 1, &mut state, &mut cursor),
+            Err(RansInitError::StreamTooShort)
         ));
     }
 

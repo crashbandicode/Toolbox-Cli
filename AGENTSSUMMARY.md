@@ -643,6 +643,30 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 — MeshCodec `0x110dfa0` generic rANS init completed
+**Committed:** `geometry::rans_init_states_with_cursor` now covers the generic
+four-lane rANS init primitive (`0x110dfa0`) instead of only the warm, offset-0
+slice. Added `RansStateBuffer` (`x0` states + flag) and `RansStreamCursor`
+(`[x2+12]`) so cold-start and continuation calls share the same semantics as
+the game. The cold loader (`0x110e1bc`) is derived from `bics w10,w10,w9` +
+`b.ne` at `0x110dfbc..0x110dfc4`: it runs when `flag & 0xf != 0xf`, reads
+one nibble/byte-count varint per missing lane, adds `0x80000000`, stores lanes
+selected by `w10 & -w10`, then sets `flag |= 0xf` at `0x110e264`. The stream
+cursor writeback maps to `0x110e1a0..0x110e1a8`.
+
+Validation: reran `capture_init_all.py` and updated the local
+`verify_init_invariant.py` reference to include cold load + shared cursor;
+it now replays **16/16** init calls across Bear/Bass/Dragonfly (was 10/16).
+Fixture-free tests added: Bear `flag=0` cold call at `P+1312` and the
+immediate continuation on the same stream (`soff 0→135→187`), with
+discriminating checks that a warm-only implementation and a reset-to-zero
+cursor both fail; malformed cold-loader input rejects with `StreamTooShort`.
+Still guarded because not observed in the init population: scalar `prod<4`
+(`0x110e140`) and `prod&3` tail (`0x110e128`). Next: segment loop
+`0x110dc30`, `0x110ef70` stride-3 decode, and `0x110f930` RLE.
+All green: **160 lib unit** (incl. **14** `mc::geometry`) + all integration;
+clippy `--all-targets` clean; `--no-default-features` builds.
+
 ### 2026-06-02 — Pure-Rust zstd: lifted `src/zstd_pure/` out to the external `zstd-pure` crate
 Replaced the in-tree, decoder-only `src/zstd_pure/` with the now-completed
 external **`zstd-pure`** crate (git, pinned `fb3b07d`: decode + encode,
