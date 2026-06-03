@@ -638,6 +638,13 @@ pub fn rans_decode_into(
     out: &mut [u16],
     spec: RansDecodeSpec<'_>,
 ) -> Result<usize, RansDecodeError> {
+    rans_decode_into_with_states(out, spec).map(|(used, _states)| used)
+}
+
+fn rans_decode_into_with_states(
+    out: &mut [u16],
+    spec: RansDecodeSpec<'_>,
+) -> Result<(usize, [u64; 4]), RansDecodeError> {
     let RansDecodeSpec {
         count,
         log,
@@ -689,7 +696,7 @@ pub fn rans_decode_into(
         states[lane] = ns;
     }
 
-    Ok(spos)
+    Ok((spos, states))
 }
 
 /// Decode `count` symbols with `0x110e270`, returning a freshly zeroed output
@@ -738,6 +745,81 @@ pub fn rans_rle_fill(
         out[i * stride] = value;
     }
     Ok(())
+}
+
+/// Errors from the segment dispatch wrapper (`0x110de00`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RansSegmentDispatchError {
+    /// Mode 1 tail-calls `0x110ef70`, the 3-lane bit decoder, which is not ported yet.
+    UnsupportedThreeLane,
+    /// The observed dispatch modes are 0, 1, and 2.
+    UnknownMode(u32),
+    /// Mode 0 rANS decode rejected the segment.
+    Decode(RansDecodeError),
+    /// Mode 2 RLE fill rejected the segment.
+    Rle(RansRleFillError),
+}
+
+/// Inputs for one already-built segment descriptor dispatched by `0x110de00`.
+pub struct RansSegmentDispatchSpec<'a> {
+    /// Descriptor mode at `[x3]`: 0 = rANS, 1 = `0x110ef70`, 2 = RLE fill.
+    pub mode: u32,
+    /// rANS table log at `[x3+4]`.
+    pub log: u32,
+    /// RLE value at `[x3+8]` for mode 2.
+    pub value: u16,
+    /// Number of symbols this dispatch writes (`w2`).
+    pub count: usize,
+    /// Output spacing in u16 slots (`w1`).
+    pub stride: usize,
+    /// Warm rANS states at `[x3+0x10..0x30]` for mode 0. Updated in place.
+    pub states: &'a mut [u64; 4],
+    /// rANS step table at `[x3+0x80]` for mode 0.
+    pub step: &'a [u32],
+    /// rANS symbol table at `[x3+0x2080]` for mode 0.
+    pub sym: &'a [u16],
+    /// Forward renorm bytes for mode 0.
+    pub stream: &'a [u8],
+}
+
+/// Dispatch one built symbol segment (`0x110de00`).
+///
+/// Mode 0 builds the same stack output spec as `0x110de14..0x110de48`:
+/// `prod=count*stride` is the caller's full u16 buffer size, while `count`
+/// remains the number of symbols passed to `0x110e270`; this is what preserves
+/// sibling lanes for stride-3 segments. Mode 2 maps to the strided fill at
+/// `0x110de70..0x110de78` / `0x110f930`. Mode 1 is explicitly guarded until
+/// `0x110ef70` is ported.
+pub fn rans_segment_dispatch_into(
+    out: &mut [u16],
+    spec: RansSegmentDispatchSpec<'_>,
+) -> Result<usize, RansSegmentDispatchError> {
+    match spec.mode {
+        0 => {
+            let (used, states) = rans_decode_into_with_states(
+                out,
+                RansDecodeSpec {
+                    count: spec.count,
+                    log: spec.log,
+                    stride: spec.stride,
+                    step: spec.step,
+                    sym: spec.sym,
+                    init_states: *spec.states,
+                    stream: spec.stream,
+                },
+            )
+            .map_err(RansSegmentDispatchError::Decode)?;
+            *spec.states = states;
+            Ok(used)
+        }
+        1 => Err(RansSegmentDispatchError::UnsupportedThreeLane),
+        2 => {
+            rans_rle_fill(out, spec.value, spec.count, spec.stride)
+                .map_err(RansSegmentDispatchError::Rle)?;
+            Ok(0)
+        }
+        mode => Err(RansSegmentDispatchError::UnknownMode(mode)),
+    }
 }
 
 /// Reverse bit-reader state for the vertex frequency decoder (`0x110e7b0`).
@@ -1604,6 +1686,107 @@ mod tests {
         assert_eq!(
             rans_rle_fill(&mut bass, 0, 1, 0),
             Err(RansRleFillError::ZeroStride)
+        );
+    }
+
+    /// Segment dispatch wrapper (`0x110de00`) for mode 0 rANS.
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Bear dispatch 3. The
+    /// segment descriptor is already built (`mode=0, log=6, state flag warm`);
+    /// `0x110de14..0x110de48` builds a stack output spec then tail-calls
+    /// `0x110e270`. This fixture-free check proves the wrapper preserves the
+    /// stream cursor accounting and writes back the final four rANS states.
+    #[test]
+    fn rans_segment_dispatch_mode0_updates_output_cursor_and_states() {
+        const DEC_FREQS: [u16; 15] = [5, 1, 1, 0, 1, 0, 1, 1, 0, 1, 3, 6, 13, 23, 8];
+        const FINAL_STATES: [u64; 4] = [0x3e69fd3c25, 0x1eb070dcc1aa, 0x7af49bc9b0fd, 0x14d2c33bcc];
+        let mut states = [
+            0x1670c7fb0e5cc107u64,
+            0x80581303,
+            0x0e1e9623a87cf343,
+            0x01321a08545304,
+        ];
+        let stream = hex_bytes(
+            "44d69beb2784028b6a39382a036f90a250ebc749203fa34e0d60353e5071548d51aa7a26\
+             943ad95a422eea145dab83d860ba542ed7bf85ec1c78e11fedddfb9ceaf8b9031988e12f",
+        );
+        let table = rans_spread(6, &DEC_FREQS);
+        let mut out = vec![0xbeefu16; 228];
+
+        let used = rans_segment_dispatch_into(
+            &mut out,
+            RansSegmentDispatchSpec {
+                mode: 0,
+                log: 6,
+                value: 0,
+                count: 228,
+                stride: 1,
+                states: &mut states,
+                step: &table.step,
+                sym: &table.sym,
+                stream: &stream,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(used, 68);
+        assert_eq!(states, FINAL_STATES);
+        assert_eq!(
+            &out[..24],
+            &[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 4, 2, 12, 13, 12, 10, 13, 10]
+        );
+        assert_eq!(&out[220..], &[14, 13, 13, 14, 14, 13, 14, 13]);
+        assert_eq!(out.iter().map(|&s| s as u32).sum::<u32>(), 2565);
+    }
+
+    /// Segment dispatch wrapper (`0x110de00`) for mode 2 RLE.
+    ///
+    /// Provenance: `capture_segment_dispatch.py`, Animal_Dragonfly dispatch 5:
+    /// `mode=2,value=11,count=3,stride=1`, which branches at
+    /// `0x110de70..0x110de78` into `0x110f930`.
+    #[test]
+    fn rans_segment_dispatch_mode2_rle_fills_dense_segment() {
+        let mut states = [0u64; 4];
+        let mut out = [6u16, 6, 120];
+        let used = rans_segment_dispatch_into(
+            &mut out,
+            RansSegmentDispatchSpec {
+                mode: 2,
+                log: 9,
+                value: 11,
+                count: 3,
+                stride: 1,
+                states: &mut states,
+                step: &[],
+                sym: &[],
+                stream: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(used, 0);
+        assert_eq!(out, [11, 11, 11]);
+    }
+
+    #[test]
+    fn rans_segment_dispatch_guards_unported_mode1() {
+        let mut states = [0u64; 4];
+        let mut out = [0u16; 1];
+        assert_eq!(
+            rans_segment_dispatch_into(
+                &mut out,
+                RansSegmentDispatchSpec {
+                    mode: 1,
+                    log: 4,
+                    value: 0,
+                    count: 1,
+                    stride: 1,
+                    states: &mut states,
+                    step: &[],
+                    sym: &[],
+                    stream: &[],
+                },
+            ),
+            Err(RansSegmentDispatchError::UnsupportedThreeLane)
         );
     }
 

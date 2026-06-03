@@ -643,6 +643,27 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP1 chunk segment dispatch wrapper
+**Committed:** B2-CP1 chunk 1a ports the observed `0x110de00` segment
+dispatch wrapper as `geometry::rans_segment_dispatch_into` for mode 0 rANS and
+mode 2 RLE, with a typed guard for observed-but-unported mode 1 (`0x110ef70`).
+Durable local evidence: `capture_segment_dispatch.py` and gitignored
+`local-assets/re/segment_dispatch_capture.json`; replay script
+`verify_segment_dispatch.py`. Enumerate-all across Bear/Bass/Dragonfly found 99
+`0x110de80` table builds and 33 `0x110de00` dispatches. Dispatch population:
+mode 0 = 12, mode 1 = 17, mode 2 = 4; logs {1,3,4,5,6,8,9,10,11}; strides {1,3};
+count mod 4 covers {0,1,2,3}; RLE values {0,11}; mode 0 states are warm in the
+observed dispatcher population. Replay status: mode 0 reproduces 12/12 output,
+final states, and stream cursor usage; mode 2 reproduces 4/4 strided/dense fills;
+mode 1 is guarded 17/17 until `0x110ef70` is ported. Fixture-free tests cover
+Bear mode 0 output/cursor/final-state writeback, Dragonfly mode 2 RLE, and the
+mode 1 typed guard. Next: port `0x110ef70` three-lane decoder, then remove the
+guard and complete the `0x110de80` table-build plus dispatch wrapper checkpoint.
+Sample green: **20 `mc::geometry` lib unit**; `verify_segment_dispatch.py` green.
+Last checkpoint full-suite baseline remains: All green: **163 lib unit** (incl.
+**17** `mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds.
+
 ### 2026-06-03 - MeshCodec CP3 chunk RLE fill
 **Committed:** CP3 chunk 3b ports `0x110f930` as `geometry::rans_rle_fill`.
 It fills `count` u16 symbols at `out[i*stride]`, preserving sibling lanes in
