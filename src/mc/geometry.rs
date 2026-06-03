@@ -2279,6 +2279,256 @@ pub fn rans_build_segment_descriptor(
     }
 }
 
+/// Mutable context threaded through the `0x110dc30` segment loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RansSegmentLoopContext {
+    /// Primary reverse reader at `x5+0`: descriptor headers and run codes use it.
+    pub reader: RansFreqReader,
+    /// Extra mode-1 readers at `x5+0x18` and `x5+0x30`.
+    pub mode1_extra_readers: [RansThreeLaneReader; 2],
+    /// Payload-relative forward stream pointer stored at `x5+0x48`.
+    pub stream_pos: usize,
+    /// rANS state buffer living at descriptor workspace `x4+0x10`.
+    pub state: RansStateBuffer,
+}
+
+/// Inputs for the segment loop (`0x110dc30`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RansSegmentLoopSpec<'a> {
+    /// Byte count passed in `w1`; the loop writes `byte_count / 2` u16 symbols.
+    pub byte_count: usize,
+    /// Interleaved lane count / dispatch stride (`w2`).
+    pub lanes: usize,
+    /// Segment run granularity as `log2(segment_size)` (`w3`).
+    pub segment_log: u32,
+    /// Payload bytes addressed by all reverse readers and the forward rANS stream.
+    pub payload: &'a [u8],
+}
+
+/// Errors from the segment loop (`0x110dc30`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RansSegmentLoopError {
+    /// `w1` must describe whole u16 slots.
+    OddByteCount,
+    /// `w2 == 0` would make the dispatch stride zero.
+    ZeroLaneCount,
+    /// The observed caller keeps this at or below 10; larger values risk overflow.
+    UnsupportedSegmentLog(u32),
+    /// The byte count must divide evenly into the interleaved lanes.
+    UnevenLaneSlots { slots: usize, lanes: usize },
+    /// Caller output must include the logical slots plus `lanes-1` padding slots.
+    OutputTooSmall,
+    /// The run-code reverse reader tried to load outside the payload.
+    PayloadTooSmall,
+    /// A malformed all-zero run prefix would require more than 64 bits.
+    RunCodeTooLong,
+    /// Run/count arithmetic overflowed.
+    RunCountOverflow,
+    /// The shared forward stream pointer was outside the payload.
+    StreamPointerOutOfBounds,
+    /// Descriptor build rejected the segment header/table.
+    Descriptor(RansSegmentDescriptorBuildError),
+    /// Mode 1 has not been observed inside `0x110dc30`; guard until captured.
+    UnobservedMode1Segment,
+    /// The already-ported dispatch wrapper rejected the segment.
+    Dispatch(RansSegmentDispatchError),
+}
+
+fn read_segment_loop_run_code(
+    payload: &[u8],
+    reader: &mut RansFreqReader,
+) -> Result<usize, RansSegmentLoopError> {
+    let bitpos = reader.bitpos;
+    let ptr_step = ((bitpos >> 3) ^ 7) as usize;
+    let ptr = reader
+        .ptr
+        .checked_sub(ptr_step)
+        .ok_or(RansSegmentLoopError::PayloadTooSmall)?;
+    let bits = (checked_header_u64_le(payload, reader.ptr)
+        .map_err(|_| RansSegmentLoopError::PayloadTooSmall)?
+        >> (bitpos & 63))
+        | reader.acc;
+    let run_bits = 1 + 2 * clz64(bits);
+    if run_bits > 64 {
+        return Err(RansSegmentLoopError::RunCodeTooLong);
+    }
+    let run = (bits >> (64 - run_bits)) as usize;
+    reader.ptr = ptr;
+    reader.acc = if run_bits == 64 { 0 } else { bits << run_bits };
+    reader.bitpos = (bitpos | 0x38).wrapping_sub(run_bits);
+    Ok(run)
+}
+
+fn ceil_div_segment(value: usize, segment_mask: usize, segment_log: u32) -> Option<usize> {
+    value.checked_add(segment_mask).map(|v| v >> segment_log)
+}
+
+/// Decode one `0x110dc30` segment loop into an interleaved u16 output buffer.
+///
+/// The loop first builds a descriptor (`0x110dc90..0x110dc98`), then reads a
+/// CLZ-prefixed run count from the shared reverse reader (`0x110dc9c..0x110dcdc`).
+/// The run is measured in `1 << segment_log` symbol chunks and may cross lane
+/// boundaries: `0x110dd1c..0x110dd24` either advances the lane or carries the
+/// current descriptor into the next slice. Dispatch itself is delegated to the
+/// already-validated `0x110de00` wrapper.
+///
+/// The observed enumerate-all population is one Bass call with mode 0 + mode 2
+/// descriptors. Mode 1 is guarded here because its extra-reader threading inside
+/// this loop has not been observed, even though `0x110de00` mode 1 is ported.
+pub fn rans_segment_loop_into(
+    out: &mut [u16],
+    context: &mut RansSegmentLoopContext,
+    spec: RansSegmentLoopSpec<'_>,
+) -> Result<usize, RansSegmentLoopError> {
+    if spec.byte_count & 1 != 0 {
+        return Err(RansSegmentLoopError::OddByteCount);
+    }
+    if spec.lanes == 0 {
+        return Err(RansSegmentLoopError::ZeroLaneCount);
+    }
+    if spec.segment_log > 30 {
+        return Err(RansSegmentLoopError::UnsupportedSegmentLog(
+            spec.segment_log,
+        ));
+    }
+
+    let logical_slots = spec.byte_count >> 1;
+    if !logical_slots.is_multiple_of(spec.lanes) {
+        return Err(RansSegmentLoopError::UnevenLaneSlots {
+            slots: logical_slots,
+            lanes: spec.lanes,
+        });
+    }
+    let padded_slots = logical_slots
+        .checked_add(spec.lanes - 1)
+        .ok_or(RansSegmentLoopError::OutputTooSmall)?;
+    if out.len() < padded_slots {
+        return Err(RansSegmentLoopError::OutputTooSmall);
+    }
+
+    let symbols_per_lane = logical_slots / spec.lanes;
+    let segment_size = 1usize << spec.segment_log;
+    let segment_mask = segment_size - 1;
+    let mut lane = 0usize;
+    let mut lane_offset = 0usize;
+    let mut dispatch_count = 0usize;
+
+    while lane < spec.lanes {
+        let descriptor = rans_build_segment_descriptor(spec.payload, context.reader)
+            .map_err(RansSegmentLoopError::Descriptor)?;
+        context.reader = descriptor.reader;
+        let mut run_segments = read_segment_loop_run_code(spec.payload, &mut context.reader)?;
+
+        if descriptor.mode == 1 {
+            return Err(RansSegmentLoopError::UnobservedMode1Segment);
+        }
+
+        loop {
+            let remaining = symbols_per_lane
+                .checked_sub(lane_offset)
+                .ok_or(RansSegmentLoopError::RunCountOverflow)?;
+            let run_symbols = run_segments
+                .checked_mul(segment_size)
+                .ok_or(RansSegmentLoopError::RunCountOverflow)?;
+            let finish_segments = ceil_div_segment(remaining, segment_mask, spec.segment_log)
+                .ok_or(RansSegmentLoopError::RunCountOverflow)?;
+            let finishes_lane = run_segments >= finish_segments;
+            let count = if finishes_lane {
+                remaining
+            } else {
+                run_symbols
+            };
+            let out_start = lane_offset
+                .checked_mul(spec.lanes)
+                .and_then(|v| v.checked_add(lane))
+                .ok_or(RansSegmentLoopError::OutputTooSmall)?;
+            let dispatch_len = count
+                .checked_mul(spec.lanes)
+                .ok_or(RansSegmentLoopError::OutputTooSmall)?;
+            let out_end = out_start
+                .checked_add(dispatch_len)
+                .ok_or(RansSegmentLoopError::OutputTooSmall)?;
+            let out_window = out
+                .get_mut(out_start..out_end)
+                .ok_or(RansSegmentLoopError::OutputTooSmall)?;
+
+            match descriptor.mode {
+                0 => {
+                    let stream = spec
+                        .payload
+                        .get(context.stream_pos..)
+                        .ok_or(RansSegmentLoopError::StreamPointerOutOfBounds)?;
+                    let used = rans_segment_dispatch_into(
+                        out_window,
+                        RansSegmentDispatchSpec {
+                            mode: descriptor.mode,
+                            log: descriptor.log,
+                            value: descriptor.value,
+                            count,
+                            stride: spec.lanes,
+                            states: &mut context.state.states,
+                            step: &descriptor.step,
+                            sym: &descriptor.sym,
+                            stream,
+                            payload: spec.payload,
+                            three_lane_readers: None,
+                        },
+                    )
+                    .map_err(RansSegmentLoopError::Dispatch)?;
+                    context.stream_pos = context
+                        .stream_pos
+                        .checked_add(used)
+                        .ok_or(RansSegmentLoopError::StreamPointerOutOfBounds)?;
+                }
+                2 => {
+                    rans_segment_dispatch_into(
+                        out_window,
+                        RansSegmentDispatchSpec {
+                            mode: descriptor.mode,
+                            log: descriptor.log,
+                            value: descriptor.value,
+                            count,
+                            stride: spec.lanes,
+                            states: &mut context.state.states,
+                            step: &descriptor.step,
+                            sym: &descriptor.sym,
+                            stream: &[],
+                            payload: spec.payload,
+                            three_lane_readers: None,
+                        },
+                    )
+                    .map_err(RansSegmentLoopError::Dispatch)?;
+                }
+                mode => {
+                    return Err(RansSegmentLoopError::Dispatch(
+                        RansSegmentDispatchError::UnknownMode(mode),
+                    ));
+                }
+            }
+
+            dispatch_count += 1;
+            let consumed_segments = ceil_div_segment(count, segment_mask, spec.segment_log)
+                .ok_or(RansSegmentLoopError::RunCountOverflow)?;
+            if finishes_lane {
+                lane += 1;
+                lane_offset = 0;
+            } else {
+                lane_offset = lane_offset
+                    .checked_add(run_symbols)
+                    .ok_or(RansSegmentLoopError::RunCountOverflow)?;
+            }
+            run_segments = run_segments
+                .checked_sub(consumed_segments)
+                .ok_or(RansSegmentLoopError::RunCountOverflow)?;
+            if run_segments == 0 {
+                break;
+            }
+        }
+    }
+
+    Ok(dispatch_count)
+}
+
 /// Decode a **raw window**: read the forward var-int `srcsize`, then copy
 /// `srcsize` literal bytes. Returns the bytes and the new forward position.
 pub fn decode_raw_window(payload: &[u8], fwd_pos: usize) -> (Vec<u8>, usize) {
@@ -3646,6 +3896,252 @@ mod tests {
                 },
             ),
             Err(RansThreeLaneDecodeError::PayloadTooSmall)
+        );
+    }
+
+    /// Segment loop (`0x110dc30`) over the complete observed population.
+    ///
+    /// Provenance: `capture_segment_loop.py`, Animal_Bass loop 0. The
+    /// enumerate-all population is exactly one loop call across Bear/Bass/
+    /// Dragonfly: `byte_count=1932,lanes=3,segment_log=6`, dispatching one
+    /// mode-0 segment followed by three mode-2 RLE segments. This covers the
+    /// descriptor-to-dispatch pipeline and the subtle run carry across lanes
+    /// (`0x110dd1c..0x110dd24`): the zero-valued RLE descriptor first finishes
+    /// the last two symbols of lane 0, then carries into lanes 1 and 2.
+    #[test]
+    fn rans_segment_loop_bass_mode0_then_rle_lanes() {
+        const BEFORE: &[(usize, u16)] = &[
+            (62, 65535),
+            (63, 65535),
+            (64, 1),
+            (69, 65535),
+            (70, 1),
+            (77, 65535),
+            (78, 65535),
+            (79, 1),
+            (93, 65535),
+            (94, 1),
+            (116, 65535),
+        ];
+        const EXPECTED: &[(usize, u16)] = &[
+            (6, 2),
+            (90, 1022),
+            (96, 1022),
+            (102, 1022),
+            (126, 1022),
+            (129, 1022),
+            (144, 2),
+            (147, 2),
+            (150, 2),
+            (159, 2),
+            (168, 2),
+            (174, 2),
+            (180, 2),
+            (186, 2),
+            (606, 2),
+            (840, 1022),
+            (876, 1022),
+            (888, 2),
+            (900, 2),
+            (906, 2),
+        ];
+        let payload = sparse_payload(
+            6225,
+            &[
+                (2018, "87e2163f7eff1a365ef3a7f6a5e841a3"),
+                (6210, "1946484f6815d7c8e2d3909ede0000"),
+            ],
+        );
+        let mut out = vec![0u16; 968];
+        for &(idx, value) in BEFORE {
+            out[idx] = value;
+        }
+        let mut context = RansSegmentLoopContext {
+            reader: RansFreqReader {
+                ptr: 6217,
+                acc: 0x116801fe180f4a00,
+                bitpos: 55,
+            },
+            mode1_extra_readers: [
+                RansThreeLaneReader {
+                    ptr: 6923,
+                    acc: 0x78c45f1a02887500,
+                    bitpos: 62,
+                },
+                RansThreeLaneReader {
+                    ptr: 6928,
+                    acc: 0xcb087f456207a1f8,
+                    bitpos: 58,
+                },
+            ],
+            stream_pos: 2018,
+            state: RansStateBuffer {
+                states: [0x68007d0ef80f, 0x674a999ea5a, 0x647f7484a3f513e, 0xd7a40fe0],
+                flag: 0xf,
+            },
+        };
+
+        let dispatches = rans_segment_loop_into(
+            &mut out,
+            &mut context,
+            RansSegmentLoopSpec {
+                byte_count: 1932,
+                lanes: 3,
+                segment_log: 6,
+                payload: &payload,
+            },
+        )
+        .unwrap();
+
+        let mut expected = vec![0u16; 968];
+        for &(idx, value) in EXPECTED {
+            expected[idx] = value;
+        }
+        assert_eq!(dispatches, 4);
+        assert_eq!(out, expected);
+        assert_eq!(
+            context,
+            RansSegmentLoopContext {
+                reader: RansFreqReader {
+                    ptr: 6208,
+                    acc: 0xe9e90d3e2c8d7100,
+                    bitpos: 52,
+                },
+                mode1_extra_readers: [
+                    RansThreeLaneReader {
+                        ptr: 6923,
+                        acc: 0x78c45f1a02887500,
+                        bitpos: 62,
+                    },
+                    RansThreeLaneReader {
+                        ptr: 6928,
+                        acc: 0xcb087f456207a1f8,
+                        bitpos: 58,
+                    },
+                ],
+                stream_pos: 2034,
+                state: RansStateBuffer {
+                    states: [0xff653ce9, 0x2b0d9366535bcb9, 0x839f26fdba, 0xa88726296addc,],
+                    flag: 0xf,
+                },
+            }
+        );
+        assert_eq!(out.iter().map(|&v| v as u32).sum::<u32>(), 7180);
+    }
+
+    #[test]
+    fn rans_segment_loop_rejects_unobserved_mode1_and_bad_bounds() {
+        let mode1_payload = sparse_payload(10, &[(0, "5b22b1399b96d244781d")]);
+        let mut context = RansSegmentLoopContext {
+            reader: RansFreqReader {
+                ptr: 2,
+                acc: 0x0c64faf64078a80c,
+                bitpos: 57,
+            },
+            mode1_extra_readers: [
+                RansThreeLaneReader {
+                    ptr: 0,
+                    acc: 0,
+                    bitpos: 0,
+                },
+                RansThreeLaneReader {
+                    ptr: 0,
+                    acc: 0,
+                    bitpos: 0,
+                },
+            ],
+            stream_pos: 0,
+            state: RansStateBuffer::warm([0; 4]),
+        };
+        let mut out = [0u16; 1];
+        assert_eq!(
+            rans_segment_loop_into(
+                &mut out,
+                &mut context,
+                RansSegmentLoopSpec {
+                    byte_count: 2,
+                    lanes: 1,
+                    segment_log: 0,
+                    payload: &mode1_payload,
+                },
+            ),
+            Err(RansSegmentLoopError::UnobservedMode1Segment)
+        );
+
+        let mut context = RansSegmentLoopContext {
+            reader: RansFreqReader {
+                ptr: 0,
+                acc: 0,
+                bitpos: 0,
+            },
+            mode1_extra_readers: [
+                RansThreeLaneReader {
+                    ptr: 0,
+                    acc: 0,
+                    bitpos: 0,
+                },
+                RansThreeLaneReader {
+                    ptr: 0,
+                    acc: 0,
+                    bitpos: 0,
+                },
+            ],
+            stream_pos: 0,
+            state: RansStateBuffer::warm([0; 4]),
+        };
+        assert_eq!(
+            rans_segment_loop_into(
+                &mut out,
+                &mut context,
+                RansSegmentLoopSpec {
+                    byte_count: 3,
+                    lanes: 1,
+                    segment_log: 0,
+                    payload: &[],
+                },
+            ),
+            Err(RansSegmentLoopError::OddByteCount)
+        );
+        assert_eq!(
+            rans_segment_loop_into(
+                &mut out,
+                &mut context,
+                RansSegmentLoopSpec {
+                    byte_count: 2,
+                    lanes: 0,
+                    segment_log: 0,
+                    payload: &[],
+                },
+            ),
+            Err(RansSegmentLoopError::ZeroLaneCount)
+        );
+        assert_eq!(
+            rans_segment_loop_into(
+                &mut [],
+                &mut context,
+                RansSegmentLoopSpec {
+                    byte_count: 2,
+                    lanes: 1,
+                    segment_log: 0,
+                    payload: &[],
+                },
+            ),
+            Err(RansSegmentLoopError::OutputTooSmall)
+        );
+        assert_eq!(
+            rans_segment_loop_into(
+                &mut out,
+                &mut context,
+                RansSegmentLoopSpec {
+                    byte_count: 2,
+                    lanes: 1,
+                    segment_log: 0,
+                    payload: &[],
+                },
+            ),
+            Err(RansSegmentLoopError::Descriptor(
+                RansSegmentDescriptorBuildError::Header(RansSegmentHeaderError::PayloadTooSmall)
+            ))
         );
     }
 
