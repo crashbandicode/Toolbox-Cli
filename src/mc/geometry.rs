@@ -704,6 +704,42 @@ pub fn rans_decode(spec: RansDecodeSpec<'_>) -> Result<Vec<u16>, RansDecodeError
     Ok(out)
 }
 
+/// Errors from the segment RLE fill helper (`0x110f930`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RansRleFillError {
+    /// A zero stride would repeatedly overwrite the same output slot.
+    ZeroStride,
+    /// `count * stride` overflowed or does not fit the caller-provided output.
+    OutputTooSmall,
+}
+
+/// Fill `count` u16 symbols at `out[i * stride]` with `value` (`0x110f930`).
+///
+/// The disassembly stores a scalar tail first (`w2 & 3`) and then unrolls groups
+/// of four (`0x110f950` and `0x110f970..0x110f98c`), but both paths are just the
+/// same strided fill. `stride` is in u16 slots (`sxtw x8,w3; lsl x8,#1`), so
+/// sibling lanes in the caller's product-sized buffer are preserved.
+pub fn rans_rle_fill(
+    out: &mut [u16],
+    value: u16,
+    count: usize,
+    stride: usize,
+) -> Result<(), RansRleFillError> {
+    if stride == 0 {
+        return Err(RansRleFillError::ZeroStride);
+    }
+    let min_len = count
+        .checked_mul(stride)
+        .ok_or(RansRleFillError::OutputTooSmall)?;
+    if out.len() < min_len {
+        return Err(RansRleFillError::OutputTooSmall);
+    }
+    for i in 0..count {
+        out[i * stride] = value;
+    }
+    Ok(())
+}
+
 /// Reverse bit-reader state for the vertex frequency decoder (`0x110e7b0`).
 ///
 /// `ptr` indexes the stream; `acc` holds the next bits (MSB = next to read);
@@ -1534,6 +1570,40 @@ mod tests {
         assert_eq!(
             rans_decode_into(&mut too_small, spec),
             Err(RansDecodeError::OutputTooSmall)
+        );
+    }
+
+    /// RLE fill helper used by the segment dispatch (`0x110f930`).
+    ///
+    /// Provenance: `capture_rle_fill.py` over Bear/Bass/Dragonfly. Observed
+    /// calls are Bass `value=0,count=2,stride=3`, Bass `value=0,count=322,stride=3`
+    /// twice, and Dragonfly `value=11,count=3,stride=1`. The strided Bass case
+    /// rules out a dense fill that would overwrite sibling lanes.
+    #[test]
+    fn rans_rle_fill_matches_observed_stride_and_dense_cases() {
+        let mut bass = vec![0xbeefu16; 322 * 3];
+        rans_rle_fill(&mut bass, 0, 322, 3).unwrap();
+        for i in 0..322 {
+            assert_eq!(bass[i * 3], 0);
+        }
+        assert!(bass
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 3 != 0)
+            .all(|(_, &v)| v == 0xbeef));
+
+        let mut dragonfly = vec![0u16; 3];
+        rans_rle_fill(&mut dragonfly, 11, 3, 1).unwrap();
+        assert_eq!(dragonfly, [11, 11, 11]);
+
+        let mut too_small = vec![0u16; 322];
+        assert_eq!(
+            rans_rle_fill(&mut too_small, 0, 322, 3),
+            Err(RansRleFillError::OutputTooSmall)
+        );
+        assert_eq!(
+            rans_rle_fill(&mut bass, 0, 1, 0),
+            Err(RansRleFillError::ZeroStride)
         );
     }
 

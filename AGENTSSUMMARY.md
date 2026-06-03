@@ -643,6 +643,20 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec CP3 chunk RLE fill
+**Committed:** CP3 chunk 3b ports `0x110f930` as `geometry::rans_rle_fill`.
+It fills `count` u16 symbols at `out[i*stride]`, preserving sibling lanes in
+the product-sized caller buffer and returning typed errors for zero stride or
+undersized output. Durable local evidence: `capture_rle_fill.py` and gitignored
+`local-assets/re/rle_fill_capture.json`. Observed population: Bass
+`value=0,count=2,stride=3`; Bass `value=0,count=322,stride=3` twice; Dragonfly
+`value=11,count=3,stride=1`; Bear has no RLE fill calls. Fixture-free tests cover
+the strided Bass fill, dense Dragonfly fill, and defensive rejection. Next: CP3
+chunk 3a/3c table-build dispatch and segment loop (`0x110de80`/`0x110de00`,
+`0x110dc30`) around the now-ported leaves.
+All green: **163 lib unit** (incl. **17** `mc::geometry`) + all integration;
+clippy `--all-targets` clean; `--no-default-features` builds.
+
 ### 2026-06-03 - MeshCodec CP2 stride rANS decode output layout
 **Committed:** CP2 ports the observed stride output behavior of `0x110e270`.
 `geometry::rans_decode` is now fallible and strided via `RansDecodeSpec`, with
