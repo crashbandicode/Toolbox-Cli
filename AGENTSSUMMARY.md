@@ -644,7 +644,8 @@ Standing backlog (no owner):
 ## Session log
 
 ### 2026-06-04 - MeshCodec B2-CP4 chunk three-u16 signed-delta writer
-**Ready to commit:** `0x1100c90` is ported in `src/mc/geometry.rs` as
+**Committed:** B2-CP4 three-u16 signed-delta writer chunk landed in `1d19d70`,
+porting `0x1100c90` in `src/mc/geometry.rs` as
 `transform_tail_u16x3_delta_into`. Durable local evidence:
 `capture_transform_tail_1100c90.py` enumerated **3** observed calls
 (Bear/Bass/Dragonfly current 0), and `verify_transform_tail_1100c90.py`
