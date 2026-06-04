@@ -530,7 +530,17 @@ pub fn rans_init_states_with_cursor(
     state: &mut RansStateBuffer,
     cursor: &mut RansStreamCursor,
 ) -> Result<RansInitResult, RansInitError> {
-    rans_byte_decode_core(None, table, stream, prod, stride, state, cursor)
+    rans_byte_decode_core(
+        None,
+        table.log,
+        &table.step,
+        &table.sym,
+        stream,
+        prod,
+        stride,
+        state,
+        cursor,
+    )
 }
 
 /// Decode byte symbols with the generic `0x110dfa0` primitive and write them to
@@ -544,20 +554,34 @@ pub fn rans_decode_bytes_into_with_cursor(
     state: &mut RansStateBuffer,
     cursor: &mut RansStreamCursor,
 ) -> Result<RansInitResult, RansInitError> {
-    rans_byte_decode_core(Some(out), table, stream, count, stride, state, cursor)
+    rans_byte_decode_core(
+        Some(out),
+        table.log,
+        &table.step,
+        &table.sym,
+        stream,
+        count,
+        stride,
+        state,
+        cursor,
+    )
 }
 
 fn rans_byte_decode_core(
     mut out: Option<&mut [u8]>,
-    table: &RansDecodeTable,
+    log: u32,
+    step: &[u32],
+    sym: &[u16],
     stream: &[u8],
     count: u32,
     stride: usize,
     state: &mut RansStateBuffer,
     cursor: &mut RansStreamCursor,
 ) -> Result<RansInitResult, RansInitError> {
-    let m = 1usize << table.log;
-    if table.step.len() != m || table.sym.len() != m {
+    let m = 1usize
+        .checked_shl(log)
+        .ok_or(RansInitError::TableSizeMismatch)?;
+    if step.len() != m || sym.len() != m {
         return Err(RansInitError::TableSizeMismatch);
     }
     if count < 4 {
@@ -580,10 +604,7 @@ fn rans_byte_decode_core(
         load_cold_rans_states(stream, state, cursor)?;
     }
 
-    let mask = (1u64 << table.log) - 1;
-    let log = table.log;
-    let step = &table.step;
-    let sym = &table.sym;
+    let mask = (1u64 << log) - 1;
 
     // The disassembly decodes groups of four lanes and then a scalar tail. A
     // single round-robin loop is equivalent because a lane is not read again
@@ -794,6 +815,41 @@ pub fn rans_rle_fill(
         .ok_or(RansRleFillError::OutputTooSmall)?;
     if out.len() < min_len {
         return Err(RansRleFillError::OutputTooSmall);
+    }
+    for i in 0..count {
+        out[i * stride] = value;
+    }
+    Ok(())
+}
+
+/// Errors from the byte segment RLE fill helper (`0x110f800`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RansByteRleFillError {
+    /// A zero stride would repeatedly overwrite the same output slot.
+    ZeroStride,
+    /// `count * stride` overflowed or does not fit the caller-provided output.
+    OutputTooSmall,
+}
+
+/// Fill `count` bytes at `out[i * stride]` with `value` (`0x110f800`).
+///
+/// The byte sibling of `0x110f930` stores with `strb`, so only the low byte of
+/// the descriptor value reaches memory. `stride` is in byte slots here; the
+/// disassembly increments `x0` by `sxtw x8,w3` without the u16 `lsl`.
+pub fn rans_rle_fill_bytes(
+    out: &mut [u8],
+    value: u8,
+    count: usize,
+    stride: usize,
+) -> Result<(), RansByteRleFillError> {
+    if stride == 0 {
+        return Err(RansByteRleFillError::ZeroStride);
+    }
+    let min_len = count
+        .checked_mul(stride)
+        .ok_or(RansByteRleFillError::OutputTooSmall)?;
+    if out.len() < min_len {
+        return Err(RansByteRleFillError::OutputTooSmall);
     }
     for i in 0..count {
         out[i * stride] = value;
@@ -1196,6 +1252,83 @@ pub fn rans_segment_dispatch_into(
             Ok(0)
         }
         mode => Err(RansSegmentDispatchError::UnknownMode(mode)),
+    }
+}
+
+/// Errors from the byte segment dispatch wrapper (`0x110dd80`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RansSegmentDispatchBytesError {
+    /// Mode 1 routes to `0x110eb50`, which is a separate byte three-lane decoder.
+    UnportedMode1,
+    /// The observed dispatch modes are 0, 1, and 2.
+    UnknownMode(u32),
+    /// `count` must fit the `w2` argument consumed by `0x110dfa0`.
+    CountTooLarge(usize),
+    /// Mode 0 byte rANS decode rejected the segment.
+    Decode(RansInitError),
+    /// Mode 2 byte RLE fill rejected the segment.
+    Rle(RansByteRleFillError),
+}
+
+/// Inputs for one byte segment descriptor dispatched by `0x110dd80`.
+pub struct RansSegmentDispatchBytesSpec<'a> {
+    /// Descriptor mode at `[x3]`: 0 = byte rANS, 1 = `0x110eb50`, 2 = RLE fill.
+    pub mode: u32,
+    /// rANS table log at `[x3+4]`.
+    pub log: u32,
+    /// RLE value at `[x3+8]` for mode 2.
+    pub value: u32,
+    /// Number of bytes this dispatch writes (`w2`).
+    pub count: usize,
+    /// Output spacing in byte slots (`w1`).
+    pub stride: usize,
+    /// Four byte-rANS states at `[x3+0x10..0x30]` for mode 0. Updated in place.
+    pub state: &'a mut RansStateBuffer,
+    /// rANS step table at `[x3+0x80]` for mode 0.
+    pub step: &'a [u32],
+    /// rANS symbol table at `[x3+0x2080]` for mode 0.
+    pub sym: &'a [u16],
+    /// Forward renorm bytes for mode 0.
+    pub stream: &'a [u8],
+    /// Shared forward stream cursor (`[x4+12]`) for mode 0.
+    pub cursor: &'a mut RansStreamCursor,
+}
+
+/// Dispatch one built byte segment (`0x110dd80`).
+///
+/// Mode 0 calls the same byte-output rANS primitive as `0x110dfa0`, updating the
+/// descriptor states and the shared stream cursor. Mode 2 maps to `0x110f800`,
+/// a byte strided fill. Mode 1 is intentionally guarded until the byte
+/// three-lane decoder at `0x110eb50` is ported.
+pub fn rans_segment_dispatch_bytes_into(
+    out: &mut [u8],
+    spec: RansSegmentDispatchBytesSpec<'_>,
+) -> Result<usize, RansSegmentDispatchBytesError> {
+    match spec.mode {
+        0 => {
+            let count = u32::try_from(spec.count)
+                .map_err(|_| RansSegmentDispatchBytesError::CountTooLarge(spec.count))?;
+            let result = rans_byte_decode_core(
+                Some(out),
+                spec.log,
+                spec.step,
+                spec.sym,
+                spec.stream,
+                count,
+                spec.stride,
+                spec.state,
+                spec.cursor,
+            )
+            .map_err(RansSegmentDispatchBytesError::Decode)?;
+            Ok(result.stream_used)
+        }
+        1 => Err(RansSegmentDispatchBytesError::UnportedMode1),
+        2 => {
+            rans_rle_fill_bytes(out, spec.value as u8, spec.count, spec.stride)
+                .map_err(RansSegmentDispatchBytesError::Rle)?;
+            Ok(0)
+        }
+        mode => Err(RansSegmentDispatchBytesError::UnknownMode(mode)),
     }
 }
 
@@ -3889,6 +4022,240 @@ mod tests {
                 stream_offset: 0,
                 stream_used: 0,
             }
+        );
+    }
+
+    /// Byte segment dispatch (`0x110dd80`) mode 0 feeding byte rANS (`0x110dfa0`).
+    ///
+    /// Provenance: `capture_segment_dispatch_byte.py`, Animal_Bass call 1:
+    /// `mode=0,log=3,count=30,stride=1`, warm states, no renorm bytes consumed.
+    /// This covers the dispatcher's mode-0 branch and the `count & 3 == 2` tail.
+    #[test]
+    fn rans_segment_dispatch_bytes_mode0_tail_updates_output_cursor_and_states() {
+        let mut state =
+            RansStateBuffer::warm([1002867111956613, 297734982922, 3174744965070, 1675156985512]);
+        let mut cursor = RansStreamCursor::default();
+        let step = [
+            458752, 458753, 458754, 458755, 458756, 458757, 458758, 65536,
+        ];
+        let sym = [0, 0, 0, 0, 0, 0, 0, 1];
+        let mut out = vec![0xff; 30];
+
+        let used = rans_segment_dispatch_bytes_into(
+            &mut out,
+            RansSegmentDispatchBytesSpec {
+                mode: 0,
+                log: 3,
+                value: 0,
+                count: 30,
+                stride: 1,
+                state: &mut state,
+                step: &step,
+                sym: &sym,
+                stream: &[],
+                cursor: &mut cursor,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(used, 0);
+        assert_eq!(cursor.offset, 0);
+        assert_eq!(
+            state,
+            RansStateBuffer::warm([49227725862390, 14614913526, 1246709343325, 657827286397])
+        );
+        assert_eq!(
+            out,
+            hex_bytes("000000000000000001000000000000000000000000010000000000000000")
+        );
+    }
+
+    /// Byte segment dispatch (`0x110dd80`) mode 2 feeding byte RLE (`0x110f800`).
+    ///
+    /// Provenance: `capture_segment_dispatch_byte.py`, Animal_Dragonfly call 5:
+    /// `mode=2,value=1,count=3,stride=1`, whose byte fill overwrites `000001`
+    /// with `010101`.
+    #[test]
+    fn rans_segment_dispatch_bytes_mode2_rle_fills_dense_segment() {
+        let mut state = RansStateBuffer::warm([
+            290362338331826,
+            324891473402,
+            3329202948120618,
+            1082470406632,
+        ]);
+        let mut cursor = RansStreamCursor::default();
+        let mut out = hex_bytes("000001");
+
+        let used = rans_segment_dispatch_bytes_into(
+            &mut out,
+            RansSegmentDispatchBytesSpec {
+                mode: 2,
+                log: 2,
+                value: 1,
+                count: 3,
+                stride: 1,
+                state: &mut state,
+                step: &[],
+                sym: &[],
+                stream: &[],
+                cursor: &mut cursor,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(used, 0);
+        assert_eq!(cursor.offset, 0);
+        assert_eq!(
+            state,
+            RansStateBuffer::warm([
+                290362338331826,
+                324891473402,
+                3329202948120618,
+                1082470406632
+            ])
+        );
+        assert_eq!(out, hex_bytes("010101"));
+    }
+
+    #[test]
+    fn rans_segment_dispatch_bytes_rejects_unported_and_bad_bounds() {
+        let mut state = RansStateBuffer::warm([0x8000_0000; 4]);
+        let mut cursor = RansStreamCursor::default();
+        let mut out = [0u8; 4];
+        assert_eq!(
+            rans_segment_dispatch_bytes_into(
+                &mut out,
+                RansSegmentDispatchBytesSpec {
+                    mode: 1,
+                    log: 1,
+                    value: 0,
+                    count: 4,
+                    stride: 1,
+                    state: &mut state,
+                    step: &[],
+                    sym: &[],
+                    stream: &[],
+                    cursor: &mut cursor,
+                },
+            ),
+            Err(RansSegmentDispatchBytesError::UnportedMode1)
+        );
+
+        let mut state = RansStateBuffer::warm([0x8000_0000; 4]);
+        let mut cursor = RansStreamCursor::default();
+        assert_eq!(
+            rans_segment_dispatch_bytes_into(
+                &mut out,
+                RansSegmentDispatchBytesSpec {
+                    mode: 9,
+                    log: 1,
+                    value: 0,
+                    count: 4,
+                    stride: 1,
+                    state: &mut state,
+                    step: &[],
+                    sym: &[],
+                    stream: &[],
+                    cursor: &mut cursor,
+                },
+            ),
+            Err(RansSegmentDispatchBytesError::UnknownMode(9))
+        );
+
+        let mut state = RansStateBuffer::warm([0x8000_0000; 4]);
+        let mut cursor = RansStreamCursor::default();
+        assert_eq!(
+            rans_segment_dispatch_bytes_into(
+                &mut out,
+                RansSegmentDispatchBytesSpec {
+                    mode: 2,
+                    log: 0,
+                    value: 1,
+                    count: 4,
+                    stride: 0,
+                    state: &mut state,
+                    step: &[],
+                    sym: &[],
+                    stream: &[],
+                    cursor: &mut cursor,
+                },
+            ),
+            Err(RansSegmentDispatchBytesError::Rle(
+                RansByteRleFillError::ZeroStride
+            ))
+        );
+
+        let mut state = RansStateBuffer::warm([0x8000_0000; 4]);
+        let mut cursor = RansStreamCursor::default();
+        assert_eq!(
+            rans_segment_dispatch_bytes_into(
+                &mut out[..2],
+                RansSegmentDispatchBytesSpec {
+                    mode: 2,
+                    log: 0,
+                    value: 1,
+                    count: 3,
+                    stride: 1,
+                    state: &mut state,
+                    step: &[],
+                    sym: &[],
+                    stream: &[],
+                    cursor: &mut cursor,
+                },
+            ),
+            Err(RansSegmentDispatchBytesError::Rle(
+                RansByteRleFillError::OutputTooSmall
+            ))
+        );
+
+        let step = [65536, 65536];
+        let sym = [0, 1];
+        #[cfg(target_pointer_width = "64")]
+        {
+            let mut state = RansStateBuffer::warm([0x8000_0000; 4]);
+            let mut cursor = RansStreamCursor::default();
+            let large_count = (u32::MAX as usize) + 1;
+            assert_eq!(
+                rans_segment_dispatch_bytes_into(
+                    &mut out,
+                    RansSegmentDispatchBytesSpec {
+                        mode: 0,
+                        log: 1,
+                        value: 0,
+                        count: large_count,
+                        stride: 1,
+                        state: &mut state,
+                        step: &step,
+                        sym: &sym,
+                        stream: &[],
+                        cursor: &mut cursor,
+                    },
+                ),
+                Err(RansSegmentDispatchBytesError::CountTooLarge(large_count))
+            );
+        }
+
+        let mut state = RansStateBuffer::warm([0x8000_0000; 4]);
+        let mut cursor = RansStreamCursor::default();
+        assert_eq!(
+            rans_segment_dispatch_bytes_into(
+                &mut out[..3],
+                RansSegmentDispatchBytesSpec {
+                    mode: 0,
+                    log: 1,
+                    value: 0,
+                    count: 4,
+                    stride: 1,
+                    state: &mut state,
+                    step: &step,
+                    sym: &sym,
+                    stream: &[],
+                    cursor: &mut cursor,
+                },
+            ),
+            Err(RansSegmentDispatchBytesError::Decode(
+                RansInitError::OutputTooSmall
+            ))
         );
     }
 
