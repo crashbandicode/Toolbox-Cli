@@ -643,6 +643,22 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP4 checkpoint primitive transform tails
+**Committed:** B2-CP4 observed primitive transform-tail helpers are green through
+`bbf4225` (latest ledger), with code chunks `bbc0cf7` (`0x10fc5e0` byte copy),
+`0ac04ab` (`0x10fc680` halfword copy), `7206bcc` (`0x10fc7d0` word copy),
+`0cf6c03` (`0x10fbcc0` two-byte delta-match), and `6a74462`
+(`0x10fbdc0` three-byte delta-match). Durable local evidence:
+`capture_transform_tails.py` now records match tables and still finds the same
+8 transform-tail calls across Bear/Bass/Dragonfly with matching final buffers;
+the replay scripts reproduce `0x10fc5e0` **3/3**, `0x10fc680` **1/1**,
+`0x10fc7d0` **2/2**, `0x10fbcc0` **1/1**, and `0x10fbdc0` **1/1**. Full
+checkpoint gate run: All green: **195 lib unit** (incl. **49** `mc::geometry`)
++ all integration; clippy `--all-targets` clean; `--no-default-features`
+builds. Next: continue B2-CP4 by wiring the validated primitive tails into the
+observed `0x10fb2e0` transform wrapper, or follow the handoff's next checkpoint
+if it names a different independent chunk.
+
 ### 2026-06-03 - MeshCodec B2-CP4 chunk three-byte delta-match tail
 **Committed:** B2-CP4 chunk landed in `6a74462`, porting the observed
 `0x10fbdc0` three-byte delta-match tail as
