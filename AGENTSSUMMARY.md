@@ -643,6 +643,25 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP4 chunk three-byte delta-match tail
+**Committed:** B2-CP4 chunk landed in `6a74462`, porting the observed
+`0x10fbdc0` three-byte delta-match tail as
+`geometry::transform_tail_delta3_into`. Durable local evidence:
+`verify_transform_tail_delta3.py` replayed the Bear `0x10fbdc0` call **1/1**.
+Coverage: direct literals 483, match literals 1910, copy units 934,
+zero-literal records 22, zero-copy records 1, and 3327 match-table entries
+consumed. Rust coverage: fixture-free Bear golden for first two entry
+`0x0c000803` records covering direct/match/copy behavior, observed
+zero-literal and zero-copy branch tests, plus defensive rejection for zero
+stride, output underflow, all source underflows, match-table underflow,
+match-before-output, and copy-before-output. Per-chunk sample green:
+`cargo test --lib transform_tail` (13 passed) and `cargo build`. Last
+checkpoint baseline remains: All green: **182 lib unit** (incl. **36**
+`mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds. B2-CP4 primitive observed tail coverage is now
+complete for the current Bear/Bass/Dragonfly fixtures; next: run the B2-CP4
+full checkpoint gate and record counts.
+
 ### 2026-06-03 - MeshCodec B2-CP4 chunk two-byte delta-match tail
 **Committed:** B2-CP4 chunk landed in `0cf6c03`, porting the observed
 `0x10fbcc0` two-byte delta-match tail as
