@@ -643,6 +643,26 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP4 chunk byte-output rANS
+**Committed:** B2-CP4 byte-output rANS chunk landed in `9525c5b`, porting the
+emitted-byte side of `0x110dfa0` as
+`geometry::rans_decode_bytes_into_with_cursor` and
+`geometry::rans_decode_bytes_into`. Durable local evidence:
+`capture_rans_byte_decode.py` enumerated **28** calls across
+Bear/Bass/Dragonfly; `verify_rans_byte_decode.py` replayed **28/28** for output
+bytes, states, flags, stream consumption, and stream offsets. Coverage includes
+`count % 4` values 0/1/2/3, stride 1 and stride 6, plus cold and warm state
+buffers; the unobserved `count < 4` scalar path is still typed-error guarded.
+Rust coverage: existing Bear `0x110dfa0` state golden now also asserts emitted
+bytes, Animal_Bass call 1 covers the observed tail (`count=30,count&3=2`), and
+defensive tests reject zero stride, undersized output, truncated stream data,
+and scalar count. Per-chunk sample green: `cargo test --lib rans_init_states`
+(4 passed), `cargo test --lib rans_decode_bytes` (1 passed), and `cargo build`.
+Last checkpoint baseline remains: All green: **195 lib unit** (incl. **49**
+`mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds. Next: use the byte-output primitive to port
+`0x110dd80`, then continue `0x110d7f0` selectors 0/1.
+
 ### 2026-06-03 - MeshCodec B2-CP4 chunk byte-group direct selector
 **Committed:** B2-CP4 byte-group reader slice landed in `150057c`, porting the
 observed selector-3 branch of `0x110d7f0` as `geometry::byte_group_read`.
