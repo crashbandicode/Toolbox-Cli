@@ -643,6 +643,33 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP4 chunk byte-group selector 1
+**Committed:** B2-CP4 selector-1 byte-group chunk landed in `1db9848`,
+porting the observed single-window selector-1 branch of `0x110d7f0`.
+Selector 1 now builds one descriptor through `0x110de80` and dispatches through
+`0x110dd80` for byte elements or `0x110de00` for halfword elements, returning
+halfwords little-endian. Durable local evidence:
+`verify_byte_group_reader_selector1.py` replayed **84/84** selector-1 calls
+from refreshed `byte_group_reader_capture.json`; selector coverage remains
+0 = 5, 1 = 84, 2 = 8, 3 = 62. Selector-1 descriptor coverage is byte mode 0 =
+21, byte mode 1 = 24, byte mode 2 = 10, u16 mode 0 = 11, u16 mode 1 = 17, and
+u16 mode 2 = 1. No-output failed 76/84, and no stream-cursor writeback failed
+28/28 stream-advancing calls. The large selector-1 split at `w4*w3 >= 0x80000`
+is still guarded because max observed `w4*w3` is 13884. Rust coverage:
+fixture-free Animal_Bass call 24 covers byte mode 0 with a four-byte stream
+advance; Animal_Bass call 6 covers u16 mode 0 with little-endian serialization
+and a 16-byte stream advance. Per-chunk sample green:
+`python local-assets/re/verify_byte_group_reader_selector1.py` (84/84),
+`cargo test --lib byte_group_reader` (5 passed),
+`cargo test --lib rans_segment_dispatch_bytes` (4 passed),
+`cargo test --lib rans_segment_dispatch` (8 passed), and `cargo build`.
+Last checkpoint baseline remains: All green: **195 lib unit** (incl. **49**
+`mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds. Next: selector 2 (`0x1110cc0`/`0x1110a60`)
+remains the only guarded `0x110d7f0` selector in the refreshed capture, unless
+the next independent CP4 step can wire selector 0/1/3 while keeping selector 2
+guarded.
+
 ### 2026-06-03 - MeshCodec B2-CP4 chunk byte-group selector 0
 **Committed:** B2-CP4 selector-0 byte-group chunk landed in `1610408`,
 porting `0x110dae0` as `geometry::rans_segment_loop_bytes_into` and wiring
