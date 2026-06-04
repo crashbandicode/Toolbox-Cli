@@ -643,6 +643,26 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec CP5a Bass `0x11033e0` writer
+**Committed:** CP5a ports the remaining observed writer target, Bass current 1
+`0x11033e0`, as `transform_tail_u8x2_delta_into` and routes dispatch 76 through
+`vertex_attribute_apply_writer`. Durable local evidence:
+`capture_transform_tail_11033e0.py` enumerated the population as one Bass call,
+and `verify_transform_tail_11033e0.py` replayed **1/1** with source0=208,
+source1=382, and 559 match entries consumed. `verify_vertex_writer_dispatch.py`
+now audits **25/25** captured writer targets as supported. Fixture-free Rust
+coverage uses a Bass-derived compact golden covering seed, previous-row delta,
+non-zero match delta, and copy rows; defensive tests cover zero stride, missing
+match table, short source0, match-before-output, short source1, and
+copy-before-output. Per-chunk samples green:
+`cargo test --lib transform_tail_u8x2` (2 tests),
+`cargo test --lib vertex_attribute` (6 tests), and
+`cargo test --lib transform_tail` (29 tests). Latest checkpoint gate remains:
+All green: 226 lib unit (incl. 80 mc::geometry) + all integration; clippy
+--all-targets clean; --no-default-features builds. Next: expose the real
+writer match-table state (`ctx+0x228` / writer `x0+0x10`) so the driver can run
+the full per-attribute writer loop end-to-end.
+
 ### 2026-06-04 - MeshCodec CP5a vertex writer dispatch
 **Committed:** CP5a ports the writer-table boundary at `0x10f93d8` as
 `vertex_attribute_apply_writer`. The helper converts wrapper records into the

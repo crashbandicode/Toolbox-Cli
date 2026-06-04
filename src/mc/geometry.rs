@@ -4312,8 +4312,8 @@ pub enum VertexAttributeWriterTarget {
     Delta4Direct,
     /// `0x1100c90`.
     U16x3Delta,
-    /// `0x11033e0`, captured only as an interstage target so far.
-    UnportedU16x2Direct,
+    /// `0x11033e0`.
+    U8x2Delta,
     /// `0x1103ab0`.
     U16x2Delta,
     /// `0x110aac0`.
@@ -4402,8 +4402,6 @@ pub struct VertexAttributeWriterUsage {
 /// Errors from the writer-table dispatch at `0x10f93d8`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VertexAttributeWriterError {
-    /// The captured writer target has not been ported yet.
-    UnportedWriter(VertexAttributeWriterTarget),
     /// The selected writer needed a source stream that setup did not produce.
     MissingSource {
         target: VertexAttributeWriterTarget,
@@ -4813,7 +4811,7 @@ fn vertex_attribute_source_descriptors(
             let split = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
             let remainder = vertex_split_remainder(dispatch, wrapper_ret, split)?;
             let writer = if dispatch == 76 {
-                VertexAttributeWriterTarget::UnportedU16x2Direct
+                VertexAttributeWriterTarget::U8x2Delta
             } else {
                 VertexAttributeWriterTarget::U16x2Delta
             };
@@ -5132,10 +5130,23 @@ pub fn vertex_attribute_apply_writer(
             .map(vertex_delta_usage)
             .map_err(VertexAttributeWriterError::Delta)
         }
-        VertexAttributeWriterTarget::UnportedU16x2Direct => {
-            Err(VertexAttributeWriterError::UnportedWriter(
-                VertexAttributeWriterTarget::UnportedU16x2Direct,
-            ))
+        VertexAttributeWriterTarget::U8x2Delta => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            transform_tail_u8x2_delta_into(
+                out,
+                TransformTailU8x2DeltaSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
         }
         VertexAttributeWriterTarget::U16x2Delta => {
             let source0 = vertex_writer_source(spec.interstage, 0)?;
@@ -5440,6 +5451,24 @@ pub struct TransformTailDelta4DirectSpec<'a> {
     /// Direct literal source stream at `[x4]`.
     pub source0: &'a [u8],
     /// Matched delta stream at `[x4+8]`.
+    pub source1: &'a [u8],
+}
+
+/// Inputs for the two-byte previous/matched delta transform tail (`0x11033e0`).
+pub struct TransformTailU8x2DeltaSpec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Match table at `[x0+0x10]`, indexed by emitted vertex.
+    pub matches: &'a [u32],
+    /// Seed and zero-match previous-row delta stream at `[x4]`.
+    pub source0: &'a [u8],
+    /// Non-zero match delta stream at `[x4+8]`.
     pub source1: &'a [u8],
 }
 
@@ -6138,6 +6167,149 @@ pub fn transform_tail_pack10x3_delta_into(
         source1: source1_pos,
         source2: source2_pos,
         source3: source3_pos,
+        match_entries: match_index,
+    })
+}
+
+fn read_transform_tail_u8x2_at(
+    out: &[u8],
+    cursor: usize,
+) -> Result<[u8; 2], TransformTailDeltaError> {
+    let start = cursor
+        .checked_sub(1)
+        .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+    let end = cursor
+        .checked_add(1)
+        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let bytes = out
+        .get(start..end)
+        .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+    Ok([bytes[0], bytes[1]])
+}
+
+fn write_transform_tail_u8x2_at(
+    out: &mut [u8],
+    cursor: usize,
+    bytes: [u8; 2],
+) -> Result<(), TransformTailDeltaError> {
+    let start = cursor
+        .checked_sub(1)
+        .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+    let end = cursor
+        .checked_add(1)
+        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let slot = out
+        .get_mut(start..end)
+        .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+    slot.copy_from_slice(&bytes);
+    Ok(())
+}
+
+/// Apply the observed two-byte previous/matched delta transform tail (`0x11033e0`).
+///
+/// The first zero-match literal seeds two bytes from source0 (`0x11034d4..0x11034e0`).
+/// Later zero-match literals add source0 deltas to the previous row
+/// (`0x1103488..0x11034c8`), while non-zero matches add source1 deltas to the
+/// matched row selected by `(match >> 3) * stride` (`0x1103434..0x1103478`).
+/// Copy runs clone two bytes by record byte distance (`0x11034f0..0x1103514`).
+pub fn transform_tail_u8x2_delta_into(
+    out: &mut [u8],
+    spec: TransformTailU8x2DeltaSpec<'_>,
+) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?
+            .checked_add(1)
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut match_index = 0usize;
+    let mut source0_pos = 0usize;
+    let mut source1_pos = 0usize;
+
+    for record in spec.records {
+        for _ in 0..record.literal_count {
+            let match_entry = *spec
+                .matches
+                .get(match_index)
+                .ok_or(TransformTailDeltaError::MatchTableTooSmall)?;
+            let bytes = if match_entry != 0 {
+                let match_units = (match_entry >> 3) as usize;
+                let match_distance = match_units
+                    .checked_mul(spec.output_stride)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let source = cursor
+                    .checked_sub(match_distance)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let previous = read_transform_tail_u8x2_at(out, source)?;
+                let source1_end = source1_pos
+                    .checked_add(2)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let deltas = spec
+                    .source1
+                    .get(source1_pos..source1_end)
+                    .ok_or(TransformTailDeltaError::Source1TooSmall)?;
+                source1_pos = source1_end;
+                [
+                    previous[0].wrapping_add(deltas[0]),
+                    previous[1].wrapping_add(deltas[1]),
+                ]
+            } else if match_index == 0 {
+                let source0_end = source0_pos
+                    .checked_add(2)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let bytes = spec
+                    .source0
+                    .get(source0_pos..source0_end)
+                    .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                source0_pos = source0_end;
+                [bytes[0], bytes[1]]
+            } else {
+                let source = cursor
+                    .checked_sub(spec.output_stride)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let previous = read_transform_tail_u8x2_at(out, source)?;
+                let source0_end = source0_pos
+                    .checked_add(2)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let deltas = spec
+                    .source0
+                    .get(source0_pos..source0_end)
+                    .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                source0_pos = source0_end;
+                [
+                    previous[0].wrapping_add(deltas[0]),
+                    previous[1].wrapping_add(deltas[1]),
+                ]
+            };
+            write_transform_tail_u8x2_at(out, cursor, bytes)?;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            match_index += 1;
+        }
+
+        for _ in 0..record.copy_count {
+            let source = cursor
+                .checked_sub(record.back_distance)
+                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
+            let bytes = read_transform_tail_u8x2_at(out, source)
+                .map_err(|_| TransformTailDeltaError::CopyBeforeOutput)?;
+            write_transform_tail_u8x2_at(out, cursor, bytes)?;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        }
+
+        match_index = match_index
+            .checked_add(usize::from(record.copy_count))
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        if match_index > spec.matches.len() {
+            return Err(TransformTailDeltaError::MatchTableTooSmall);
+        }
+    }
+
+    Ok(TransformTailDeltaUsage {
+        source0: source0_pos,
+        source1: source1_pos,
+        source2: 0,
         match_entries: match_index,
     })
 }
@@ -10385,7 +10557,7 @@ mod tests {
     }
 
     #[test]
-    fn vertex_attribute_writer_dispatch_rejects_unported_and_malformed_inputs() {
+    fn vertex_attribute_writer_dispatch_rejects_malformed_inputs() {
         let transform = VertexAttributeTransform {
             index: 0,
             table_entry: ByteGroupTransformTableEntry { raw: 0x0a00_0802 },
@@ -10418,25 +10590,29 @@ mod tests {
             })
         );
 
-        let unported = VertexAttributeInterstage {
+        let missing_second_source = VertexAttributeInterstage {
             dispatch: 76,
-            writer: VertexAttributeWriterTarget::UnportedU16x2Direct,
+            writer: VertexAttributeWriterTarget::U8x2Delta,
             descriptors: Vec::new(),
-            sources: Vec::new(),
+            sources: vec![VertexAttributeSource {
+                selector: 3,
+                bytes: vec![0, 0],
+            }],
         };
         assert_eq!(
             vertex_attribute_apply_writer(
                 &mut out,
                 VertexAttributeWriterCall {
                     transform: &transform,
-                    interstage: &unported,
+                    interstage: &missing_second_source,
                     matches: &[],
                     block_index: 0,
                 },
             ),
-            Err(VertexAttributeWriterError::UnportedWriter(
-                VertexAttributeWriterTarget::UnportedU16x2Direct
-            ))
+            Err(VertexAttributeWriterError::MissingSource {
+                target: VertexAttributeWriterTarget::U8x2Delta,
+                index: 1,
+            })
         );
 
         let delta = VertexAttributeInterstage {
@@ -11006,6 +11182,87 @@ mod tests {
             &source[2..4],
             "copy-back distance is in bytes across prior literals"
         );
+    }
+
+    /// Transform tail `0x11033e0`: two-byte seed/previous/matched delta.
+    ///
+    /// Provenance: `capture_transform_tail_11033e0.py`, Animal_Bass current 1:
+    /// one observed call at entry `0x0a000802`, `bufB+6`, stride 10.
+    /// `verify_transform_tail_11033e0.py` replays 1/1 captured call with
+    /// source0=208, source1=382, and 559 match-table entries consumed.
+    #[test]
+    fn transform_tail_u8x2_delta_bass_seed_previous_match_and_copy() {
+        let records = [TransformTailRecord {
+            literal_count: 4,
+            copy_count: 13,
+            back_distance: 10,
+        }];
+        let matches = [0u32; 17];
+        let source0 = hex_bytes("0000000000000101");
+        let mut out = vec![0xee; 180];
+
+        let usage = transform_tail_u8x2_delta_into(
+            &mut out,
+            TransformTailU8x2DeltaSpec {
+                output_stride: 10,
+                block_index: 0,
+                out_offset: 6,
+                records: &records,
+                matches: &matches,
+                source0: &source0,
+                source1: &[],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            usage,
+            TransformTailDeltaUsage {
+                source0: 8,
+                source1: 0,
+                source2: 0,
+                match_entries: 17,
+            }
+        );
+        let expected_pairs =
+            hex_bytes("00000000000001010101010101010101010101010101010101010101010101010101");
+        for (index, expected) in expected_pairs.chunks_exact(2).enumerate() {
+            assert_eq!(&out[6 + index * 10..8 + index * 10], expected);
+        }
+        assert_eq!(out[8], 0xee, "rules out contiguous two-byte writes");
+
+        let records = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 0,
+            back_distance: 0,
+        }];
+        let matches = [8u32];
+        let mut out = vec![0xee; 30];
+        out[6] = 10;
+        out[7] = 20;
+        let usage = transform_tail_u8x2_delta_into(
+            &mut out,
+            TransformTailU8x2DeltaSpec {
+                output_stride: 10,
+                block_index: 0,
+                out_offset: 16,
+                records: &records,
+                matches: &matches,
+                source0: &[],
+                source1: &[1, 2],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            usage,
+            TransformTailDeltaUsage {
+                source0: 0,
+                source1: 2,
+                source2: 0,
+                match_entries: 1,
+            }
+        );
+        assert_eq!(&out[16..18], &[11, 22]);
     }
 
     /// Transform tail `0x10fc7d0`: four-byte literals plus copy-back.
@@ -13027,6 +13284,118 @@ mod tests {
                     out_offset: 0,
                     records: &copy_first,
                     matches: &[0],
+                    source0: &[],
+                    source1: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::CopyBeforeOutput)
+        );
+    }
+
+    #[test]
+    fn transform_tail_u8x2_delta_rejects_malformed_inputs() {
+        let records = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 0,
+            back_distance: 0,
+        }];
+        let matches = [0u32];
+        let mut out = vec![0u8; 20];
+        assert_eq!(
+            transform_tail_u8x2_delta_into(
+                &mut out,
+                TransformTailU8x2DeltaSpec {
+                    output_stride: 0,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &records,
+                    matches: &matches,
+                    source0: &[0, 0],
+                    source1: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::ZeroStride)
+        );
+        assert_eq!(
+            transform_tail_u8x2_delta_into(
+                &mut out,
+                TransformTailU8x2DeltaSpec {
+                    output_stride: 10,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &records,
+                    matches: &[],
+                    source0: &[0, 0],
+                    source1: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::MatchTableTooSmall)
+        );
+        assert_eq!(
+            transform_tail_u8x2_delta_into(
+                &mut out,
+                TransformTailU8x2DeltaSpec {
+                    output_stride: 10,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &records,
+                    matches: &matches,
+                    source0: &[0],
+                    source1: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::Source0TooSmall)
+        );
+
+        let matches = [8u32];
+        assert_eq!(
+            transform_tail_u8x2_delta_into(
+                &mut out,
+                TransformTailU8x2DeltaSpec {
+                    output_stride: 10,
+                    block_index: 0,
+                    out_offset: 6,
+                    records: &records,
+                    matches: &matches,
+                    source0: &[],
+                    source1: &[1, 2],
+                },
+            ),
+            Err(TransformTailDeltaError::MatchBeforeOutput)
+        );
+
+        out[6] = 10;
+        out[7] = 20;
+        assert_eq!(
+            transform_tail_u8x2_delta_into(
+                &mut out,
+                TransformTailU8x2DeltaSpec {
+                    output_stride: 10,
+                    block_index: 0,
+                    out_offset: 16,
+                    records: &records,
+                    matches: &matches,
+                    source0: &[],
+                    source1: &[1],
+                },
+            ),
+            Err(TransformTailDeltaError::Source1TooSmall)
+        );
+
+        let copy_records = [TransformTailRecord {
+            literal_count: 0,
+            copy_count: 1,
+            back_distance: 10,
+        }];
+        assert_eq!(
+            transform_tail_u8x2_delta_into(
+                &mut out,
+                TransformTailU8x2DeltaSpec {
+                    output_stride: 10,
+                    block_index: 0,
+                    out_offset: 6,
+                    records: &copy_records,
+                    matches: &matches,
                     source0: &[],
                     source1: &[],
                 },
