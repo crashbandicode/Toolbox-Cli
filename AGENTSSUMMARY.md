@@ -643,6 +643,24 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP4 chunk byte-group direct selector
+**Committed:** B2-CP4 byte-group reader slice landed in `150057c`, porting the
+observed selector-3 branch of `0x110d7f0` as `geometry::byte_group_read`.
+Durable local evidence: `capture_byte_group_reader.py` enumerated **159**
+`0x110d7f0` calls across Bear/Bass/Dragonfly; selector coverage is selector 0 =
+5, selector 1 = 84, selector 2 = 8, and selector 3 = 62.
+`verify_byte_group_reader_selector3.py` replayed selector 3 **62/62** for output
+bytes plus reverse-reader and forward-stream writeback. Selectors 0/1/2 are
+typed-error guarded until their byte/zstd segment paths are ported. Rust
+coverage: fixture-free Animal_Bass call 16 selector-3 golden, plus rejection for
+guarded selectors, truncated selector loads, direct-stream underflow, and output
+size overflow. Per-chunk sample green: `cargo test --lib byte_group_reader` (2
+passed) and `cargo build`. Last checkpoint baseline remains: All green: **195
+lib unit** (incl. **49** `mc::geometry`) + all integration; clippy
+`--all-targets` clean; `--no-default-features` builds. Next: continue
+`0x110d7f0` with selector 0, 1, or 2, then wire the byte-group reader into
+`0x10fb2e0`.
+
 ### 2026-06-03 - MeshCodec B2-CP4 checkpoint primitive transform tails
 **Committed:** B2-CP4 observed primitive transform-tail helpers are green through
 `bbf4225` (latest ledger), with code chunks `bbc0cf7` (`0x10fc5e0` byte copy),
