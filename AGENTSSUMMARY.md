@@ -643,6 +643,23 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec B2-CP4 chunk Bear direct/delta writer
+**Committed:** B2-CP4 three-byte direct/delta writer chunk landed in `04c09d0`,
+porting the now-proven `0x10fdcf0` writer in `src/mc/geometry.rs` as
+`transform_tail_delta3_direct_into`. It is the Bear table-entry-1 sibling of
+`0x10fdc00`: direct literals copy three-byte source0 units, non-zero match
+entries add source1 deltas to prior strided output, and copy runs clone previous
+output by byte distance. Durable local evidence:
+`verify_transform_tail_delta3_direct.py` replayed **1/1** Bear call
+with direct literals 197, matched literals 1185, copy units 1945, match entries
+3327, source0 591 bytes, source1 3555 bytes; wrong delta-match direct shape and
+no-match-delta both fail 1/1. Rust coverage:
+`cargo test --lib transform_tail_delta3_direct` passed 2 tests,
+`cargo test --lib transform_tail_delta` passed 10 tests, and `cargo build`
+passed. Next after commit: update/rerun the early bufB sparse assembly probe
+with the direct-delta writers included, then port only the next writer the diff
+actually proves.
+
 ### 2026-06-04 - MeshCodec B2-CP4 chunk Dragonfly direct/delta writer
 **Committed:** B2-CP4 direct/delta writer chunk landed in `c81468b`. After the
 Dragonfly bufB probe, expanded `capture_transform_tails.py` to hook all 32
