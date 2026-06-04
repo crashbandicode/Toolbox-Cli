@@ -643,6 +643,28 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec B2-CP4 chunk byte-group transform wrapper
+**Committed:** B2-CP4 transform-wrapper chunk landed in `98334d2`, porting the
+observed `0x10fb2e0` paths in `src/mc/geometry.rs`. The wrapper now handles the
+even-count early return and the observed mode-1 active path: two forward
+varints, one reverse count bit, three decoded byte-group streams, one direct
+tail stream, and `0x110d360` record assembly. Durable local evidence:
+`capture_byte_group_transform.py` enumerated Bear 8 + Bass 8 + Dragonfly 9 =
+**25** calls; `verify_byte_group_transform.py` replayed **25/25**. Branch
+coverage is active `(4 x 0x110d7f0, 1 x 0x110d360)` count 23 and early count
+2; active tails are all direct selector 3. Discriminators: early-as-active
+fails 2/25, `third_count = first_count` fails 18/23 active calls, and
+`third_count = first_count - 1` fails 5/23 active calls. Rust coverage:
+fixture-free Animal_Dragonfly active and early goldens plus defensive guards;
+`cargo test --lib byte_group_transform` passed 3 tests,
+`cargo test --lib byte_group_reader` passed 6 tests,
+`cargo test --lib width_combiner` passed 3 tests, and `cargo build` passed.
+Last checkpoint baseline remains: All green: **195 lib unit** (incl. **49**
+`mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds. Next after commit: per user instruction, stop
+adding leaves and attempt early bufB assembly plus decode-vs-oracle on one
+fixture/region/attribute before porting more transform paths.
+
 ### 2026-06-04 - MeshCodec B2-CP4 chunk byte-group selector 2
 **Committed:** B2-CP4 selector-2 byte-group chunk landed in `5a858dc`,
 porting the observed single zstd-window branch of `0x110d7f0`. Selector 2 now
