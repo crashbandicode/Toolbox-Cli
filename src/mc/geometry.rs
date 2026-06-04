@@ -396,15 +396,17 @@ pub fn rans_spread(log: u32, symbol_freqs: &[u16]) -> RansDecodeTable {
     RansDecodeTable { log, step, sym }
 }
 
-/// Errors from four-lane rANS state initialization (`0x110dfa0`).
+/// Errors from the byte-output four-lane rANS decoder (`0x110dfa0`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RansInitError {
     /// `prod < 4` hits the scalar path (`0x110e140`) — not yet traced for commit.
     ProdTooSmall,
-    /// `prod & 3 != 0` tail uses `0x110e128` — not yet traced for commit.
-    UnsupportedProdTail,
     /// `step`/`sym` length must equal `1 << table.log`.
     TableSizeMismatch,
+    /// A zero stride would repeatedly overwrite the same output slot.
+    ZeroStride,
+    /// `count * stride` overflowed or does not fit the caller-provided output.
+    OutputTooSmall,
     /// Forward renorm at `0x110e05c` could not read four bytes for a lane.
     StreamTooShort,
 }
@@ -518,12 +520,39 @@ fn load_cold_rans_states(
 /// `stream_pos - base` (`0x110e1a0..0x110e1a8`).
 ///
 /// Still guarded because the captured population does not exercise it: scalar
-/// `prod < 4` (`0x110e140`) and `prod & 3` tail (`0x110e128`).
+/// `count < 4` (`0x110e140`). The `count & 3` tail at `0x110e128` is observed
+/// and covered.
 pub fn rans_init_states_with_cursor(
     table: &RansDecodeTable,
     stream: &[u8],
     prod: u32,
-    _stride: usize,
+    stride: usize,
+    state: &mut RansStateBuffer,
+    cursor: &mut RansStreamCursor,
+) -> Result<RansInitResult, RansInitError> {
+    rans_byte_decode_core(None, table, stream, prod, stride, state, cursor)
+}
+
+/// Decode byte symbols with the generic `0x110dfa0` primitive and write them to
+/// `out[i * stride]`.
+pub fn rans_decode_bytes_into_with_cursor(
+    out: &mut [u8],
+    table: &RansDecodeTable,
+    stream: &[u8],
+    count: u32,
+    stride: usize,
+    state: &mut RansStateBuffer,
+    cursor: &mut RansStreamCursor,
+) -> Result<RansInitResult, RansInitError> {
+    rans_byte_decode_core(Some(out), table, stream, count, stride, state, cursor)
+}
+
+fn rans_byte_decode_core(
+    mut out: Option<&mut [u8]>,
+    table: &RansDecodeTable,
+    stream: &[u8],
+    count: u32,
+    stride: usize,
     state: &mut RansStateBuffer,
     cursor: &mut RansStreamCursor,
 ) -> Result<RansInitResult, RansInitError> {
@@ -531,11 +560,19 @@ pub fn rans_init_states_with_cursor(
     if table.step.len() != m || table.sym.len() != m {
         return Err(RansInitError::TableSizeMismatch);
     }
-    if prod < 4 {
+    if count < 4 {
         return Err(RansInitError::ProdTooSmall);
     }
-    if prod & 3 != 0 {
-        return Err(RansInitError::UnsupportedProdTail);
+    if stride == 0 {
+        return Err(RansInitError::ZeroStride);
+    }
+    if let Some(buf) = out.as_deref() {
+        let min_len = (count as usize)
+            .checked_mul(stride)
+            .ok_or(RansInitError::OutputTooSmall)?;
+        if buf.len() < min_len {
+            return Err(RansInitError::OutputTooSmall);
+        }
     }
 
     let start_offset = cursor.offset;
@@ -548,19 +585,22 @@ pub fn rans_init_states_with_cursor(
     let step = &table.step;
     let sym = &table.sym;
 
-    for _ in 0..(prod >> 2) {
-        for lane_state in &mut state.states {
-            let idx = (*lane_state & mask) as usize;
-            let entry = step[idx];
-            let shifted = *lane_state >> log;
-            let _ = sym[idx];
-            *lane_state = shifted * (entry >> 16) as u64 + (entry & 0xffff) as u64;
+    // The disassembly decodes groups of four lanes and then a scalar tail. A
+    // single round-robin loop is equivalent because a lane is not read again
+    // until the next four-symbol group.
+    for output_index in 0..count as usize {
+        let lane = output_index & 3;
+        let lane_state = &mut state.states[lane];
+        let idx = (*lane_state & mask) as usize;
+        let entry = step[idx];
+        let shifted = *lane_state >> log;
+        if let Some(buf) = out.as_deref_mut() {
+            buf[output_index * stride] = sym[idx] as u8;
         }
-        for lane_state in &mut state.states {
-            if *lane_state >> 31 == 0 {
-                let word = read_stream_u32(stream, cursor)?;
-                *lane_state = (*lane_state << 32) | word as u64;
-            }
+        *lane_state = shifted * (entry >> 16) as u64 + (entry & 0xffff) as u64;
+        if *lane_state >> 31 == 0 {
+            let word = read_stream_u32(stream, cursor)?;
+            *lane_state = (*lane_state << 32) | word as u64;
         }
     }
 
@@ -584,6 +624,20 @@ pub fn rans_init_states(
     let mut state = RansStateBuffer::warm(states_in);
     let mut cursor = RansStreamCursor::default();
     rans_init_states_with_cursor(table, stream, prod, stride, &mut state, &mut cursor)
+}
+
+/// Decode byte symbols with a warm state buffer.
+pub fn rans_decode_bytes_into(
+    out: &mut [u8],
+    table: &RansDecodeTable,
+    stream: &[u8],
+    count: u32,
+    stride: usize,
+    states_in: [u64; 4],
+) -> Result<RansInitResult, RansInitError> {
+    let mut state = RansStateBuffer::warm(states_in);
+    let mut cursor = RansStreamCursor::default();
+    rans_decode_bytes_into_with_cursor(out, table, stream, count, stride, &mut state, &mut cursor)
 }
 
 /// Errors from the vertex coder's rANS decoder (`0x110e270`).
@@ -3755,10 +3809,26 @@ mod tests {
             0x0e1e9623a87cf343,
             0x01321a08545304,
         ];
+        let expected_bytes = hex_bytes(
+            "0101010101010101010101000000000001000000000000000000000000000000\
+             0000000000010000000000000001000001000000000000000000000000000100\
+             0000000000000000010000000000000000000000000000000000020000000100\
+             0000010000020000020001020002020202000000000000000000000000000000\
+             0000000000000000000000000000000000000100000000000000000000000000\
+             0000000200000000000000000001000000000000000000000000000000000000\
+             0000000000000000000000000000000000000000000000000000000000000000\
+             00000000",
+        );
         let init_stream =
             hex_bytes("1c6c79053929c95b0ce6a98f0bb0c472ab757821cbb49d0d44d69beb2784028b");
         let t = rans_spread(5, &INIT_FREQS);
         let r = rans_init_states(&t, &init_stream, 228, 1, ST_IN).unwrap();
+        assert_eq!(r.states, ST_OUT);
+        assert_eq!(r.stream_used, 24);
+
+        let mut out = vec![0u8; 228];
+        let r = rans_decode_bytes_into(&mut out, &t, &init_stream, 228, 1, ST_IN).unwrap();
+        assert_eq!(out, expected_bytes);
         assert_eq!(r.states, ST_OUT);
         assert_eq!(r.stream_used, 24);
 
@@ -3779,9 +3849,47 @@ mod tests {
             Err(RansInitError::ProdTooSmall)
         ));
         assert!(matches!(
-            rans_init_states(&t, &init_stream, 229, 1, ST_IN),
-            Err(RansInitError::UnsupportedProdTail)
+            rans_decode_bytes_into(&mut [0u8; 228], &t, &init_stream, 228, 0, ST_IN),
+            Err(RansInitError::ZeroStride)
         ));
+        assert!(matches!(
+            rans_decode_bytes_into(&mut [0u8; 227], &t, &init_stream, 228, 1, ST_IN),
+            Err(RansInitError::OutputTooSmall)
+        ));
+    }
+
+    /// Byte-output tail coverage for `0x110dfa0`.
+    ///
+    /// Provenance: `capture_rans_byte_decode.py`, Animal_Bass call 1:
+    /// `log=3,count=30,stride=1`, warm states, no renorm bytes consumed. The
+    /// `count & 3 == 2` tail writes lanes 0 and 1 after seven full groups.
+    #[test]
+    fn rans_decode_bytes_bass_tail_outputs_symbols() {
+        let table = RansDecodeTable {
+            log: 3,
+            step: vec![
+                458752, 458753, 458754, 458755, 458756, 458757, 458758, 65536,
+            ],
+            sym: vec![0, 0, 0, 0, 0, 0, 0, 1],
+        };
+        let states = [1002867111956613, 297734982922, 3174744965070, 1675156985512];
+        let mut out = vec![0xff; 30];
+
+        let result = rans_decode_bytes_into(&mut out, &table, &[], 30, 1, states).unwrap();
+
+        assert_eq!(
+            out,
+            hex_bytes("000000000000000001000000000000000000000000010000000000000000")
+        );
+        assert_eq!(
+            result,
+            RansInitResult {
+                states: [49227725862390, 14614913526, 1246709343325, 657827286397],
+                flag: 0xf,
+                stream_offset: 0,
+                stream_used: 0,
+            }
+        );
     }
 
     /// Cold-start + continuation for the generic four-state init (`0x110dfa0`).
