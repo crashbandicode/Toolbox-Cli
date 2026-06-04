@@ -643,6 +643,19 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec chunk 0 transform-tail cleanup
+**Committed:** chunk 0 code-quality cleanup landed in two behavior-preserving
+commits: `7a222df` DRYs the delta transform-tail cursor initialization and
+copy-run clone loop into shared helpers, and the follow-up sqrt-width comment
+commit documents the observed single-precision `fsqrt s0` / `frinti s0`
+instructions for `0x110aac0` and `0x110afb0`. Durable local evidence: the
+post-cleanup sample gate passed `cargo test --lib transform_tail` (27 tests)
+and `cargo test --test mc_dragonfly_bufb_assembly -- --ignored --nocapture`
+(Dragonfly writer-layer oracle still `15690/15696`, `first_diff=None`).
+Checkpoint gate passed: All green: 224 lib unit (incl. 78 mc::geometry) + all
+integration; clippy --all-targets clean; --no-default-features builds. Next:
+CP5a vertex attribute-table plus per-attribute driver from `.mc` payload bytes.
+
 ### 2026-06-04 - MeshCodec B2-CP4 chunk four-byte direct/delta writer
 **Committed:** B2-CP4 four-byte direct/delta writer chunk landed in the
 `0x10fde00` port commit, porting `0x10fde00` in `src/mc/geometry.rs` as

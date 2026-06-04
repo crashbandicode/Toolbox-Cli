@@ -4995,6 +4995,7 @@ pub fn transform_tail_i8x2_normal_into(
                 .and_then(|value| value.checked_sub(y * y))
                 .unwrap_or(-1)
                 .max(0);
+            // Game code uses single-precision `fsqrt s0` + `frinti s0` at 0x110ab38..0x110ab3c.
             let z = (remaining as f32).sqrt().round() as u32;
             let z = z.wrapping_add(u32::from(z_delta));
             let z = if z_sign == 1 { 0u32.wrapping_sub(z) } else { z } as u8;
@@ -5097,6 +5098,7 @@ pub fn transform_tail_pack10x3_delta_into(
                     .and_then(|value| value.checked_sub(y * y))
                     .unwrap_or(-1)
                     .max(0);
+                // Game code uses single-precision `fsqrt s0` + `frinti s0` at 0x110b034..0x110b038.
                 let z = (remaining as f32).sqrt().round() as u32;
                 let z = z.wrapping_add(u32::from(z_delta));
                 let z = if z_sign == 1 { 0u32.wrapping_sub(z) } else { z } & 0x03ff;
