@@ -2998,6 +2998,174 @@ pub fn transform_tail_copy4_into(
     )
 }
 
+/// Inputs for the two-byte delta-match transform tail (`0x10fbcc0`).
+pub struct TransformTailDelta2Spec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Match table at `[x0+0x10]`, indexed by emitted vertex.
+    pub matches: &'a [u32],
+    /// Direct literal source stream at `[x4]`.
+    pub source0: &'a [u8],
+    /// Direct literal second-byte stream at `[x4+8]`.
+    pub source1: &'a [u8],
+    /// Matched delta stream at `[x4+0x10]`.
+    pub source2: &'a [u8],
+}
+
+/// Source and table consumption from a delta-match transform tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransformTailDeltaUsage {
+    pub source0: usize,
+    pub source1: usize,
+    pub source2: usize,
+    pub match_entries: usize,
+}
+
+/// Errors from delta-match transform tails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransformTailDeltaError {
+    ZeroStride,
+    OutputTooSmall,
+    Source0TooSmall,
+    Source1TooSmall,
+    Source2TooSmall,
+    MatchTableTooSmall,
+    MatchBeforeOutput,
+    CopyBeforeOutput,
+    ArithmeticOverflow,
+}
+
+/// Apply the observed two-byte delta-match transform tail (`0x10fbcc0`).
+///
+/// Direct literals use source streams 0 and 1: byte 1 is copied from stream 1,
+/// and byte 0 is `source0 - byte1 - 1`. Matched literals use the match table's
+/// `entry >> 3` distance in vertices, add two source-2 deltas to the earlier
+/// output, and then advance the same strided cursor (`0x10fbd04..0x10fbd70`).
+pub fn transform_tail_delta2_into(
+    out: &mut [u8],
+    spec: TransformTailDelta2Spec<'_>,
+) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
+    if spec.output_stride == 0 {
+        return Err(TransformTailDeltaError::ZeroStride);
+    }
+    let mut cursor = spec
+        .block_index
+        .checked_mul(spec.output_stride)
+        .and_then(|offset| offset.checked_add(spec.out_offset))
+        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut match_index = 0usize;
+    let mut source0_pos = 0usize;
+    let mut source1_pos = 0usize;
+    let mut source2_pos = 0usize;
+    let mut chunk = [0u8; 2];
+
+    for record in spec.records {
+        for _ in 0..record.literal_count {
+            let match_entry = *spec
+                .matches
+                .get(match_index)
+                .ok_or(TransformTailDeltaError::MatchTableTooSmall)?;
+            let cursor_end = cursor
+                .checked_add(2)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let (first, second) = if match_entry == 0 {
+                let second = *spec
+                    .source1
+                    .get(source1_pos)
+                    .ok_or(TransformTailDeltaError::Source1TooSmall)?;
+                let first_raw = *spec
+                    .source0
+                    .get(source0_pos)
+                    .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                source0_pos += 1;
+                source1_pos += 1;
+                (first_raw.wrapping_sub(second).wrapping_sub(1), second)
+            } else {
+                let match_units = (match_entry >> 3) as usize;
+                let match_distance = match_units
+                    .checked_mul(spec.output_stride)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let source = cursor
+                    .checked_sub(match_distance)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let source_end = source
+                    .checked_add(2)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let base = out
+                    .get(source..source_end)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let source2_end = source2_pos
+                    .checked_add(2)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let delta = spec
+                    .source2
+                    .get(source2_pos..source2_end)
+                    .ok_or(TransformTailDeltaError::Source2TooSmall)?;
+                source2_pos = source2_end;
+                (
+                    delta[0].wrapping_add(base[0]),
+                    delta[1].wrapping_add(base[1]),
+                )
+            };
+            let slot = out
+                .get_mut(cursor..cursor_end)
+                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+            slot[0] = first;
+            slot[1] = second;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            match_index += 1;
+        }
+
+        for _ in 0..record.copy_count {
+            if record.back_distance == 0 {
+                return Err(TransformTailDeltaError::CopyBeforeOutput);
+            }
+            let source = cursor
+                .checked_sub(record.back_distance)
+                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
+            let source_end = source
+                .checked_add(2)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let cursor_end = cursor
+                .checked_add(2)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let value = out
+                .get(source..source_end)
+                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
+            chunk.copy_from_slice(value);
+            let slot = out
+                .get_mut(cursor..cursor_end)
+                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+            slot.copy_from_slice(&chunk);
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        }
+
+        match_index = match_index
+            .checked_add(usize::from(record.copy_count))
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        if match_index > spec.matches.len() {
+            return Err(TransformTailDeltaError::MatchTableTooSmall);
+        }
+    }
+
+    Ok(TransformTailDeltaUsage {
+        source0: source0_pos,
+        source1: source1_pos,
+        source2: source2_pos,
+        match_entries: match_index,
+    })
+}
+
 fn transform_tail_copy_units_into(
     out: &mut [u8],
     spec: TransformTailCopyUnitsSpec<'_>,
@@ -5179,6 +5347,118 @@ mod tests {
         }
     }
 
+    /// Transform tail `0x10fbcc0`: two-byte direct and matched deltas.
+    ///
+    /// Provenance: `capture_transform_tails.py`, Animal_Bass `0x10fbcc0` call,
+    /// first record from entry `0x0a000802`: `(276,6,20)`. This covers direct
+    /// literals, match-table literals, and the copy loop; the replay script
+    /// covers the full 1-call population including the later zero-count records.
+    #[test]
+    fn transform_tail_delta2_bass_direct_match_and_copy() {
+        let source0 = hex_bytes(concat!(
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000000000",
+        ));
+        let source1 = hex_bytes(concat!(
+            "000000000000000000000000000000000000000000cc000000000000b2a6000000000000000000000000000000000000",
+            "00000000000000000000cc00cc00000000000000000000000000000000000000000000000000000000001a001a80bfbf",
+            "1a801a000000000000001a0000008000bf00bf000000000000001a1a000000000000cc",
+        ));
+        let source2 = hex_bytes(concat!(
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "0000",
+        ));
+        let matches = hex_u32_words(concat!(
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000003100000031000000000000003000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000006101000000000000",
+            "790100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "000000009901000091010000a10100009901000099010000990100009901000089000000810000009100000089000000",
+            "890000008900000081000000910000008900000089000000390200003902000039020000590200006902000081020000",
+            "810200007901000088010000990100008801000089010000880100005202000000000000000000000000000000000000",
+            "000000005800000058000000290200005002000060020000290200002802000028020000890200005002000060020000",
+            "89020000300000008802000098000000fb020000a1000000a0000000a1000000a1000000a00000009002000010030000",
+            "110300001003000031030000400300005903000059030000a102000099020000a8020000a002000000040000a0020000",
+            "18040000a0020000a1020000e80200000000000048000000000000000000000000000000080300000000000000000000",
+            "000000000000000000000000280300000000000000000000b10400000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000300400002001000000000000000000004004000000000000b8010000f8010000a8010000b8010000",
+            "b0010000b1010000b001000020020000b0010000b1010000b1010000b0010000b101000038020000b1010000b1010000",
+            "60060000b1010000b1010000b1010000b1010000b1010000b1010000b1010000b1010000b1010000b1010000b1010000",
+            "b1010000b0010000b1010000b1010000b1010000b1010000b0010000b1010000b1010000b1010000b1010000b1010000",
+            "b1010000b1010000b1010000b1010000b1010000b0010000b0010000b101000040030000a9010000a801000048030000",
+            "a8010000a801000000000000500000006800000000000000000000000000000000000000980000000000000000000000",
+            "c00000000000000000000000e0000000f000000000000000000000000000000000000000000000003801000000000000",
+            "000000000000000068010000000000007001000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000",
+        ));
+        let records = [TransformTailRecord {
+            literal_count: 276,
+            copy_count: 6,
+            back_distance: 20,
+        }];
+        let expected_lane = hex_bytes(concat!(
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff0033ccff00ff00",
+            "ff00ff00ff00ff004db259a6ff00ff00ff00ff004db2ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff0033ccff00",
+            "33ccff00ff00ff00ff00ff00ff004db2ff00ff00ff00ff00ff004db259a6ff00ff00ff0033ccff0033ccff00ff0033cc",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00e51aff00e51a7f8040bf40bfe51a7f80e51aff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00ff00ff00ff00ff00ff00e51aff00e51a7f8040bf40bfe51a7f80e51aff00ff00ff00ff00ff00ff00ff00ff00",
+            "ff00ff00e51aff00e51aff00ff00ff007f807f80ff0040bf40bfff0040bf40bf7f80ff00ff00ff00ff00ff00e51aff00",
+            "ff00e51aff00e51aff00ff00ff00ff00ff00ff00ff0033ccff0033ccff0033ccff0033cc",
+        ));
+        let mut out = vec![0xee; (expected_lane.len() / 2) * 10];
+
+        let usage = transform_tail_delta2_into(
+            &mut out,
+            TransformTailDelta2Spec {
+                output_stride: 10,
+                block_index: 0,
+                out_offset: 0,
+                records: &records,
+                matches: &matches,
+                source0: &source0,
+                source1: &source1,
+                source2: &source2,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            usage,
+            TransformTailDeltaUsage {
+                source0: 131,
+                source1: 131,
+                source2: 290,
+                match_entries: 282,
+            }
+        );
+        for (unit_index, expected) in expected_lane.chunks_exact(2).enumerate() {
+            let base = unit_index * 10;
+            assert_eq!(&out[base..base + 2], expected);
+        }
+        for (index, &byte) in out.iter().enumerate() {
+            if index % 10 >= 2 {
+                assert_eq!(byte, 0xee, "non-lane byte {index} changed");
+            }
+        }
+        assert_eq!(&out[0..2], &[0xff, 0x00], "direct literal uses minus one");
+        assert_eq!(&out[34 * 10..34 * 10 + 2], &[0x4d, 0xb2]);
+        assert_eq!(&out[281 * 10..281 * 10 + 2], &[0x33, 0xcc]);
+    }
+
     #[test]
     fn transform_tail_copy1_rejects_malformed_inputs() {
         let records = [TransformTailRecord {
@@ -5427,10 +5707,244 @@ mod tests {
         );
     }
 
+    #[test]
+    fn transform_tail_delta2_allows_observed_zero_literal_and_zero_copy() {
+        let zero_literal = [TransformTailRecord {
+            literal_count: 0,
+            copy_count: 7,
+            back_distance: 1780,
+        }];
+        let mut out = vec![0xee; 1842];
+        for unit in 0..7 {
+            let base = unit * 10;
+            out[base] = unit as u8;
+            out[base + 1] = 0x80 | unit as u8;
+        }
+        let usage = transform_tail_delta2_into(
+            &mut out,
+            TransformTailDelta2Spec {
+                output_stride: 10,
+                block_index: 0,
+                out_offset: 1780,
+                records: &zero_literal,
+                matches: &[0; 7],
+                source0: &[],
+                source1: &[],
+                source2: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            usage,
+            TransformTailDeltaUsage {
+                source0: 0,
+                source1: 0,
+                source2: 0,
+                match_entries: 7,
+            }
+        );
+        for unit in 0..7 {
+            let base = 1780 + unit * 10;
+            assert_eq!(&out[base..base + 2], &[unit as u8, 0x80 | unit as u8]);
+        }
+
+        let zero_copy = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 0,
+            back_distance: 0,
+        }];
+        let mut out = vec![0xee; 10];
+        let usage = transform_tail_delta2_into(
+            &mut out,
+            TransformTailDelta2Spec {
+                output_stride: 10,
+                block_index: 0,
+                out_offset: 0,
+                records: &zero_copy,
+                matches: &[0],
+                source0: &[0],
+                source1: &[0],
+                source2: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            usage,
+            TransformTailDeltaUsage {
+                source0: 1,
+                source1: 1,
+                source2: 0,
+                match_entries: 1,
+            }
+        );
+        assert_eq!(&out[0..2], &[0xff, 0x00]);
+    }
+
+    #[test]
+    fn transform_tail_delta2_rejects_malformed_inputs() {
+        let direct = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 0,
+            back_distance: 0,
+        }];
+        let mut out = [0u8; 2];
+        assert_eq!(
+            transform_tail_delta2_into(
+                &mut out,
+                TransformTailDelta2Spec {
+                    output_stride: 0,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    matches: &[0],
+                    source0: &[0],
+                    source1: &[0],
+                    source2: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::ZeroStride)
+        );
+        assert_eq!(
+            transform_tail_delta2_into(
+                &mut out,
+                TransformTailDelta2Spec {
+                    output_stride: 2,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    matches: &[],
+                    source0: &[0],
+                    source1: &[0],
+                    source2: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::MatchTableTooSmall)
+        );
+        assert_eq!(
+            transform_tail_delta2_into(
+                &mut out,
+                TransformTailDelta2Spec {
+                    output_stride: 2,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    matches: &[0],
+                    source0: &[],
+                    source1: &[0],
+                    source2: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::Source0TooSmall)
+        );
+        assert_eq!(
+            transform_tail_delta2_into(
+                &mut out,
+                TransformTailDelta2Spec {
+                    output_stride: 2,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    matches: &[0],
+                    source0: &[0],
+                    source1: &[],
+                    source2: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::Source1TooSmall)
+        );
+
+        let matched = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 0,
+            back_distance: 0,
+        }];
+        assert_eq!(
+            transform_tail_delta2_into(
+                &mut out,
+                TransformTailDelta2Spec {
+                    output_stride: 2,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &matched,
+                    matches: &[8],
+                    source0: &[],
+                    source1: &[],
+                    source2: &[0, 0],
+                },
+            ),
+            Err(TransformTailDeltaError::MatchBeforeOutput)
+        );
+
+        let mut matched_out = [0u8; 12];
+        assert_eq!(
+            transform_tail_delta2_into(
+                &mut matched_out,
+                TransformTailDelta2Spec {
+                    output_stride: 10,
+                    block_index: 0,
+                    out_offset: 10,
+                    records: &matched,
+                    matches: &[8],
+                    source0: &[],
+                    source1: &[],
+                    source2: &[0],
+                },
+            ),
+            Err(TransformTailDeltaError::Source2TooSmall)
+        );
+
+        let mut short_out = [0u8; 1];
+        assert_eq!(
+            transform_tail_delta2_into(
+                &mut short_out,
+                TransformTailDelta2Spec {
+                    output_stride: 2,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    matches: &[0],
+                    source0: &[0],
+                    source1: &[0],
+                    source2: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::OutputTooSmall)
+        );
+
+        let copy_first = [TransformTailRecord {
+            literal_count: 0,
+            copy_count: 1,
+            back_distance: 1,
+        }];
+        assert_eq!(
+            transform_tail_delta2_into(
+                &mut out,
+                TransformTailDelta2Spec {
+                    output_stride: 2,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &copy_first,
+                    matches: &[0],
+                    source0: &[],
+                    source1: &[],
+                    source2: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::CopyBeforeOutput)
+        );
+    }
+
     fn hex_bytes(s: &str) -> Vec<u8> {
         let h: Vec<u8> = s.bytes().filter(|b| b.is_ascii_hexdigit()).collect();
         h.chunks(2)
             .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    fn hex_u32_words(s: &str) -> Vec<u32> {
+        hex_bytes(s)
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect()
     }
 
