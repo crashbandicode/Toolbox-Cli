@@ -643,6 +643,19 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec B2-CP4 state-5 writer target capture
+**Captured:** `local-assets/re/capture_state5_writer_targets.py` now records the
+actual state-5 indirect writer target for every observed table column across
+Bear, Bass, and Dragonfly. This confirms the early bufB/oracle plan: the updated
+Dragonfly sparse probe includes the newly ported `0x10fdc00` writer and matches
+**2615/2615** touched oracle bytes, but full bufB still fails first at byte 2.
+That byte belongs to Dragonfly current 0, target `0x1100c90`, `bufB+0`, stride
+10, record count 1, source count 2. Other observed unported targets are
+`0x1103ab0`, `0x110aac0`, `0x110afb0`, `0x10fde00`, and Bass-only
+`0x11033e0`, but they should wait until the oracle diff proves them needed.
+Next: enumerate/replay `0x1100c90` across the observed calls and port it only
+after the Python replay is byte-exact.
+
 ### 2026-06-04 - MeshCodec B2-CP4 chunk Bear direct/delta writer
 **Committed:** B2-CP4 three-byte direct/delta writer chunk landed in `04c09d0`,
 porting the now-proven `0x10fdcf0` writer in `src/mc/geometry.rs` as
