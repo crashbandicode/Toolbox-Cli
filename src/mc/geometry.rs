@@ -4378,6 +4378,43 @@ pub enum VertexAttributeInterstageError {
     },
 }
 
+/// Inputs for the writer-table call at `0x10f93d8`.
+pub struct VertexAttributeWriterCall<'a> {
+    /// Wrapper output for the current attribute.
+    pub transform: &'a VertexAttributeTransform,
+    /// Source streams and target metadata from `vertex_attribute_interstage_sources`.
+    pub interstage: &'a VertexAttributeInterstage,
+    /// Match table read through the writer-table state at `x0+0x10`.
+    pub matches: &'a [u32],
+    /// Block index stored at `[x0+0xa0]`.
+    pub block_index: usize,
+}
+
+/// Source/table consumption reported by the selected writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexAttributeWriterUsage {
+    /// Bytes consumed from up to four source streams.
+    pub sources: [usize; 4],
+    /// Match-table entries consumed by delta writers.
+    pub match_entries: usize,
+}
+
+/// Errors from the writer-table dispatch at `0x10f93d8`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VertexAttributeWriterError {
+    /// The captured writer target has not been ported yet.
+    UnportedWriter(VertexAttributeWriterTarget),
+    /// The selected writer needed a source stream that setup did not produce.
+    MissingSource {
+        target: VertexAttributeWriterTarget,
+        index: usize,
+    },
+    /// Fixed-width copy writer rejected its inputs.
+    Copy(TransformTailCopyError),
+    /// Delta/match writer rejected its inputs.
+    Delta(TransformTailDeltaError),
+}
+
 /// Errors from the observed vertex attribute driver setup/loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VertexAttributeDriverError {
@@ -4874,6 +4911,292 @@ pub fn vertex_attribute_interstage_sources(
         descriptors,
         sources,
     })
+}
+
+fn vertex_transform_tail_records(records: &[[u32; 2]]) -> Vec<TransformTailRecord> {
+    records
+        .iter()
+        .map(|record| TransformTailRecord {
+            literal_count: (record[0] & 0xffff) as u16,
+            copy_count: (record[0] >> 16) as u16,
+            back_distance: record[1] as usize,
+        })
+        .collect()
+}
+
+fn vertex_writer_source<'a>(
+    interstage: &'a VertexAttributeInterstage,
+    index: usize,
+) -> Result<&'a [u8], VertexAttributeWriterError> {
+    interstage
+        .sources
+        .get(index)
+        .map(|source| source.bytes.as_slice())
+        .ok_or(VertexAttributeWriterError::MissingSource {
+            target: interstage.writer,
+            index,
+        })
+}
+
+fn vertex_copy_usage(consumed: usize) -> VertexAttributeWriterUsage {
+    VertexAttributeWriterUsage {
+        sources: [consumed, 0, 0, 0],
+        match_entries: 0,
+    }
+}
+
+fn vertex_delta_usage(usage: TransformTailDeltaUsage) -> VertexAttributeWriterUsage {
+    VertexAttributeWriterUsage {
+        sources: [usage.source0, usage.source1, usage.source2, 0],
+        match_entries: usage.match_entries,
+    }
+}
+
+fn vertex_pack10_usage(usage: TransformTailPack10Usage) -> VertexAttributeWriterUsage {
+    VertexAttributeWriterUsage {
+        sources: [usage.source0, usage.source1, usage.source2, usage.source3],
+        match_entries: usage.match_entries,
+    }
+}
+
+/// Apply the writer target selected by the vertex interstage dispatch table.
+///
+/// This mirrors the indirect call through `0x39ba570` at `0x10f93d8`: the
+/// current table entry supplies stride/out offset, `x2` supplies run/copy
+/// records, `x4` supplies the materialized sources, and the writer-table state
+/// supplies the match table through `x0+0x10`. The unported `0x11033e0` target
+/// remains a typed guard.
+pub fn vertex_attribute_apply_writer(
+    out: &mut [u8],
+    spec: VertexAttributeWriterCall<'_>,
+) -> Result<VertexAttributeWriterUsage, VertexAttributeWriterError> {
+    let output_stride = spec.transform.table_entry.width_stride() as usize;
+    let out_offset = spec.transform.out_offset as usize;
+    let records = vertex_transform_tail_records(&spec.transform.records);
+
+    match spec.interstage.writer {
+        VertexAttributeWriterTarget::Copy1 => {
+            let source = vertex_writer_source(spec.interstage, 0)?;
+            transform_tail_copy1_into(
+                out,
+                TransformTailCopy1Spec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    source,
+                },
+            )
+            .map(vertex_copy_usage)
+            .map_err(VertexAttributeWriterError::Copy)
+        }
+        VertexAttributeWriterTarget::Copy2 => {
+            let source = vertex_writer_source(spec.interstage, 0)?;
+            transform_tail_copy2_into(
+                out,
+                TransformTailCopy2Spec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    source,
+                },
+            )
+            .map(vertex_copy_usage)
+            .map_err(VertexAttributeWriterError::Copy)
+        }
+        VertexAttributeWriterTarget::Copy4 => {
+            let source = vertex_writer_source(spec.interstage, 0)?;
+            transform_tail_copy4_into(
+                out,
+                TransformTailCopy4Spec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    source,
+                },
+            )
+            .map(vertex_copy_usage)
+            .map_err(VertexAttributeWriterError::Copy)
+        }
+        VertexAttributeWriterTarget::Delta2 => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            let source2 = vertex_writer_source(spec.interstage, 2)?;
+            transform_tail_delta2_into(
+                out,
+                TransformTailDelta2Spec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                    source2,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::Delta3 => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            let source2 = vertex_writer_source(spec.interstage, 2)?;
+            transform_tail_delta3_into(
+                out,
+                TransformTailDelta3Spec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                    source2,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::Delta2Direct => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            transform_tail_delta2_direct_into(
+                out,
+                TransformTailDelta2DirectSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::Delta3Direct => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            transform_tail_delta3_direct_into(
+                out,
+                TransformTailDelta3DirectSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::Delta4Direct => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            transform_tail_delta4_direct_into(
+                out,
+                TransformTailDelta4DirectSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::U16x3Delta => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            transform_tail_u16x3_delta_into(
+                out,
+                TransformTailU16x3DeltaSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::UnportedU16x2Direct => {
+            Err(VertexAttributeWriterError::UnportedWriter(
+                VertexAttributeWriterTarget::UnportedU16x2Direct,
+            ))
+        }
+        VertexAttributeWriterTarget::U16x2Delta => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            transform_tail_u16x2_delta_into(
+                out,
+                TransformTailU16x2DeltaSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::I8x2Normal => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            let source2 = vertex_writer_source(spec.interstage, 2)?;
+            transform_tail_i8x2_normal_into(
+                out,
+                TransformTailI8x2NormalSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    source0,
+                    source1,
+                    source2,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::Pack10x3Delta => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            let source2 = vertex_writer_source(spec.interstage, 2)?;
+            let source3 = vertex_writer_source(spec.interstage, 3)?;
+            transform_tail_pack10x3_delta_into(
+                out,
+                TransformTailPack10x3DeltaSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                    source2,
+                    source3,
+                },
+            )
+            .map(vertex_pack10_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+    }
 }
 
 /// One run/copy record consumed by the `0x10fc5e0` byte-copy transform tail.
@@ -9788,6 +10111,63 @@ mod tests {
         );
     }
 
+    /// Writer-table dispatch (`0x10f93d8`) into the already-ported `0x10fc680`.
+    ///
+    /// Provenance: `capture_vertex_interstage.py` plus
+    /// `capture_transform_tails.py`, Animal_Dragonfly current 2. The wrapper
+    /// records are `(1,435,10)`, `(1,77,760)`, `(1,8,100)` and the interstage
+    /// materializes the single source stream `ff007f807f80`.
+    #[test]
+    fn vertex_attribute_writer_dispatch_dragonfly_copy2() {
+        let transform = VertexAttributeTransform {
+            index: 2,
+            table_entry: ByteGroupTransformTableEntry { raw: 0x0a00_0802 },
+            out_offset: 8,
+            column: 8,
+            limit: 523,
+            ret: 3,
+            records: hex_width_records("0100b3010a00000001004d00f80200000100080064000000"),
+        };
+        let interstage = VertexAttributeInterstage {
+            dispatch: 16,
+            writer: VertexAttributeWriterTarget::Copy2,
+            descriptors: vec![VertexAttributeSourceDescriptor {
+                element_shift: 0,
+                group_stride: 2,
+                count: 3,
+            }],
+            sources: vec![VertexAttributeSource {
+                selector: 3,
+                bytes: hex_bytes("ff007f807f80"),
+            }],
+        };
+        let mut out = vec![0xee; 5230];
+
+        let usage = vertex_attribute_apply_writer(
+            &mut out,
+            VertexAttributeWriterCall {
+                transform: &transform,
+                interstage: &interstage,
+                matches: &[],
+                block_index: 0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            usage,
+            VertexAttributeWriterUsage {
+                sources: [6, 0, 0, 0],
+                match_entries: 0,
+            }
+        );
+        assert_eq!(&out[8..10], &hex_bytes("ff00"));
+        assert_eq!(&out[18..20], &hex_bytes("ff00"));
+        assert_eq!(&out[4368..4370], &hex_bytes("7f80"));
+        assert_eq!(&out[5148..5150], &hex_bytes("7f80"));
+        assert_eq!(out[7], 0xee, "out_offset is byte-based, not contiguous");
+    }
+
     #[test]
     fn vertex_attribute_driver_rejects_unobserved_and_malformed_inputs() {
         let mut transform_state = ByteGroupTransformState {
@@ -10001,6 +10381,92 @@ mod tests {
         assert_eq!(
             vertex_attribute_interstage_sources(&mut state, &payload, valid_entry, 3),
             Err(VertexAttributeInterstageError::VarintTooLong)
+        );
+    }
+
+    #[test]
+    fn vertex_attribute_writer_dispatch_rejects_unported_and_malformed_inputs() {
+        let transform = VertexAttributeTransform {
+            index: 0,
+            table_entry: ByteGroupTransformTableEntry { raw: 0x0a00_0802 },
+            out_offset: 0,
+            column: 0,
+            limit: 1,
+            ret: 1,
+            records: vec![[1, 0]],
+        };
+        let mut out = vec![0u8; 16];
+        let missing_source = VertexAttributeInterstage {
+            dispatch: 16,
+            writer: VertexAttributeWriterTarget::Copy2,
+            descriptors: Vec::new(),
+            sources: Vec::new(),
+        };
+        assert_eq!(
+            vertex_attribute_apply_writer(
+                &mut out,
+                VertexAttributeWriterCall {
+                    transform: &transform,
+                    interstage: &missing_source,
+                    matches: &[],
+                    block_index: 0,
+                },
+            ),
+            Err(VertexAttributeWriterError::MissingSource {
+                target: VertexAttributeWriterTarget::Copy2,
+                index: 0,
+            })
+        );
+
+        let unported = VertexAttributeInterstage {
+            dispatch: 76,
+            writer: VertexAttributeWriterTarget::UnportedU16x2Direct,
+            descriptors: Vec::new(),
+            sources: Vec::new(),
+        };
+        assert_eq!(
+            vertex_attribute_apply_writer(
+                &mut out,
+                VertexAttributeWriterCall {
+                    transform: &transform,
+                    interstage: &unported,
+                    matches: &[],
+                    block_index: 0,
+                },
+            ),
+            Err(VertexAttributeWriterError::UnportedWriter(
+                VertexAttributeWriterTarget::UnportedU16x2Direct
+            ))
+        );
+
+        let delta = VertexAttributeInterstage {
+            dispatch: 30,
+            writer: VertexAttributeWriterTarget::Delta2Direct,
+            descriptors: Vec::new(),
+            sources: vec![
+                VertexAttributeSource {
+                    selector: 3,
+                    bytes: vec![1, 2],
+                },
+                VertexAttributeSource {
+                    selector: 3,
+                    bytes: vec![3, 4],
+                },
+            ],
+        };
+        assert_eq!(
+            vertex_attribute_apply_writer(
+                &mut out,
+                VertexAttributeWriterCall {
+                    transform: &transform,
+                    interstage: &delta,
+                    matches: &[],
+                    block_index: 0,
+                },
+            ),
+            Err(VertexAttributeWriterError::Delta(
+                TransformTailDeltaError::MatchTableTooSmall
+            ))
         );
     }
 

@@ -643,6 +643,25 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec CP5a vertex writer dispatch
+**Committed:** CP5a ports the writer-table boundary at `0x10f93d8` as
+`vertex_attribute_apply_writer`. The helper converts wrapper records into the
+run/copy record shape, consumes source streams produced by
+`vertex_attribute_interstage_sources`, accepts the writer match table
+explicitly from the caller, and delegates to the already-ported transform-tail
+writers. Durable local evidence: `verify_vertex_writer_dispatch.py` audits
+**25/25** captured writer targets, with **24/25** routed to supported Rust
+tails and the Bass-only `0x11033e0` target guarded. Fixture-free Rust coverage
+uses Animal_Dragonfly current 2 (`0x10fc680`) to prove writer dispatch, source
+consumption, and strided output positions. Defensive tests reject missing
+sources, the guarded writer target, and too-short match tables. Per-chunk
+samples green: `cargo test --lib vertex_attribute` (6 tests) and
+`cargo test --lib transform_tail` (27 tests). Latest checkpoint gate remains:
+All green: 226 lib unit (incl. 80 mc::geometry) + all integration; clippy
+--all-targets clean; --no-default-features builds. Next: expose the real
+`x0+0x10` match-table storage from the wrapper/driver state so the full
+per-attribute loop can call writers end-to-end.
+
 ### 2026-06-04 - MeshCodec CP5a vertex interstage sources
 **Committed:** CP5a ports the observed inter-wrapper dispatch/source setup
 slice at `0x10f92c8..0x10f9394` in `src/mc/geometry.rs` as
