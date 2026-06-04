@@ -643,6 +643,20 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec B2-CP4 early Dragonfly bufB probe
+**Probe complete:** after `98334d2`, stopped adding leaves and ran the requested
+early bufB/oracle slice through `local-assets/re/probe_bufb_dragonfly.py`.
+Dragonfly table entry 2 has `0x10fb2e0` call 2 records matching the downstream
+`0x10fc680` copy2 tail exactly; replay touches **1046** bufB byte positions at
+`bufB+8`, stride 10, and all touched bytes match the final oracle. Dragonfly
+table entry 7 has the early wrapper record `[523, 0]` matching the downstream
+`0x10fc5e0` copy1 tail exactly; replay touches **523** positions at
+`bufB+5247`, stride 20, and all touched bytes match oracle. Sparse assembly
+with just those two already-ported tails matches **1569/1569** touched oracle
+bytes but full bufB still fails at byte 2. The diff points to the inline/simple
+state-5 transform columns after `0x10fb2e0` as the next proven-needed path, not
+`mode_other`, `mode3`, or additional non-observed transform leaves.
+
 ### 2026-06-04 - MeshCodec B2-CP4 chunk byte-group transform wrapper
 **Committed:** B2-CP4 transform-wrapper chunk landed in `98334d2`, porting the
 observed `0x10fb2e0` paths in `src/mc/geometry.rs`. The wrapper now handles the
