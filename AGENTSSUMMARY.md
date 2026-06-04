@@ -643,6 +643,28 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec B2-CP4 chunk four-byte direct/delta writer
+**Committed:** B2-CP4 four-byte direct/delta writer chunk landed in the
+`0x10fde00` port commit, porting `0x10fde00` in `src/mc/geometry.rs` as
+`transform_tail_delta4_direct_into`. Durable local evidence:
+`capture_transform_tail_10fde00.py` enumerated the single observed call
+(Dragonfly current 8), and `verify_transform_tail_10fde00.py` replayed **1/1**.
+Coverage totals are direct literals 17, matched literals 146, copy units 360,
+match entries 523, source0 68 bytes, and source1 584 bytes. Discriminator:
+no-match-delta fails 1/1. Rust coverage: fixture-free Dragonfly full-call
+golden plus malformed guards; `cargo test --lib transform_tail_delta4_direct`
+passed 2 tests, `cargo test --lib transform_tail` passed 27 tests,
+`cargo test --test mc_dragonfly_bufb_assembly -- --ignored --nocapture` passed
+1 ignored-local-oracle test, and `cargo test --test mc_dragonfly_bufb_assembly`
+compiled the ignored target. Updated Dragonfly sparse bufB probe now matches
+**15690/15690** touched oracle bytes and full sparse bufB equals the oracle
+(`first_diff=None`). The ignored Rust integration test assembles Dragonfly
+bufB from the ported writers and reports first-diff offset plus writer `0xADDR`
+on failure. All green: 224 lib unit (incl. 78 mc::geometry) + all integration;
+clippy --all-targets clean; --no-default-features builds. Next after commit:
+move to the next user-approved batch; no standalone ledger commit should be
+created for this chunk.
+
 ### 2026-06-04 - MeshCodec B2-CP4 chunk three-byte vector writer
 **Committed:** B2-CP4 three-byte vector writer chunk landed in the `0x110aac0`
 port commit, porting `0x110aac0` in `src/mc/geometry.rs` as
