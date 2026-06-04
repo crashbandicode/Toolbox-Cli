@@ -643,6 +643,25 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec B2-CP4 chunk two-u16 delta writer
+**Committed:** B2-CP4 two-u16 delta writer chunk landed in this commit, porting
+`0x1103ab0` in `src/mc/geometry.rs` as
+`transform_tail_u16x2_delta_into`. Durable local evidence:
+`capture_transform_tail_1103ab0.py` enumerated **4** observed calls
+(Bear current 4, Bass current 4, Dragonfly currents 4 and 5), and
+`verify_transform_tail_1103ab0.py` replayed **4/4**. Coverage totals are seed
+literals 4, zero-match previous-row literals 1252, matched literals 2430, copy
+units 1246, match entries 4932, source0 5024 bytes, and source1 9720 bytes.
+Discriminators: no-seed-special fails 4/4 and zero-match-direct fails 4/4.
+Rust coverage: fixture-free Dragonfly current-4 first-record golden plus
+malformed guards; `cargo test --lib transform_tail_u16x2_delta` passed 2 tests,
+`cargo test --lib transform_tail` passed 23 tests, and `cargo build` passed.
+Updated Dragonfly sparse bufB probe now matches **12029/12029** touched oracle
+bytes; full bufB first diff moved to byte 5244, which maps to Dragonfly current
+6 at `bufB+5244`, target `0x110aac0`. Next after commit: enumerate/replay
+`0x110aac0`. Per current user instruction, no standalone ledger commit should
+be created for this chunk.
+
 ### 2026-06-04 - MeshCodec B2-CP4 chunk packed 10-bit writer
 **Committed:** B2-CP4 packed 10-bit writer chunk landed in `80b3675`, porting
 `0x110afb0` in `src/mc/geometry.rs` as
