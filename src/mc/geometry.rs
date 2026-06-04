@@ -4644,6 +4644,63 @@ fn pack10_matched_component(previous: u32, delta: u16, sign_bit: u32) -> u32 {
         & 0x03ff
 }
 
+#[inline]
+fn transform_tail_delta_cursor_init(
+    block_index: usize,
+    output_stride: usize,
+    out_offset: usize,
+) -> Result<usize, TransformTailDeltaError> {
+    if output_stride == 0 {
+        return Err(TransformTailDeltaError::ZeroStride);
+    }
+    block_index
+        .checked_mul(output_stride)
+        .and_then(|offset| offset.checked_add(out_offset))
+        .ok_or(TransformTailDeltaError::ArithmeticOverflow)
+}
+
+fn copy_run_units(
+    out: &mut [u8],
+    cursor: &mut usize,
+    output_stride: usize,
+    unit_size: usize,
+    back_distance: usize,
+    copy_count: u16,
+) -> Result<(), TransformTailDeltaError> {
+    let mut chunk = [0u8; 8];
+    let scratch = chunk
+        .get_mut(..unit_size)
+        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+
+    for _ in 0..copy_count {
+        if back_distance == 0 {
+            return Err(TransformTailDeltaError::CopyBeforeOutput);
+        }
+        let source = cursor
+            .checked_sub(back_distance)
+            .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
+        let source_end = source
+            .checked_add(unit_size)
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        let cursor_end = cursor
+            .checked_add(unit_size)
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        let value = out
+            .get(source..source_end)
+            .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
+        scratch.copy_from_slice(value);
+        let slot = out
+            .get_mut(*cursor..cursor_end)
+            .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+        slot.copy_from_slice(scratch);
+        *cursor = cursor
+            .checked_add(output_stride)
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    }
+
+    Ok(())
+}
+
 /// Apply the observed two-byte direct/delta transform tail (`0x10fdc00`).
 ///
 /// Direct literals copy two bytes from source stream 0. Matched literals use the
@@ -4655,18 +4712,11 @@ pub fn transform_tail_delta2_direct_into(
     out: &mut [u8],
     spec: TransformTailDelta2DirectSpec<'_>,
 ) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
-    if spec.output_stride == 0 {
-        return Err(TransformTailDeltaError::ZeroStride);
-    }
-    let mut cursor = spec
-        .block_index
-        .checked_mul(spec.output_stride)
-        .and_then(|offset| offset.checked_add(spec.out_offset))
-        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
     let mut match_index = 0usize;
     let mut source0_pos = 0usize;
     let mut source1_pos = 0usize;
-    let mut chunk = [0u8; 2];
 
     for record in spec.records {
         for _ in 0..record.literal_count {
@@ -4726,31 +4776,14 @@ pub fn transform_tail_delta2_direct_into(
             match_index += 1;
         }
 
-        for _ in 0..record.copy_count {
-            if record.back_distance == 0 {
-                return Err(TransformTailDeltaError::CopyBeforeOutput);
-            }
-            let source = cursor
-                .checked_sub(record.back_distance)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            let source_end = source
-                .checked_add(2)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let cursor_end = cursor
-                .checked_add(2)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let value = out
-                .get(source..source_end)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            chunk.copy_from_slice(value);
-            let slot = out
-                .get_mut(cursor..cursor_end)
-                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
-            slot.copy_from_slice(&chunk);
-            cursor = cursor
-                .checked_add(spec.output_stride)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-        }
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            2,
+            record.back_distance,
+            record.copy_count,
+        )?;
 
         match_index = match_index
             .checked_add(usize::from(record.copy_count))
@@ -4780,18 +4813,11 @@ pub fn transform_tail_u16x2_delta_into(
     out: &mut [u8],
     spec: TransformTailU16x2DeltaSpec<'_>,
 ) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
-    if spec.output_stride == 0 {
-        return Err(TransformTailDeltaError::ZeroStride);
-    }
-    let mut cursor = spec
-        .block_index
-        .checked_mul(spec.output_stride)
-        .and_then(|offset| offset.checked_add(spec.out_offset))
-        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
     let mut match_index = 0usize;
     let mut source0_pos = 0usize;
     let mut source1_pos = 0usize;
-    let mut chunk = [0u8; 4];
 
     for record in spec.records {
         for _ in 0..record.literal_count {
@@ -4890,31 +4916,14 @@ pub fn transform_tail_u16x2_delta_into(
             match_index += 1;
         }
 
-        for _ in 0..record.copy_count {
-            if record.back_distance == 0 {
-                return Err(TransformTailDeltaError::CopyBeforeOutput);
-            }
-            let source = cursor
-                .checked_sub(record.back_distance)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            let source_end = source
-                .checked_add(4)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let cursor_end = cursor
-                .checked_add(4)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let value = out
-                .get(source..source_end)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            chunk.copy_from_slice(value);
-            let slot = out
-                .get_mut(cursor..cursor_end)
-                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
-            slot.copy_from_slice(&chunk);
-            cursor = cursor
-                .checked_add(spec.output_stride)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-        }
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            4,
+            record.back_distance,
+            record.copy_count,
+        )?;
 
         match_index = match_index
             .checked_add(usize::from(record.copy_count))
@@ -4944,19 +4953,12 @@ pub fn transform_tail_i8x2_normal_into(
 ) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
     const MAX_COMPONENT_SQUARED: i64 = 0x3f01;
 
-    if spec.output_stride == 0 {
-        return Err(TransformTailDeltaError::ZeroStride);
-    }
-    let mut cursor = spec
-        .block_index
-        .checked_mul(spec.output_stride)
-        .and_then(|offset| offset.checked_add(spec.out_offset))
-        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
     let mut source0_pos = 0usize;
     let mut source1_pos = 0usize;
     let mut source2_pos = 0usize;
     let mut written = 0usize;
-    let mut chunk = [0u8; 3];
 
     for record in spec.records {
         for _ in 0..record.literal_count {
@@ -5011,32 +5013,17 @@ pub fn transform_tail_i8x2_normal_into(
                 .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
         }
 
-        for _ in 0..record.copy_count {
-            if record.back_distance == 0 {
-                return Err(TransformTailDeltaError::CopyBeforeOutput);
-            }
-            let source = cursor
-                .checked_sub(record.back_distance)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            let source_end = source
-                .checked_add(3)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let cursor_end = cursor
-                .checked_add(3)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let value = out
-                .get(source..source_end)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            chunk.copy_from_slice(value);
-            let slot = out
-                .get_mut(cursor..cursor_end)
-                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
-            slot.copy_from_slice(&chunk);
-            written += 1;
-            cursor = cursor
-                .checked_add(spec.output_stride)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-        }
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            3,
+            record.back_distance,
+            record.copy_count,
+        )?;
+        written = written
+            .checked_add(usize::from(record.copy_count))
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
     }
 
     Ok(TransformTailDeltaUsage {
@@ -5062,20 +5049,13 @@ pub fn transform_tail_pack10x3_delta_into(
 ) -> Result<TransformTailPack10Usage, TransformTailDeltaError> {
     const MAX_COMPONENT_SQUARED: i64 = 0x3fc01;
 
-    if spec.output_stride == 0 {
-        return Err(TransformTailDeltaError::ZeroStride);
-    }
-    let mut cursor = spec
-        .block_index
-        .checked_mul(spec.output_stride)
-        .and_then(|offset| offset.checked_add(spec.out_offset))
-        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
     let mut match_index = 0usize;
     let mut source0_pos = 0usize;
     let mut source1_pos = 0usize;
     let mut source2_pos = 0usize;
     let mut source3_pos = 0usize;
-    let mut chunk = [0u8; 4];
 
     for record in spec.records {
         for _ in 0..record.literal_count {
@@ -5179,31 +5159,14 @@ pub fn transform_tail_pack10x3_delta_into(
             match_index += 1;
         }
 
-        for _ in 0..record.copy_count {
-            if record.back_distance == 0 {
-                return Err(TransformTailDeltaError::CopyBeforeOutput);
-            }
-            let source = cursor
-                .checked_sub(record.back_distance)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            let source_end = source
-                .checked_add(4)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let cursor_end = cursor
-                .checked_add(4)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let value = out
-                .get(source..source_end)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            chunk.copy_from_slice(value);
-            let slot = out
-                .get_mut(cursor..cursor_end)
-                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
-            slot.copy_from_slice(&chunk);
-            cursor = cursor
-                .checked_add(spec.output_stride)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-        }
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            4,
+            record.back_distance,
+            record.copy_count,
+        )?;
 
         match_index = match_index
             .checked_add(usize::from(record.copy_count))
@@ -5233,18 +5196,11 @@ pub fn transform_tail_u16x3_delta_into(
     out: &mut [u8],
     spec: TransformTailU16x3DeltaSpec<'_>,
 ) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
-    if spec.output_stride == 0 {
-        return Err(TransformTailDeltaError::ZeroStride);
-    }
-    let mut cursor = spec
-        .block_index
-        .checked_mul(spec.output_stride)
-        .and_then(|offset| offset.checked_add(spec.out_offset))
-        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
     let mut match_index = 0usize;
     let mut source0_pos = 0usize;
     let mut source1_pos = 0usize;
-    let mut chunk = [0u8; 6];
 
     for record in spec.records {
         for _ in 0..record.literal_count {
@@ -5321,31 +5277,14 @@ pub fn transform_tail_u16x3_delta_into(
             match_index += 1;
         }
 
-        for _ in 0..record.copy_count {
-            if record.back_distance == 0 {
-                return Err(TransformTailDeltaError::CopyBeforeOutput);
-            }
-            let source = cursor
-                .checked_sub(record.back_distance)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            let source_end = source
-                .checked_add(6)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let cursor_end = cursor
-                .checked_add(6)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let value = out
-                .get(source..source_end)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            chunk.copy_from_slice(value);
-            let slot = out
-                .get_mut(cursor..cursor_end)
-                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
-            slot.copy_from_slice(&chunk);
-            cursor = cursor
-                .checked_add(spec.output_stride)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-        }
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            6,
+            record.back_distance,
+            record.copy_count,
+        )?;
 
         match_index = match_index
             .checked_add(usize::from(record.copy_count))
@@ -5374,18 +5313,11 @@ pub fn transform_tail_delta3_direct_into(
     out: &mut [u8],
     spec: TransformTailDelta3DirectSpec<'_>,
 ) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
-    if spec.output_stride == 0 {
-        return Err(TransformTailDeltaError::ZeroStride);
-    }
-    let mut cursor = spec
-        .block_index
-        .checked_mul(spec.output_stride)
-        .and_then(|offset| offset.checked_add(spec.out_offset))
-        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
     let mut match_index = 0usize;
     let mut source0_pos = 0usize;
     let mut source1_pos = 0usize;
-    let mut chunk = [0u8; 3];
 
     for record in spec.records {
         for _ in 0..record.literal_count {
@@ -5447,31 +5379,14 @@ pub fn transform_tail_delta3_direct_into(
             match_index += 1;
         }
 
-        for _ in 0..record.copy_count {
-            if record.back_distance == 0 {
-                return Err(TransformTailDeltaError::CopyBeforeOutput);
-            }
-            let source = cursor
-                .checked_sub(record.back_distance)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            let source_end = source
-                .checked_add(3)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let cursor_end = cursor
-                .checked_add(3)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let value = out
-                .get(source..source_end)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            chunk.copy_from_slice(value);
-            let slot = out
-                .get_mut(cursor..cursor_end)
-                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
-            slot.copy_from_slice(&chunk);
-            cursor = cursor
-                .checked_add(spec.output_stride)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-        }
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            3,
+            record.back_distance,
+            record.copy_count,
+        )?;
 
         match_index = match_index
             .checked_add(usize::from(record.copy_count))
@@ -5500,18 +5415,11 @@ pub fn transform_tail_delta4_direct_into(
     out: &mut [u8],
     spec: TransformTailDelta4DirectSpec<'_>,
 ) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
-    if spec.output_stride == 0 {
-        return Err(TransformTailDeltaError::ZeroStride);
-    }
-    let mut cursor = spec
-        .block_index
-        .checked_mul(spec.output_stride)
-        .and_then(|offset| offset.checked_add(spec.out_offset))
-        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
     let mut match_index = 0usize;
     let mut source0_pos = 0usize;
     let mut source1_pos = 0usize;
-    let mut chunk = [0u8; 4];
 
     for record in spec.records {
         for _ in 0..record.literal_count {
@@ -5577,31 +5485,14 @@ pub fn transform_tail_delta4_direct_into(
                 .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
         }
 
-        for _ in 0..record.copy_count {
-            if record.back_distance == 0 {
-                return Err(TransformTailDeltaError::CopyBeforeOutput);
-            }
-            let source = cursor
-                .checked_sub(record.back_distance)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            let source_end = source
-                .checked_add(4)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let cursor_end = cursor
-                .checked_add(4)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let value = out
-                .get(source..source_end)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            chunk.copy_from_slice(value);
-            let slot = out
-                .get_mut(cursor..cursor_end)
-                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
-            slot.copy_from_slice(&chunk);
-            cursor = cursor
-                .checked_add(spec.output_stride)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-        }
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            4,
+            record.back_distance,
+            record.copy_count,
+        )?;
 
         match_index = match_index
             .checked_add(usize::from(record.copy_count))
@@ -5629,19 +5520,12 @@ pub fn transform_tail_delta2_into(
     out: &mut [u8],
     spec: TransformTailDelta2Spec<'_>,
 ) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
-    if spec.output_stride == 0 {
-        return Err(TransformTailDeltaError::ZeroStride);
-    }
-    let mut cursor = spec
-        .block_index
-        .checked_mul(spec.output_stride)
-        .and_then(|offset| offset.checked_add(spec.out_offset))
-        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
     let mut match_index = 0usize;
     let mut source0_pos = 0usize;
     let mut source1_pos = 0usize;
     let mut source2_pos = 0usize;
-    let mut chunk = [0u8; 2];
 
     for record in spec.records {
         for _ in 0..record.literal_count {
@@ -5702,31 +5586,14 @@ pub fn transform_tail_delta2_into(
             match_index += 1;
         }
 
-        for _ in 0..record.copy_count {
-            if record.back_distance == 0 {
-                return Err(TransformTailDeltaError::CopyBeforeOutput);
-            }
-            let source = cursor
-                .checked_sub(record.back_distance)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            let source_end = source
-                .checked_add(2)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let cursor_end = cursor
-                .checked_add(2)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let value = out
-                .get(source..source_end)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            chunk.copy_from_slice(value);
-            let slot = out
-                .get_mut(cursor..cursor_end)
-                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
-            slot.copy_from_slice(&chunk);
-            cursor = cursor
-                .checked_add(spec.output_stride)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-        }
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            2,
+            record.back_distance,
+            record.copy_count,
+        )?;
 
         match_index = match_index
             .checked_add(usize::from(record.copy_count))
@@ -5755,19 +5622,12 @@ pub fn transform_tail_delta3_into(
     out: &mut [u8],
     spec: TransformTailDelta3Spec<'_>,
 ) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
-    if spec.output_stride == 0 {
-        return Err(TransformTailDeltaError::ZeroStride);
-    }
-    let mut cursor = spec
-        .block_index
-        .checked_mul(spec.output_stride)
-        .and_then(|offset| offset.checked_add(spec.out_offset))
-        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
     let mut match_index = 0usize;
     let mut source0_pos = 0usize;
     let mut source1_pos = 0usize;
     let mut source2_pos = 0usize;
-    let mut chunk = [0u8; 3];
 
     for record in spec.records {
         for _ in 0..record.literal_count {
@@ -5840,31 +5700,14 @@ pub fn transform_tail_delta3_into(
             match_index += 1;
         }
 
-        for _ in 0..record.copy_count {
-            if record.back_distance == 0 {
-                return Err(TransformTailDeltaError::CopyBeforeOutput);
-            }
-            let source = cursor
-                .checked_sub(record.back_distance)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            let source_end = source
-                .checked_add(3)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let cursor_end = cursor
-                .checked_add(3)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-            let value = out
-                .get(source..source_end)
-                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
-            chunk.copy_from_slice(value);
-            let slot = out
-                .get_mut(cursor..cursor_end)
-                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
-            slot.copy_from_slice(&chunk);
-            cursor = cursor
-                .checked_add(spec.output_stride)
-                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
-        }
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            3,
+            record.back_distance,
+            record.copy_count,
+        )?;
 
         match_index = match_index
             .checked_add(usize::from(record.copy_count))
