@@ -1031,6 +1031,22 @@ pub struct RansThreeLaneDecodeSpec<'a> {
     pub payload: &'a [u8],
 }
 
+/// Inputs for `0x110eb50`, the byte-output mode-1 3-lane segment decoder.
+pub struct RansByteThreeLaneDecodeSpec<'a> {
+    /// Number of bytes this call writes (`w2`).
+    pub count: usize,
+    /// `log2` table selector width (`w5`).
+    pub log: u32,
+    /// Output spacing in byte slots (`w1`).
+    pub stride: usize,
+    /// Packed decode table. Low 16 bits are the byte symbol; high 16 bits are bits consumed.
+    pub table: &'a [u32],
+    /// Three reader states at `x3+0`, `x3+0x18`, and `x3+0x30`. Updated in place.
+    pub readers: &'a mut [RansThreeLaneReader; 3],
+    /// Payload bytes addressed by the payload-relative reader pointers.
+    pub payload: &'a [u8],
+}
+
 #[inline]
 fn checked_u64_le(buf: &[u8], ptr: usize) -> Result<u64, RansThreeLaneDecodeError> {
     let end = ptr
@@ -1157,6 +1173,61 @@ pub fn rans_three_lane_decode_into(
     Ok(())
 }
 
+/// Decode byte mode-1 symbols with the 3-lane bit decoder (`0x110eb50`).
+///
+/// This is the byte-output sibling of `0x110ef70`: the reader reload order and
+/// table entry format are the same, but symbols are stored with `strb`
+/// (`0x110ec50`, `0x110ec78`, `0x110ec84`, and the tail at `0x110ef0c`).
+pub fn rans_three_lane_decode_bytes_into(
+    out: &mut [u8],
+    spec: RansByteThreeLaneDecodeSpec<'_>,
+) -> Result<(), RansThreeLaneDecodeError> {
+    let table_len = 1usize
+        .checked_shl(spec.log)
+        .ok_or(RansThreeLaneDecodeError::TableSizeMismatch)?;
+    if spec.table.len() != table_len || spec.log > 63 {
+        return Err(RansThreeLaneDecodeError::TableSizeMismatch);
+    }
+    if spec.stride == 0 {
+        return Err(RansThreeLaneDecodeError::ZeroStride);
+    }
+    let min_len = spec
+        .count
+        .checked_mul(spec.stride)
+        .ok_or(RansThreeLaneDecodeError::OutputTooSmall)?;
+    if out.len() < min_len {
+        return Err(RansThreeLaneDecodeError::OutputTooSmall);
+    }
+
+    let mut written = 0usize;
+    while spec.count - written >= 12 {
+        reload_backward(spec.payload, &mut spec.readers[0])?;
+        reload_forward_rev(spec.payload, &mut spec.readers[1])?;
+        reload_backward(spec.payload, &mut spec.readers[2])?;
+        for _ in 0..4 {
+            for lane in 0..3 {
+                out[written * spec.stride] =
+                    take_three_lane_symbol(&mut spec.readers[lane], spec.table, spec.log)? as u8;
+                written += 1;
+            }
+        }
+    }
+
+    if written < spec.count {
+        reload_backward(spec.payload, &mut spec.readers[0])?;
+        reload_forward_rev(spec.payload, &mut spec.readers[1])?;
+        reload_backward(spec.payload, &mut spec.readers[2])?;
+        while written < spec.count {
+            let lane = written % 3;
+            out[written * spec.stride] =
+                take_three_lane_symbol(&mut spec.readers[lane], spec.table, spec.log)? as u8;
+            written += 1;
+        }
+    }
+
+    Ok(())
+}
+
 /// Errors from the segment dispatch wrapper (`0x110de00`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RansSegmentDispatchError {
@@ -1258,14 +1329,16 @@ pub fn rans_segment_dispatch_into(
 /// Errors from the byte segment dispatch wrapper (`0x110dd80`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RansSegmentDispatchBytesError {
-    /// Mode 1 routes to `0x110eb50`, which is a separate byte three-lane decoder.
-    UnportedMode1,
+    /// Mode 1 requires the three reverse-reader states from `x5`.
+    MissingThreeLaneReaders,
     /// The observed dispatch modes are 0, 1, and 2.
     UnknownMode(u32),
     /// `count` must fit the `w2` argument consumed by `0x110dfa0`.
     CountTooLarge(usize),
     /// Mode 0 byte rANS decode rejected the segment.
     Decode(RansInitError),
+    /// Mode 1 byte three-lane decode rejected the segment.
+    ThreeLane(RansThreeLaneDecodeError),
     /// Mode 2 byte RLE fill rejected the segment.
     Rle(RansByteRleFillError),
 }
@@ -1290,16 +1363,20 @@ pub struct RansSegmentDispatchBytesSpec<'a> {
     pub sym: &'a [u16],
     /// Forward renorm bytes for mode 0.
     pub stream: &'a [u8],
+    /// Payload bytes for mode 1 reader loads.
+    pub payload: &'a [u8],
     /// Shared forward stream cursor (`[x4+12]`) for mode 0.
     pub cursor: &'a mut RansStreamCursor,
+    /// Three mode-1 reader states from `x5`, when dispatching mode 1.
+    pub three_lane_readers: Option<&'a mut [RansThreeLaneReader; 3]>,
 }
 
 /// Dispatch one built byte segment (`0x110dd80`).
 ///
 /// Mode 0 calls the same byte-output rANS primitive as `0x110dfa0`, updating the
-/// descriptor states and the shared stream cursor. Mode 2 maps to `0x110f800`,
-/// a byte strided fill. Mode 1 is intentionally guarded until the byte
-/// three-lane decoder at `0x110eb50` is ported.
+/// descriptor states and the shared stream cursor. Mode 1 maps to the byte
+/// three-lane decoder at `0x110eb50`. Mode 2 maps to `0x110f800`, a byte
+/// strided fill.
 pub fn rans_segment_dispatch_bytes_into(
     out: &mut [u8],
     spec: RansSegmentDispatchBytesSpec<'_>,
@@ -1322,7 +1399,24 @@ pub fn rans_segment_dispatch_bytes_into(
             .map_err(RansSegmentDispatchBytesError::Decode)?;
             Ok(result.stream_used)
         }
-        1 => Err(RansSegmentDispatchBytesError::UnportedMode1),
+        1 => {
+            let readers = spec
+                .three_lane_readers
+                .ok_or(RansSegmentDispatchBytesError::MissingThreeLaneReaders)?;
+            rans_three_lane_decode_bytes_into(
+                out,
+                RansByteThreeLaneDecodeSpec {
+                    count: spec.count,
+                    log: spec.log,
+                    stride: spec.stride,
+                    table: spec.step,
+                    readers,
+                    payload: spec.payload,
+                },
+            )
+            .map_err(RansSegmentDispatchBytesError::ThreeLane)?;
+            Ok(0)
+        }
         2 => {
             rans_rle_fill_bytes(out, spec.value as u8, spec.count, spec.stride)
                 .map_err(RansSegmentDispatchBytesError::Rle)?;
@@ -4025,6 +4119,153 @@ mod tests {
         );
     }
 
+    /// Byte three-lane mode-1 decoder (`0x110eb50`) main loop plus scalar tail.
+    ///
+    /// Provenance: `capture_segment_dispatch_byte.py`, Animal_Dragonfly dispatch
+    /// call 61, replayed by `verify_rans_byte_three_lane.py`: `count=21`,
+    /// `log=3`, stride 1. The first 12 symbols take the unrolled group path and
+    /// the remaining 9 symbols take the tail path.
+    #[test]
+    fn rans_three_lane_decode_bytes_dragonfly_main_and_tail() {
+        let payload = sparse_payload(
+            4622,
+            &[
+                (4277, "3281377012ded167"),
+                (4584, "21fffe63ffffe917"),
+                (4614, "c3f9ff5f37f7ff03"),
+            ],
+        );
+        let table = [65536, 65536, 65536, 65536, 196609, 196611, 196612, 196613];
+        let mut readers = [
+            RansThreeLaneReader {
+                ptr: 4277,
+                acc: 10054460316793406170,
+                bitpos: 61,
+            },
+            RansThreeLaneReader {
+                ptr: 4584,
+                acc: 5195271318892707844,
+                bitpos: 59,
+            },
+            RansThreeLaneReader {
+                ptr: 4614,
+                acc: 8940803800127113216,
+                bitpos: 57,
+            },
+        ];
+        let mut out = hex_bytes("9e009e0108014b022400e401000049010000200000");
+
+        rans_three_lane_decode_bytes_into(
+            &mut out,
+            RansByteThreeLaneDecodeSpec {
+                count: 21,
+                log: 3,
+                stride: 1,
+                table: &table,
+                readers: &mut readers,
+                payload: &payload,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(out, hex_bytes("010000000105030104040000000000000000010000"));
+        assert_eq!(
+            readers,
+            [
+                RansThreeLaneReader {
+                    ptr: 4276,
+                    acc: 5706504233741557568,
+                    bitpos: 54
+                },
+                RansThreeLaneReader {
+                    ptr: 4585,
+                    acc: 14591074635563934200,
+                    bitpos: 56
+                },
+                RansThreeLaneReader {
+                    ptr: 4613,
+                    acc: 11596061540452667384,
+                    bitpos: 54
+                },
+            ]
+        );
+
+        let mut readers = readers;
+        assert_eq!(
+            rans_three_lane_decode_bytes_into(
+                &mut [0u8; 21],
+                RansByteThreeLaneDecodeSpec {
+                    count: 21,
+                    log: 4,
+                    stride: 1,
+                    table: &table,
+                    readers: &mut readers,
+                    payload: &payload,
+                },
+            ),
+            Err(RansThreeLaneDecodeError::TableSizeMismatch)
+        );
+        assert_eq!(
+            rans_three_lane_decode_bytes_into(
+                &mut [0u8; 21],
+                RansByteThreeLaneDecodeSpec {
+                    count: 21,
+                    log: 3,
+                    stride: 0,
+                    table: &table,
+                    readers: &mut readers,
+                    payload: &payload,
+                },
+            ),
+            Err(RansThreeLaneDecodeError::ZeroStride)
+        );
+        assert_eq!(
+            rans_three_lane_decode_bytes_into(
+                &mut [0u8; 20],
+                RansByteThreeLaneDecodeSpec {
+                    count: 21,
+                    log: 3,
+                    stride: 1,
+                    table: &table,
+                    readers: &mut readers,
+                    payload: &payload,
+                },
+            ),
+            Err(RansThreeLaneDecodeError::OutputTooSmall)
+        );
+        let mut truncated_readers = [
+            RansThreeLaneReader {
+                ptr: 4277,
+                acc: 10054460316793406170,
+                bitpos: 61,
+            },
+            RansThreeLaneReader {
+                ptr: 4584,
+                acc: 5195271318892707844,
+                bitpos: 59,
+            },
+            RansThreeLaneReader {
+                ptr: 4614,
+                acc: 8940803800127113216,
+                bitpos: 57,
+            },
+        ];
+        assert_eq!(
+            rans_three_lane_decode_bytes_into(
+                &mut [0u8; 21],
+                RansByteThreeLaneDecodeSpec {
+                    count: 21,
+                    log: 3,
+                    stride: 1,
+                    table: &table,
+                    readers: &mut truncated_readers,
+                    payload: &payload[..4280],
+                },
+            ),
+            Err(RansThreeLaneDecodeError::PayloadTooSmall)
+        );
+    }
+
     /// Byte segment dispatch (`0x110dd80`) mode 0 feeding byte rANS (`0x110dfa0`).
     ///
     /// Provenance: `capture_segment_dispatch_byte.py`, Animal_Bass call 1:
@@ -4053,7 +4294,9 @@ mod tests {
                 step: &step,
                 sym: &sym,
                 stream: &[],
+                payload: &[],
                 cursor: &mut cursor,
+                three_lane_readers: None,
             },
         )
         .unwrap();
@@ -4098,7 +4341,9 @@ mod tests {
                 step: &[],
                 sym: &[],
                 stream: &[],
+                payload: &[],
                 cursor: &mut cursor,
+                three_lane_readers: None,
             },
         )
         .unwrap();
@@ -4115,6 +4360,82 @@ mod tests {
             ])
         );
         assert_eq!(out, hex_bytes("010101"));
+    }
+
+    #[test]
+    fn rans_segment_dispatch_bytes_mode1_three_lane_bytes() {
+        let payload = sparse_payload(
+            4622,
+            &[
+                (4277, "3281377012ded167"),
+                (4584, "21fffe63ffffe917"),
+                (4614, "c3f9ff5f37f7ff03"),
+            ],
+        );
+        let table = [65536, 65536, 65536, 65536, 196609, 196611, 196612, 196613];
+        let mut readers = [
+            RansThreeLaneReader {
+                ptr: 4277,
+                acc: 10054460316793406170,
+                bitpos: 61,
+            },
+            RansThreeLaneReader {
+                ptr: 4584,
+                acc: 5195271318892707844,
+                bitpos: 59,
+            },
+            RansThreeLaneReader {
+                ptr: 4614,
+                acc: 8940803800127113216,
+                bitpos: 57,
+            },
+        ];
+        let mut state = RansStateBuffer::warm([0x8000_0000; 4]);
+        let mut cursor = RansStreamCursor::default();
+        let mut out = hex_bytes("9e009e0108014b022400e401000049010000200000");
+
+        let used = rans_segment_dispatch_bytes_into(
+            &mut out,
+            RansSegmentDispatchBytesSpec {
+                mode: 1,
+                log: 3,
+                value: 0,
+                count: 21,
+                stride: 1,
+                state: &mut state,
+                step: &table,
+                sym: &[],
+                stream: &[],
+                payload: &payload,
+                cursor: &mut cursor,
+                three_lane_readers: Some(&mut readers),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(used, 0);
+        assert_eq!(cursor.offset, 0);
+        assert_eq!(out, hex_bytes("010000000105030104040000000000000000010000"));
+        assert_eq!(
+            readers,
+            [
+                RansThreeLaneReader {
+                    ptr: 4276,
+                    acc: 5706504233741557568,
+                    bitpos: 54
+                },
+                RansThreeLaneReader {
+                    ptr: 4585,
+                    acc: 14591074635563934200,
+                    bitpos: 56
+                },
+                RansThreeLaneReader {
+                    ptr: 4613,
+                    acc: 11596061540452667384,
+                    bitpos: 54
+                },
+            ]
+        );
     }
 
     #[test]
@@ -4135,10 +4456,12 @@ mod tests {
                     step: &[],
                     sym: &[],
                     stream: &[],
+                    payload: &[],
                     cursor: &mut cursor,
+                    three_lane_readers: None,
                 },
             ),
-            Err(RansSegmentDispatchBytesError::UnportedMode1)
+            Err(RansSegmentDispatchBytesError::MissingThreeLaneReaders)
         );
 
         let mut state = RansStateBuffer::warm([0x8000_0000; 4]);
@@ -4156,7 +4479,9 @@ mod tests {
                     step: &[],
                     sym: &[],
                     stream: &[],
+                    payload: &[],
                     cursor: &mut cursor,
+                    three_lane_readers: None,
                 },
             ),
             Err(RansSegmentDispatchBytesError::UnknownMode(9))
@@ -4177,7 +4502,9 @@ mod tests {
                     step: &[],
                     sym: &[],
                     stream: &[],
+                    payload: &[],
                     cursor: &mut cursor,
+                    three_lane_readers: None,
                 },
             ),
             Err(RansSegmentDispatchBytesError::Rle(
@@ -4200,7 +4527,9 @@ mod tests {
                     step: &[],
                     sym: &[],
                     stream: &[],
+                    payload: &[],
                     cursor: &mut cursor,
+                    three_lane_readers: None,
                 },
             ),
             Err(RansSegmentDispatchBytesError::Rle(
@@ -4228,7 +4557,9 @@ mod tests {
                         step: &step,
                         sym: &sym,
                         stream: &[],
+                        payload: &[],
                         cursor: &mut cursor,
+                        three_lane_readers: None,
                     },
                 ),
                 Err(RansSegmentDispatchBytesError::CountTooLarge(large_count))
@@ -4250,7 +4581,9 @@ mod tests {
                     step: &step,
                     sym: &sym,
                     stream: &[],
+                    payload: &[],
                     cursor: &mut cursor,
+                    three_lane_readers: None,
                 },
             ),
             Err(RansSegmentDispatchBytesError::Decode(
