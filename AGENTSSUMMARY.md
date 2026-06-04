@@ -643,6 +643,25 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec B2-CP4 chunk Dragonfly direct/delta writer
+**Committed:** B2-CP4 direct/delta writer chunk landed in `c81468b`. After the
+Dragonfly bufB probe, expanded `capture_transform_tails.py` to hook all 32
+state-5 writer-table entries. The refreshed capture found Dragonfly uses
+`0x10fdc00` for table entry 1 before the already ported copy2/copy1 tails; Bear
+also proves `0x10fdcf0` for table entry 1, while Bass adds no new writer.
+Ported `0x10fdc00` in
+`src/mc/geometry.rs` as `transform_tail_delta2_direct_into`: direct literals
+copy two-byte source0 units, non-zero match entries add source1 deltas to prior
+strided output, and copy runs clone previous output by byte distance. Durable
+local evidence: `verify_transform_tail_delta2_direct.py` replayed **1/1**
+Dragonfly call with direct literals 17, matched literals 145, copy units 361,
+match entries 523, source0 34 bytes, source1 290 bytes; wrong delta-match
+direct shape and no-match-delta both fail 1/1. Rust coverage:
+`cargo test --lib transform_tail_delta2_direct` passed 2 tests,
+`cargo test --lib transform_tail_delta` passed 8 tests, and `cargo build`
+passed. Next: commit this chunk, then port the now-proven `0x10fdcf0`
+three-byte direct/delta writer before chasing any unobserved table entries.
+
 ### 2026-06-04 - MeshCodec B2-CP4 early Dragonfly bufB probe
 **Probe complete:** after `98334d2`, stopped adding leaves and ran the requested
 early bufB/oracle slice through `local-assets/re/probe_bufb_dragonfly.py`.
