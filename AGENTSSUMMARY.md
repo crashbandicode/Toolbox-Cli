@@ -644,7 +644,8 @@ Standing backlog (no owner):
 ## Session log
 
 ### 2026-06-04 - MeshCodec B2-CP4 chunk packed 10-bit writer
-**Ready to commit:** `0x110afb0` is ported in `src/mc/geometry.rs` as
+**Committed:** B2-CP4 packed 10-bit writer chunk landed in `80b3675`, porting
+`0x110afb0` in `src/mc/geometry.rs` as
 `transform_tail_pack10x3_delta_into`. Durable local evidence:
 `capture_transform_tail_110afb0.py` enumerated **3** observed calls
 (Bear/Bass/Dragonfly current 3), and `verify_transform_tail_110afb0.py`
