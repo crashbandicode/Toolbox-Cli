@@ -643,6 +643,25 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP4 chunk two-byte delta-match tail
+**Committed:** B2-CP4 chunk landed in `0cf6c03`, porting the observed
+`0x10fbcc0` two-byte delta-match tail as
+`geometry::transform_tail_delta2_into`. Refreshed local evidence:
+`capture_transform_tails.py` now records the match table and still finds the
+same 8 transform-tail calls with matching final buffers; `verify_transform_tail_delta2.py`
+replayed the Bass `0x10fbcc0` call **1/1**. Coverage: direct literals 214,
+match literals 332, copy units 13, zero-literal records 1, zero-copy records 1,
+and 559 match-table entries consumed. Rust coverage: fixture-free Bass golden
+for first entry `0x0a000802` record covering direct/match/copy behavior,
+observed zero-literal and zero-copy branch tests, plus defensive rejection for
+zero stride, output underflow, all source underflows, match-table underflow,
+match-before-output, and copy-before-output. Per-chunk sample green:
+`cargo test --lib transform_tail` (10 passed) and `cargo build`. Last
+checkpoint baseline remains: All green: **182 lib unit** (incl. **36**
+`mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds. Next: continue B2-CP4 with observed
+`0x10fbdc0` three-byte delta-match tail.
+
 ### 2026-06-03 - MeshCodec B2-CP4 chunk four-byte transform tail
 **Committed:** B2-CP4 chunk landed in `7206bcc`, porting the observed
 `0x10fc7d0` four-byte transform tail as
