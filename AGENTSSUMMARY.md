@@ -643,6 +643,27 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec CP5a vertex interstage sources
+**Committed:** CP5a ports the observed inter-wrapper dispatch/source setup
+slice at `0x10f92c8..0x10f9394` in `src/mc/geometry.rs` as
+`vertex_attribute_interstage_sources`. Durable local evidence:
+`capture_vertex_interstage.py` enumerated Bear/Bass/Dragonfly calls and
+`verify_vertex_interstage.py` replayed **25/25** dispatches plus descriptor
+and source-call contracts. Dispatch coverage is
+`7:1, 8:1, 15:3, 16:1, 18:2, 30:1, 31:1, 32:1, 58:3, 76:1, 81:4,
+107:3, 111:3`; a six-bit dispatch reader fails **25/25**, and a no-remainder
+split descriptor fails **16/25**. Fixture-free Rust coverage uses
+Animal_Dragonfly current 2 inline: dispatch 16, setup `0x10fc4b0`, descriptor
+`(w2=0,w3=2,w4=3)`, selector-3 source bytes `ff007f807f80`, and the exact
+final shared reader/stream state. Defensive tests reject truncated dispatch,
+unobserved dispatch, zero table group width, zero source count, short direct
+source, and overlong setup varints. Per-chunk sample green:
+`cargo test --lib vertex_attribute` (4 tests). Latest checkpoint gate remains:
+All green: 226 lib unit (incl. 80 mc::geometry) + all integration; clippy
+--all-targets clean; --no-default-features builds. Next: wire the writer-table
+call at `0x10f93d8` into a full per-attribute loop, keeping `0x11033e0`
+guarded until its tail writer is ported.
+
 ### 2026-06-04 - MeshCodec CP5a vertex driver setup/step
 **Committed:** CP5a ports the observed mode-1 vertex byte-group setup
 `0x10fafe0` plus one `0x10f924c` attribute-driver wrapper step in

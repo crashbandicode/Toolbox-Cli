@@ -4280,6 +4280,104 @@ pub struct VertexAttributeTransform {
     pub records: Vec<[u32; 2]>,
 }
 
+/// One source descriptor written by the `0x10f9314..0x10f9360` setup tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexAttributeSourceDescriptor {
+    /// Register `w2` for `0x110d7f0`: element-size shift.
+    pub element_shift: u32,
+    /// Register `w3` for `0x110d7f0`: byte/element group stride.
+    pub group_stride: usize,
+    /// Register `w4` for `0x110d7f0`: group count.
+    pub count: usize,
+}
+
+/// Writer target selected by the interstage dispatch table at `0x39ba570`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VertexAttributeWriterTarget {
+    /// `0x10fc5e0`.
+    Copy1,
+    /// `0x10fc680`.
+    Copy2,
+    /// `0x10fc7d0`.
+    Copy4,
+    /// `0x10fbcc0`.
+    Delta2,
+    /// `0x10fbdc0`.
+    Delta3,
+    /// `0x10fdc00`.
+    Delta2Direct,
+    /// `0x10fdcf0`.
+    Delta3Direct,
+    /// `0x10fde00`.
+    Delta4Direct,
+    /// `0x1100c90`.
+    U16x3Delta,
+    /// `0x11033e0`, captured only as an interstage target so far.
+    UnportedU16x2Direct,
+    /// `0x1103ab0`.
+    U16x2Delta,
+    /// `0x110aac0`.
+    I8x2Normal,
+    /// `0x110afb0`.
+    Pack10x3Delta,
+}
+
+/// One materialized source stream for a vertex writer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VertexAttributeSource {
+    /// Two-bit selector consumed by `0x110d7f0`.
+    pub selector: u8,
+    /// Bytes returned to the writer source table.
+    pub bytes: Vec<u8>,
+}
+
+/// Source setup/materialization result before the writer call at `0x10f93d8`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VertexAttributeInterstage {
+    /// Seven-bit dispatch key read at `0x10f92c8..0x10f9310`.
+    pub dispatch: u8,
+    /// Writer target selected by the same dispatch.
+    pub writer: VertexAttributeWriterTarget,
+    /// Descriptor array passed to the source materialization loop.
+    pub descriptors: Vec<VertexAttributeSourceDescriptor>,
+    /// Materialized source streams in descriptor order.
+    pub sources: Vec<VertexAttributeSource>,
+}
+
+/// Errors from the observed interstage source setup/materialization path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VertexAttributeInterstageError {
+    /// The shared reverse reader tried to load outside the payload.
+    PayloadTooSmall,
+    /// A setup varint or direct source slice ran past the payload.
+    StreamTooShort,
+    /// A setup varint exceeded the observed u32-shaped encoding.
+    VarintTooLong,
+    /// Descriptor arithmetic overflowed.
+    ArithmeticOverflow,
+    /// The dispatch key has not been observed in the captured population.
+    UnobservedDispatch(u8),
+    /// Table entries with zero byte count would produce unobserved descriptors.
+    UnobservedZeroTableByteCount,
+    /// Table entries with zero group width would produce zero-stride sources.
+    UnobservedZeroTableGroupWidth,
+    /// A descriptor with zero `w3` has not been observed.
+    UnobservedZeroDescriptorStride { dispatch: u8, index: usize },
+    /// A descriptor with zero `w4` would take the unobserved null-source branch.
+    UnobservedZeroSourceCount { dispatch: u8, index: usize },
+    /// The setup split varint exceeded the wrapper return.
+    SplitExceedsWrapperReturn {
+        dispatch: u8,
+        split: usize,
+        wrapper_ret: u32,
+    },
+    /// Nested `0x110d7f0` source read rejected its stream.
+    ByteGroupRead {
+        index: usize,
+        error: ByteGroupReadError,
+    },
+}
+
 /// Errors from the observed vertex attribute driver setup/loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VertexAttributeDriverError {
@@ -4464,6 +4562,317 @@ pub fn vertex_attribute_driver_step(
         limit: remaining,
         ret: result.ret,
         records: result.records,
+    })
+}
+
+fn read_vertex_source_setup_varint(
+    payload: &[u8],
+    stream_pos: &mut usize,
+) -> Result<usize, VertexAttributeInterstageError> {
+    let mut value = 0usize;
+    for _ in 0..5 {
+        let byte = payload
+            .get(*stream_pos)
+            .copied()
+            .ok_or(VertexAttributeInterstageError::StreamTooShort)?;
+        *stream_pos += 1;
+        value = value
+            .checked_shl(7)
+            .and_then(|v| v.checked_add((byte & 0x7f) as usize))
+            .ok_or(VertexAttributeInterstageError::VarintTooLong)?;
+        if value > u32::MAX as usize {
+            return Err(VertexAttributeInterstageError::VarintTooLong);
+        }
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(VertexAttributeInterstageError::VarintTooLong)
+}
+
+fn take_vertex_attribute_dispatch(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+) -> Result<u8, VertexAttributeInterstageError> {
+    let bitpos = reader.bitpos;
+    let ptr_step = ((bitpos >> 3) ^ 7) as usize;
+    let ptr = reader
+        .ptr
+        .checked_sub(ptr_step)
+        .ok_or(VertexAttributeInterstageError::PayloadTooSmall)?;
+    let bits = (checked_byte_group_u64_le(payload, reader.ptr)
+        .map_err(|_| VertexAttributeInterstageError::PayloadTooSmall)?
+        >> (bitpos & 63))
+        | reader.acc;
+    let dispatch = (bits >> 57) as u8;
+    reader.ptr = ptr;
+    reader.acc = bits << 7;
+    reader.bitpos = (bitpos | 0x38).wrapping_sub(7);
+    Ok(dispatch)
+}
+
+fn vertex_entry_rounded_bytes(
+    table_entry: ByteGroupTransformTableEntry,
+) -> Result<usize, VertexAttributeInterstageError> {
+    let byte_count = table_entry.byte_count();
+    if byte_count == 0 {
+        return Err(VertexAttributeInterstageError::UnobservedZeroTableByteCount);
+    }
+    let rounded = byte_count
+        .checked_add(7)
+        .ok_or(VertexAttributeInterstageError::ArithmeticOverflow)?
+        >> 3;
+    Ok(rounded as usize)
+}
+
+fn vertex_entry_group_width(
+    table_entry: ByteGroupTransformTableEntry,
+) -> Result<usize, VertexAttributeInterstageError> {
+    let group_width = table_entry.group_width();
+    if group_width == 0 {
+        return Err(VertexAttributeInterstageError::UnobservedZeroTableGroupWidth);
+    }
+    Ok(group_width as usize)
+}
+
+fn vertex_source_descriptor(
+    dispatch: u8,
+    index: usize,
+    element_shift: u32,
+    group_stride: usize,
+    count: usize,
+) -> Result<VertexAttributeSourceDescriptor, VertexAttributeInterstageError> {
+    if group_stride == 0 {
+        return Err(
+            VertexAttributeInterstageError::UnobservedZeroDescriptorStride { dispatch, index },
+        );
+    }
+    if count == 0 {
+        return Err(VertexAttributeInterstageError::UnobservedZeroSourceCount { dispatch, index });
+    }
+    Ok(VertexAttributeSourceDescriptor {
+        element_shift,
+        group_stride,
+        count,
+    })
+}
+
+fn vertex_split_remainder(
+    dispatch: u8,
+    wrapper_ret: u32,
+    split: usize,
+) -> Result<usize, VertexAttributeInterstageError> {
+    let ret = wrapper_ret as usize;
+    if split > ret {
+        return Err(VertexAttributeInterstageError::SplitExceedsWrapperReturn {
+            dispatch,
+            split,
+            wrapper_ret,
+        });
+    }
+    Ok(ret - split)
+}
+
+fn vertex_attribute_source_descriptors(
+    byte_state: &mut ByteGroupReadState,
+    payload: &[u8],
+    dispatch: u8,
+    table_entry: ByteGroupTransformTableEntry,
+    wrapper_ret: u32,
+) -> Result<
+    (
+        VertexAttributeWriterTarget,
+        Vec<VertexAttributeSourceDescriptor>,
+    ),
+    VertexAttributeInterstageError,
+> {
+    let rounded = vertex_entry_rounded_bytes(table_entry)?;
+    let group_width = vertex_entry_group_width(table_entry)?;
+    let ret = wrapper_ret as usize;
+    let rounded_stride = rounded
+        .checked_mul(group_width)
+        .ok_or(VertexAttributeInterstageError::ArithmeticOverflow)?;
+    let rounded_minus_one = rounded
+        .checked_sub(1)
+        .ok_or(VertexAttributeInterstageError::ArithmeticOverflow)?;
+
+    match dispatch {
+        // `0x10fc4b0`: one descriptor, no setup varint (`0x10fc4b0..0x10fc4cc`).
+        15 | 16 | 18 => {
+            let writer = match dispatch {
+                15 => VertexAttributeWriterTarget::Copy1,
+                16 => VertexAttributeWriterTarget::Copy2,
+                18 => VertexAttributeWriterTarget::Copy4,
+                _ => unreachable!(),
+            };
+            Ok((
+                writer,
+                vec![vertex_source_descriptor(
+                    dispatch,
+                    0,
+                    0,
+                    rounded_stride,
+                    ret,
+                )?],
+            ))
+        }
+        // `0x10fc4e0`: split one varint into two same-width descriptors
+        // (`0x10fc508..0x10fc534`).
+        30 | 31 | 32 | 58 => {
+            let split = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
+            let remainder = vertex_split_remainder(dispatch, wrapper_ret, split)?;
+            let writer = match dispatch {
+                30 => VertexAttributeWriterTarget::Delta2Direct,
+                31 => VertexAttributeWriterTarget::Delta3Direct,
+                32 => VertexAttributeWriterTarget::Delta4Direct,
+                58 => VertexAttributeWriterTarget::U16x3Delta,
+                _ => unreachable!(),
+            };
+            Ok((
+                writer,
+                vec![
+                    vertex_source_descriptor(dispatch, 0, 0, rounded_stride, split)?,
+                    vertex_source_descriptor(dispatch, 1, 0, rounded_stride, remainder)?,
+                ],
+            ))
+        }
+        // `0x10fb730`: three descriptors, with the first two sharing the split
+        // count (`0x10fb758..0x10fb794`).
+        7 | 8 => {
+            let split = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
+            let remainder = vertex_split_remainder(dispatch, wrapper_ret, split)?;
+            let group_width_minus_one = group_width
+                .checked_sub(1)
+                .ok_or(VertexAttributeInterstageError::ArithmeticOverflow)?;
+            let writer = if dispatch == 7 {
+                VertexAttributeWriterTarget::Delta2
+            } else {
+                VertexAttributeWriterTarget::Delta3
+            };
+            Ok((
+                writer,
+                vec![
+                    vertex_source_descriptor(dispatch, 0, rounded_minus_one as u32, 1, split)?,
+                    vertex_source_descriptor(
+                        dispatch,
+                        1,
+                        rounded_minus_one as u32,
+                        group_width_minus_one,
+                        split,
+                    )?,
+                    vertex_source_descriptor(
+                        dispatch,
+                        2,
+                        rounded_minus_one as u32,
+                        group_width,
+                        remainder,
+                    )?,
+                ],
+            ))
+        }
+        // `0x11010e0`: two descriptors with element shift `rounded-1`
+        // (`0x1101108..0x1101134`).
+        76 | 81 => {
+            let split = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
+            let remainder = vertex_split_remainder(dispatch, wrapper_ret, split)?;
+            let writer = if dispatch == 76 {
+                VertexAttributeWriterTarget::UnportedU16x2Direct
+            } else {
+                VertexAttributeWriterTarget::U16x2Delta
+            };
+            Ok((
+                writer,
+                vec![
+                    vertex_source_descriptor(
+                        dispatch,
+                        0,
+                        rounded_minus_one as u32,
+                        group_width,
+                        split,
+                    )?,
+                    vertex_source_descriptor(
+                        dispatch,
+                        1,
+                        rounded_minus_one as u32,
+                        group_width,
+                        remainder,
+                    )?,
+                ],
+            ))
+        }
+        // `0x110aa00`: normal-vector setup, no split varint
+        // (`0x110aa00..0x110aa34`).
+        107 => Ok((
+            VertexAttributeWriterTarget::I8x2Normal,
+            vec![
+                vertex_source_descriptor(dispatch, 0, rounded_minus_one as u32, 2, ret)?,
+                vertex_source_descriptor(dispatch, 1, 0, 1, ret)?,
+                vertex_source_descriptor(dispatch, 2, 0, 1, ret)?,
+            ],
+        )),
+        // `0x110aa40`: packed 10-bit setup, split once and derive four sources
+        // (`0x110aa68..0x110aab0`).
+        111 => {
+            let split = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
+            let remainder = vertex_split_remainder(dispatch, wrapper_ret, split)?;
+            Ok((
+                VertexAttributeWriterTarget::Pack10x3Delta,
+                vec![
+                    vertex_source_descriptor(dispatch, 0, rounded_minus_one as u32, 2, split)?,
+                    vertex_source_descriptor(dispatch, 1, rounded_minus_one as u32, 1, split)?,
+                    vertex_source_descriptor(dispatch, 2, 0, 1, split)?,
+                    vertex_source_descriptor(dispatch, 3, rounded_minus_one as u32, 3, remainder)?,
+                ],
+            ))
+        }
+        dispatch => Err(VertexAttributeInterstageError::UnobservedDispatch(dispatch)),
+    }
+}
+
+/// Port of the observed interstage source setup and materialization.
+///
+/// After `0x10fb2e0` returns a non-zero vertex count, the driver consumes a
+/// seven-bit dispatch key (`0x10f92c8..0x10f9310`), calls one of the captured
+/// source-setup targets through `0x39ba1e8` (`0x10f9314..0x10f9338`), and then
+/// materializes each non-zero descriptor through `0x110d7f0`
+/// (`0x10f9364..0x10f9394`). This deliberately stops before the writer-table
+/// call at `0x10f93d8`.
+pub fn vertex_attribute_interstage_sources(
+    byte_state: &mut ByteGroupReadState,
+    payload: &[u8],
+    table_entry: ByteGroupTransformTableEntry,
+    wrapper_ret: u32,
+) -> Result<VertexAttributeInterstage, VertexAttributeInterstageError> {
+    let dispatch = take_vertex_attribute_dispatch(payload, &mut byte_state.reader)?;
+    let (writer, descriptors) = vertex_attribute_source_descriptors(
+        byte_state,
+        payload,
+        dispatch,
+        table_entry,
+        wrapper_ret,
+    )?;
+    let mut sources = Vec::with_capacity(descriptors.len());
+    for (index, descriptor) in descriptors.iter().enumerate() {
+        let read = byte_group_read(
+            byte_state,
+            ByteGroupReadSpec {
+                payload,
+                element_shift: descriptor.element_shift,
+                group_stride: descriptor.group_stride,
+                count: descriptor.count,
+            },
+        )
+        .map_err(|error| VertexAttributeInterstageError::ByteGroupRead { index, error })?;
+        sources.push(VertexAttributeSource {
+            selector: read.selector,
+            bytes: read.bytes,
+        });
+    }
+    Ok(VertexAttributeInterstage {
+        dispatch,
+        writer,
+        descriptors,
+        sources,
     })
 }
 
@@ -9289,6 +9698,96 @@ mod tests {
         );
     }
 
+    /// Interstage source setup/materialization (`0x10f92c8..0x10f9394`).
+    ///
+    /// Provenance: `capture_vertex_interstage.py`, Animal_Dragonfly current 2:
+    /// dispatch 16 calls setup `0x10fc4b0`, descriptor `(w2=0,w3=2,w4=3)`,
+    /// then one selector-3 `0x110d7f0` direct source `ff007f807f80`.
+    /// The same capture enumerates 25/25 interstage calls across
+    /// Bear/Bass/Dragonfly, replayed by `verify_vertex_interstage.py`.
+    #[test]
+    fn vertex_attribute_interstage_dragonfly_copy2_source() {
+        let payload = sparse_payload(
+            4470,
+            &[
+                (1177, "ff007f807f8002031a1c0007001c20c0"),
+                (4454, "008bc90efc07781b4404f866efff43fe"),
+            ],
+        );
+        let mut state = ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 4454,
+                acc: 2449949072564560396,
+                bitpos: 57,
+            },
+            mode1_extra_readers: [
+                RansThreeLaneReader {
+                    ptr: 4525,
+                    acc: 7776887029535970912,
+                    bitpos: 52,
+                },
+                RansThreeLaneReader {
+                    ptr: 4671,
+                    acc: 1333770381586800016,
+                    bitpos: 59,
+                },
+            ],
+            stream_pos: 1177,
+            segment_state: RansStateBuffer::cold(),
+            selector2_history: Vec::new(),
+        };
+
+        let interstage = vertex_attribute_interstage_sources(
+            &mut state,
+            &payload,
+            ByteGroupTransformTableEntry { raw: 0x0a00_0802 },
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(
+            interstage,
+            VertexAttributeInterstage {
+                dispatch: 16,
+                writer: VertexAttributeWriterTarget::Copy2,
+                descriptors: vec![VertexAttributeSourceDescriptor {
+                    element_shift: 0,
+                    group_stride: 2,
+                    count: 3,
+                }],
+                sources: vec![VertexAttributeSource {
+                    selector: 3,
+                    bytes: hex_bytes("ff007f807f80"),
+                }],
+            }
+        );
+        assert_eq!(
+            state,
+            ByteGroupReadState {
+                reader: RansThreeLaneReader {
+                    ptr: 4453,
+                    acc: 18442072214514965368,
+                    bitpos: 56,
+                },
+                mode1_extra_readers: [
+                    RansThreeLaneReader {
+                        ptr: 4525,
+                        acc: 7776887029535970912,
+                        bitpos: 52,
+                    },
+                    RansThreeLaneReader {
+                        ptr: 4671,
+                        acc: 1333770381586800016,
+                        bitpos: 59,
+                    },
+                ],
+                stream_pos: 1183,
+                segment_state: RansStateBuffer::cold(),
+                selector2_history: Vec::new(),
+            }
+        );
+    }
+
     #[test]
     fn vertex_attribute_driver_rejects_unobserved_and_malformed_inputs() {
         let mut transform_state = ByteGroupTransformState {
@@ -9413,6 +9912,95 @@ mod tests {
                 remaining: 2,
                 block_limit: 1,
             })
+        );
+    }
+
+    #[test]
+    fn vertex_attribute_interstage_rejects_unobserved_and_malformed_inputs() {
+        let valid_entry = ByteGroupTransformTableEntry { raw: 0x0a00_0802 };
+        let mut state = byte_group_state(zero_three_lane_reader(), 0);
+        assert_eq!(
+            vertex_attribute_interstage_sources(&mut state, &[], valid_entry, 1),
+            Err(VertexAttributeInterstageError::PayloadTooSmall)
+        );
+
+        let payload = sparse_payload(8, &[(0, "0000000000000000")]);
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 0,
+                acc: 0,
+                bitpos: 57,
+            },
+            0,
+        );
+        assert_eq!(
+            vertex_attribute_interstage_sources(&mut state, &payload, valid_entry, 1),
+            Err(VertexAttributeInterstageError::UnobservedDispatch(0))
+        );
+
+        let payload = sparse_payload(4470, &[(4454, "008bc90efc07781b4404f866efff43fe")]);
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 4454,
+                acc: 2449949072564560396,
+                bitpos: 57,
+            },
+            1177,
+        );
+        assert_eq!(
+            vertex_attribute_interstage_sources(
+                &mut state,
+                &payload,
+                ByteGroupTransformTableEntry { raw: 0x0a00_0800 },
+                3,
+            ),
+            Err(VertexAttributeInterstageError::UnobservedZeroTableGroupWidth)
+        );
+
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 4454,
+                acc: 2449949072564560396,
+                bitpos: 57,
+            },
+            1177,
+        );
+        assert_eq!(
+            vertex_attribute_interstage_sources(&mut state, &payload, valid_entry, 0),
+            Err(VertexAttributeInterstageError::UnobservedZeroSourceCount {
+                dispatch: 16,
+                index: 0,
+            })
+        );
+
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 4454,
+                acc: 2449949072564560396,
+                bitpos: 57,
+            },
+            5000,
+        );
+        assert_eq!(
+            vertex_attribute_interstage_sources(&mut state, &payload, valid_entry, 3),
+            Err(VertexAttributeInterstageError::ByteGroupRead {
+                index: 0,
+                error: ByteGroupReadError::StreamTooShort,
+            })
+        );
+
+        let payload = vec![0x80; 8];
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 0,
+                acc: 30u64 << 57,
+                bitpos: 57,
+            },
+            0,
+        );
+        assert_eq!(
+            vertex_attribute_interstage_sources(&mut state, &payload, valid_entry, 3),
+            Err(VertexAttributeInterstageError::VarintTooLong)
         );
     }
 
