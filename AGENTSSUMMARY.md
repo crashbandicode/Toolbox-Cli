@@ -643,6 +643,31 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP4 chunk byte-group selector 0
+**Committed:** B2-CP4 selector-0 byte-group chunk landed in `1610408`,
+porting `0x110dae0` as `geometry::rans_segment_loop_bytes_into` and wiring
+selector 0 of `0x110d7f0` through the byte and u16 segment loops. Durable local
+evidence: `verify_byte_segment_loop.py` replayed **4/4** byte-loop calls across
+Bear/Bass/Dragonfly for output bytes, schedules, primary reader, mode-1 extra
+readers, rANS state, and stream cursor; dispatch coverage inside those loops is
+mode 0 = 7, mode 1 = 6, mode 2 = 0, with mode 2 typed-error guarded until
+captured. Refreshed `capture_byte_group_reader.py` still has **159** calls with
+selector coverage 0 = 5, 1 = 84, 2 = 8, 3 = 62; `verify_byte_group_reader_selector0.py`
+replayed selector 0 **5/5** for byte and halfword paths, and no-output failed
+5/5. Rust coverage: fixture-free Animal_Bass selector-0 call 0
+(`w2=0,w3=1,w4=236,w5=0`) covers the byte segment loop plus byte mode-1
+dispatch; guard tests reject selectors 1/2, selector-0 element shift 2,
+truncated selector loads, direct-stream underflow, and output-size overflow.
+Per-chunk sample green: `python local-assets/re/verify_byte_segment_loop.py`
+(4/4), `python local-assets/re/verify_byte_group_reader_selector0.py` (5/5),
+`cargo test --lib byte_group_reader` (3 passed),
+`cargo test --lib rans_segment_dispatch_bytes` (4 passed), and `cargo build`.
+Last checkpoint baseline remains: All green: **195 lib unit** (incl. **49**
+`mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds. Next: continue `0x110d7f0` with selector 1 or
+selector 2 windowed/zstd paths, or wire selector 0/3 into the `0x10fb2e0`
+transform wrapper if that is the next independent CP4 step.
+
 ### 2026-06-03 - MeshCodec B2-CP4 chunk byte three-lane decode
 **Committed:** B2-CP4 byte three-lane chunk landed in `425532c`, porting
 `0x110eb50` as `geometry::rans_three_lane_decode_bytes_into` and wiring
