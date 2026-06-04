@@ -2292,6 +2292,50 @@ pub struct RansSegmentLoopContext {
     pub state: RansStateBuffer,
 }
 
+/// Minimal `0x110d7f0` byte-group reader state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteGroupReadState {
+    /// Primary reverse selector/descriptor reader at `x6+0`.
+    pub reader: RansThreeLaneReader,
+    /// Payload-relative forward byte stream pointer at `x6+0x48`.
+    pub stream_pos: usize,
+}
+
+/// Inputs for one `0x110d7f0` byte-group reader call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteGroupReadSpec<'a> {
+    /// Payload bytes addressed by both the reverse reader and forward stream.
+    pub payload: &'a [u8],
+    /// Register `w2`: element-size shift applied after `count * group_stride`.
+    pub element_shift: u32,
+    /// Register `w3`: group width multiplier.
+    pub group_stride: usize,
+    /// Register `w4`: number of groups to materialize.
+    pub count: usize,
+}
+
+/// Bytes returned by `0x110d7f0`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ByteGroupRead {
+    /// Two-bit selector consumed from the reverse reader.
+    pub selector: u8,
+    /// Materialized byte stream for the caller.
+    pub bytes: Vec<u8>,
+}
+
+/// Errors from the byte-group reader (`0x110d7f0`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ByteGroupReadError {
+    /// The reverse selector load tried to read outside the payload.
+    PayloadTooSmall,
+    /// `count * group_stride << element_shift` overflowed.
+    OutputSizeOverflow,
+    /// The direct selector's forward byte slice was truncated.
+    StreamTooShort,
+    /// Selectors 0, 1, and 2 require the byte/zstd segment paths not yet ported.
+    UnportedSelector(u8),
+}
+
 /// Inputs for the segment loop (`0x110dc30`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RansSegmentLoopSpec<'a> {
@@ -2357,6 +2401,76 @@ fn read_segment_loop_run_code(
     reader.acc = if run_bits == 64 { 0 } else { bits << run_bits };
     reader.bitpos = (bitpos | 0x38).wrapping_sub(run_bits);
     Ok(run)
+}
+
+fn checked_byte_group_u64_le(buf: &[u8], ptr: usize) -> Result<u64, ByteGroupReadError> {
+    let end = ptr
+        .checked_add(8)
+        .ok_or(ByteGroupReadError::PayloadTooSmall)?;
+    let bytes = buf
+        .get(ptr..end)
+        .ok_or(ByteGroupReadError::PayloadTooSmall)?;
+    Ok(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+fn take_byte_group_selector(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+) -> Result<u8, ByteGroupReadError> {
+    let bitpos = reader.bitpos;
+    let step = ((bitpos >> 3) ^ 7) as usize;
+    let ptr = reader
+        .ptr
+        .checked_sub(step)
+        .ok_or(ByteGroupReadError::PayloadTooSmall)?;
+    let bits = checked_byte_group_u64_le(payload, reader.ptr)?
+        .checked_shr(bitpos & 63)
+        .unwrap_or(0)
+        | reader.acc;
+    reader.ptr = ptr;
+    reader.acc = bits << 2;
+    reader.bitpos = (bitpos | 0x38).wrapping_sub(2);
+    Ok((bits >> 62) as u8)
+}
+
+/// Read one byte-group stream (`0x110d7f0`).
+///
+/// This chunk ports the observed selector-3 branch only: the common selector
+/// prologue consumes two reverse-reader bits (`0x110d808..0x110d854`), then
+/// selector 3 returns the current forward stream slice and advances
+/// `x6+0x48` by `(w4 * w3) << w2` (`0x110da00..0x110dab8`). Selectors 0, 1,
+/// and 2 are reached by the current fixtures but route through the unported
+/// byte/zstd segment loops, so they are typed errors until their replay lands.
+pub fn byte_group_read(
+    state: &mut ByteGroupReadState,
+    spec: ByteGroupReadSpec<'_>,
+) -> Result<ByteGroupRead, ByteGroupReadError> {
+    let group_bytes = spec
+        .count
+        .checked_mul(spec.group_stride)
+        .ok_or(ByteGroupReadError::OutputSizeOverflow)?;
+    let out_len = group_bytes
+        .checked_shl(spec.element_shift)
+        .ok_or(ByteGroupReadError::OutputSizeOverflow)?;
+    let selector = take_byte_group_selector(spec.payload, &mut state.reader)?;
+    match selector {
+        3 => {
+            let end = state
+                .stream_pos
+                .checked_add(out_len)
+                .ok_or(ByteGroupReadError::StreamTooShort)?;
+            let bytes = spec
+                .payload
+                .get(state.stream_pos..end)
+                .ok_or(ByteGroupReadError::StreamTooShort)?
+                .to_vec();
+            state.stream_pos = end;
+            Ok(ByteGroupRead { selector, bytes })
+        }
+        selector => Err(ByteGroupReadError::UnportedSelector(selector)),
+    }
 }
 
 fn ceil_div_segment(value: usize, segment_mask: usize, segment_log: u32) -> Option<usize> {
@@ -5010,6 +5124,147 @@ mod tests {
             Err(RansSegmentLoopError::Descriptor(
                 RansSegmentDescriptorBuildError::Header(RansSegmentHeaderError::PayloadTooSmall)
             ))
+        );
+    }
+
+    /// Byte-group reader (`0x110d7f0`) selector-3 direct-forward branch.
+    ///
+    /// Provenance: `capture_byte_group_reader.py`, Animal_Bass call 16:
+    /// selector 3, `w2=0,w3=1,w4=3,w5=0`, forward stream bytes `1b001b`.
+    /// The payload is relocated to a compact fixture-free buffer while keeping
+    /// the observed combined selector window and resulting reader writeback.
+    #[test]
+    fn byte_group_reader_bass_selector3_direct_slice() {
+        let payload = sparse_payload(11, &[(0, "0000000000000000"), (8, "1b001b")]);
+        let mut state = ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 0,
+                acc: 0xff0e_8001_39a1_a067,
+                bitpos: 59,
+            },
+            stream_pos: 8,
+        };
+
+        let read = byte_group_read(
+            &mut state,
+            ByteGroupReadSpec {
+                payload: &payload,
+                element_shift: 0,
+                group_stride: 1,
+                count: 3,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            read,
+            ByteGroupRead {
+                selector: 3,
+                bytes: hex_bytes("1b001b"),
+            }
+        );
+        assert_eq!(
+            state,
+            ByteGroupReadState {
+                reader: RansThreeLaneReader {
+                    ptr: 0,
+                    acc: 0xfc3a_0004_e686_819c,
+                    bitpos: 57,
+                },
+                stream_pos: 11,
+            }
+        );
+    }
+
+    #[test]
+    fn byte_group_reader_rejects_unported_selectors_and_bad_bounds() {
+        for selector in 0..=2u64 {
+            let payload = sparse_payload(8, &[(0, "0000000000000000")]);
+            let mut state = ByteGroupReadState {
+                reader: RansThreeLaneReader {
+                    ptr: 0,
+                    acc: selector << 62,
+                    bitpos: 59,
+                },
+                stream_pos: 0,
+            };
+            assert_eq!(
+                byte_group_read(
+                    &mut state,
+                    ByteGroupReadSpec {
+                        payload: &payload,
+                        element_shift: 0,
+                        group_stride: 1,
+                        count: 1,
+                    },
+                ),
+                Err(ByteGroupReadError::UnportedSelector(selector as u8))
+            );
+        }
+
+        let mut state = ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 0,
+                acc: 3 << 62,
+                bitpos: 59,
+            },
+            stream_pos: 8,
+        };
+        assert_eq!(
+            byte_group_read(
+                &mut state,
+                ByteGroupReadSpec {
+                    payload: &[0; 7],
+                    element_shift: 0,
+                    group_stride: 1,
+                    count: 1,
+                },
+            ),
+            Err(ByteGroupReadError::PayloadTooSmall)
+        );
+
+        let payload = sparse_payload(10, &[(0, "0000000000000000"), (8, "1b00")]);
+        let mut state = ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 0,
+                acc: 3 << 62,
+                bitpos: 59,
+            },
+            stream_pos: 8,
+        };
+        assert_eq!(
+            byte_group_read(
+                &mut state,
+                ByteGroupReadSpec {
+                    payload: &payload,
+                    element_shift: 0,
+                    group_stride: 1,
+                    count: 3,
+                },
+            ),
+            Err(ByteGroupReadError::StreamTooShort)
+        );
+
+        let payload = sparse_payload(8, &[(0, "0000000000000000")]);
+        let mut state = ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 0,
+                acc: 3 << 62,
+                bitpos: 59,
+            },
+            stream_pos: 0,
+        };
+        assert_eq!(
+            byte_group_read(
+                &mut state,
+                ByteGroupReadSpec {
+                    payload: &payload,
+                    element_shift: 0,
+                    group_stride: 2,
+                    count: usize::MAX,
+                },
+            ),
+            Err(ByteGroupReadError::OutputSizeOverflow)
         );
     }
 
