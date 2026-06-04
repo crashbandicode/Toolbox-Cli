@@ -4922,10 +4922,10 @@ fn vertex_transform_tail_records(records: &[[u32; 2]]) -> Vec<TransformTailRecor
         .collect()
 }
 
-fn vertex_writer_source<'a>(
-    interstage: &'a VertexAttributeInterstage,
+fn vertex_writer_source(
+    interstage: &VertexAttributeInterstage,
     index: usize,
-) -> Result<&'a [u8], VertexAttributeWriterError> {
+) -> Result<&[u8], VertexAttributeWriterError> {
     interstage
         .sources
         .get(index)

@@ -657,8 +657,8 @@ match table, short source0, match-before-output, short source1, and
 copy-before-output. Per-chunk samples green:
 `cargo test --lib transform_tail_u8x2` (2 tests),
 `cargo test --lib vertex_attribute` (6 tests), and
-`cargo test --lib transform_tail` (29 tests). Latest checkpoint gate remains:
-All green: 226 lib unit (incl. 80 mc::geometry) + all integration; clippy
+`cargo test --lib transform_tail` (29 tests). Checkpoint gate passed:
+All green: 232 lib unit (incl. 86 mc::geometry) + all integration; clippy
 --all-targets clean; --no-default-features builds. Next: expose the real
 writer match-table state (`ctx+0x228` / writer `x0+0x10`) so the driver can run
 the full per-attribute writer loop end-to-end.
