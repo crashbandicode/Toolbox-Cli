@@ -2617,10 +2617,18 @@ pub enum ByteGroupReadError {
     OutputSizeOverflow,
     /// The direct selector's forward byte slice was truncated.
     StreamTooShort,
-    /// Selectors 1 and 2 require the windowed/zstd paths not yet ported.
+    /// Selector 2 requires the zstd/raw window path not yet ported.
     UnportedSelector(u8),
-    /// Selector 0 has only observed byte and u16 element shifts.
+    /// Selectors 0 and 1 have only observed byte and u16 element shifts.
     UnsupportedElementShift(u32),
+    /// Selector 1's multi-window split at 0x80000 groups has not been observed.
+    UnobservedSelector1LargeWindow { group_symbols: usize },
+    /// Selector 1 descriptor build rejected the stream.
+    SegmentDescriptor(RansSegmentDescriptorBuildError),
+    /// Selector 1 byte dispatch rejected the stream.
+    SegmentDispatchBytes(RansSegmentDispatchBytesError),
+    /// Selector 1 u16 dispatch rejected the stream.
+    SegmentDispatch(RansSegmentDispatchError),
     /// Selector 0 byte segment loop rejected the stream.
     ByteSegmentLoop(RansByteSegmentLoopError),
     /// Selector 0 u16 segment loop rejected the stream.
@@ -2840,15 +2848,196 @@ fn write_byte_group_context(state: &mut ByteGroupReadState, context: RansSegment
     state.segment_state = context.state;
 }
 
+fn dispatch_selector1_bytes(
+    out: &mut [u8],
+    context: &mut RansSegmentLoopContext,
+    descriptor: &RansBuiltSegmentDescriptor,
+    payload: &[u8],
+) -> Result<(), ByteGroupReadError> {
+    match descriptor.mode {
+        0 => {
+            let mut cursor = RansStreamCursor {
+                offset: context.stream_pos,
+            };
+            rans_segment_dispatch_bytes_into(
+                out,
+                RansSegmentDispatchBytesSpec {
+                    mode: descriptor.mode,
+                    log: descriptor.log,
+                    value: descriptor.value as u32,
+                    count: out.len(),
+                    stride: 1,
+                    state: &mut context.state,
+                    step: &descriptor.step,
+                    sym: &descriptor.sym,
+                    stream: payload,
+                    payload,
+                    cursor: &mut cursor,
+                    three_lane_readers: None,
+                },
+            )
+            .map_err(ByteGroupReadError::SegmentDispatchBytes)?;
+            context.stream_pos = cursor.offset;
+        }
+        1 => {
+            let mut readers = [
+                three_reader_from_freq(context.reader),
+                context.mode1_extra_readers[0],
+                context.mode1_extra_readers[1],
+            ];
+            let mut cursor = RansStreamCursor::default();
+            rans_segment_dispatch_bytes_into(
+                out,
+                RansSegmentDispatchBytesSpec {
+                    mode: descriptor.mode,
+                    log: descriptor.log,
+                    value: descriptor.value as u32,
+                    count: out.len(),
+                    stride: 1,
+                    state: &mut context.state,
+                    step: &descriptor.step,
+                    sym: &descriptor.sym,
+                    stream: &[],
+                    payload,
+                    cursor: &mut cursor,
+                    three_lane_readers: Some(&mut readers),
+                },
+            )
+            .map_err(ByteGroupReadError::SegmentDispatchBytes)?;
+            context.reader = freq_reader_from_three(readers[0]);
+            context.mode1_extra_readers = [readers[1], readers[2]];
+        }
+        2 => {
+            let mut cursor = RansStreamCursor::default();
+            rans_segment_dispatch_bytes_into(
+                out,
+                RansSegmentDispatchBytesSpec {
+                    mode: descriptor.mode,
+                    log: descriptor.log,
+                    value: descriptor.value as u32,
+                    count: out.len(),
+                    stride: 1,
+                    state: &mut context.state,
+                    step: &descriptor.step,
+                    sym: &descriptor.sym,
+                    stream: &[],
+                    payload,
+                    cursor: &mut cursor,
+                    three_lane_readers: None,
+                },
+            )
+            .map_err(ByteGroupReadError::SegmentDispatchBytes)?;
+        }
+        mode => {
+            return Err(ByteGroupReadError::SegmentDispatchBytes(
+                RansSegmentDispatchBytesError::UnknownMode(mode),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn dispatch_selector1_u16(
+    out: &mut [u16],
+    context: &mut RansSegmentLoopContext,
+    descriptor: &RansBuiltSegmentDescriptor,
+    payload: &[u8],
+) -> Result<(), ByteGroupReadError> {
+    match descriptor.mode {
+        0 => {
+            let stream = payload
+                .get(context.stream_pos..)
+                .ok_or(ByteGroupReadError::StreamTooShort)?;
+            let used = rans_segment_dispatch_into(
+                out,
+                RansSegmentDispatchSpec {
+                    mode: descriptor.mode,
+                    log: descriptor.log,
+                    value: descriptor.value,
+                    count: out.len(),
+                    stride: 1,
+                    states: &mut context.state.states,
+                    step: &descriptor.step,
+                    sym: &descriptor.sym,
+                    stream,
+                    payload,
+                    three_lane_readers: None,
+                },
+            )
+            .map_err(ByteGroupReadError::SegmentDispatch)?;
+            context.stream_pos = context
+                .stream_pos
+                .checked_add(used)
+                .ok_or(ByteGroupReadError::StreamTooShort)?;
+        }
+        1 => {
+            let mut readers = [
+                three_reader_from_freq(context.reader),
+                context.mode1_extra_readers[0],
+                context.mode1_extra_readers[1],
+            ];
+            rans_segment_dispatch_into(
+                out,
+                RansSegmentDispatchSpec {
+                    mode: descriptor.mode,
+                    log: descriptor.log,
+                    value: descriptor.value,
+                    count: out.len(),
+                    stride: 1,
+                    states: &mut context.state.states,
+                    step: &descriptor.step,
+                    sym: &descriptor.sym,
+                    stream: &[],
+                    payload,
+                    three_lane_readers: Some(&mut readers),
+                },
+            )
+            .map_err(ByteGroupReadError::SegmentDispatch)?;
+            context.reader = freq_reader_from_three(readers[0]);
+            context.mode1_extra_readers = [readers[1], readers[2]];
+        }
+        2 => {
+            rans_segment_dispatch_into(
+                out,
+                RansSegmentDispatchSpec {
+                    mode: descriptor.mode,
+                    log: descriptor.log,
+                    value: descriptor.value,
+                    count: out.len(),
+                    stride: 1,
+                    states: &mut context.state.states,
+                    step: &descriptor.step,
+                    sym: &descriptor.sym,
+                    stream: &[],
+                    payload,
+                    three_lane_readers: None,
+                },
+            )
+            .map_err(ByteGroupReadError::SegmentDispatch)?;
+        }
+        mode => {
+            return Err(ByteGroupReadError::SegmentDispatch(
+                RansSegmentDispatchError::UnknownMode(mode),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Read one byte-group stream (`0x110d7f0`).
 ///
 /// The common selector prologue consumes two reverse-reader bits
 /// (`0x110d808..0x110d854`). Selector 0 allocates a segment-decoded stream:
 /// byte elements (`w2 == 0`) route through `0x110dae0`, while halfword elements
 /// (`w2 == 1`) route through `0x110dc30` and are returned little-endian.
+/// Selector 1 builds one descriptor via `0x110de80` and dispatches one window
+/// through `0x110dd80`/`0x110de00`; the unobserved large-window split remains
+/// guarded.
 /// Selector 3 returns the current forward stream slice and advances `x6+0x48`
-/// by `(w4 * w3) << w2` (`0x110da00..0x110dab8`). Selectors 1 and 2 remain
-/// guarded for their windowed/zstd paths.
+/// by `(w4 * w3) << w2` (`0x110da00..0x110dab8`). Selector 2 remains guarded
+/// for its zstd/raw window path.
 pub fn byte_group_read(
     state: &mut ByteGroupReadState,
     spec: ByteGroupReadSpec<'_>,
@@ -2910,6 +3099,40 @@ pub fn byte_group_read(
                 }
                 shift => return Err(ByteGroupReadError::UnsupportedElementShift(shift)),
             };
+            write_byte_group_context(state, context);
+            Ok(ByteGroupRead { selector, bytes })
+        }
+        1 => {
+            if spec.element_shift > 1 {
+                return Err(ByteGroupReadError::UnsupportedElementShift(
+                    spec.element_shift,
+                ));
+            }
+            if group_bytes >= 0x80000 {
+                return Err(ByteGroupReadError::UnobservedSelector1LargeWindow {
+                    group_symbols: group_bytes,
+                });
+            }
+
+            let mut context = byte_group_context_from_state(state);
+            let descriptor = rans_build_segment_descriptor(spec.payload, context.reader)
+                .map_err(ByteGroupReadError::SegmentDescriptor)?;
+            context.reader = descriptor.reader;
+
+            let bytes = if spec.element_shift == 0 {
+                let mut out = vec![0u8; group_bytes];
+                dispatch_selector1_bytes(&mut out, &mut context, &descriptor, spec.payload)?;
+                out
+            } else {
+                let mut out = vec![0u16; group_bytes];
+                dispatch_selector1_u16(&mut out, &mut context, &descriptor, spec.payload)?;
+                let mut bytes = Vec::with_capacity(out_len);
+                for symbol in out {
+                    bytes.extend_from_slice(&symbol.to_le_bytes());
+                }
+                bytes
+            };
+
             write_byte_group_context(state, context);
             Ok(ByteGroupRead { selector, bytes })
         }
@@ -6368,6 +6591,202 @@ mod tests {
         );
     }
 
+    /// Byte-group reader (`0x110d7f0`) selector-1 byte dispatch.
+    ///
+    /// Provenance: refreshed `capture_byte_group_reader.py`, Animal_Bass call 24:
+    /// selector 1, `w2=0,w3=1,w4=35,w5=0`. This routes through one
+    /// `0x110de80` descriptor and byte mode-0 dispatch `0x110dd80`, advancing
+    /// the forward stream cursor by four bytes.
+    #[test]
+    fn byte_group_reader_bass_selector1_byte_dispatch() {
+        let payload = sparse_payload(
+            6512,
+            &[
+                (1918, "ea6bed014cb2007ea542a0d3f92b2868"),
+                (
+                    6480,
+                    "0010c0400002c068de7b004aa9472f322b83a1a8a6e821829438040092e64e7d",
+                ),
+            ],
+        );
+        let mut state = ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 6490,
+                acc: 4917109273557729280,
+                bitpos: 43,
+            },
+            mode1_extra_readers: [
+                RansThreeLaneReader {
+                    ptr: 6791,
+                    acc: 5341445456360767488,
+                    bitpos: 47,
+                },
+                RansThreeLaneReader {
+                    ptr: 7062,
+                    acc: 10022179518769823744,
+                    bitpos: 48,
+                },
+            ],
+            stream_pos: 1918,
+            segment_state: RansStateBuffer {
+                states: [
+                    106104675681684,
+                    92019277541,
+                    847353644991333,
+                    4038367482700755552,
+                ],
+                flag: 15,
+            },
+        };
+
+        let read = byte_group_read(
+            &mut state,
+            ByteGroupReadSpec {
+                payload: &payload,
+                element_shift: 0,
+                group_stride: 1,
+                count: 35,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(read.selector, 1);
+        assert_eq!(
+            read.bytes,
+            hex_bytes("0000000000000000000000010000000001000000000300010000000101000000000000")
+        );
+        assert_eq!(
+            state,
+            ByteGroupReadState {
+                reader: RansThreeLaneReader {
+                    ptr: 6485,
+                    acc: 5855530908632649536,
+                    bitpos: 55,
+                },
+                mode1_extra_readers: [
+                    RansThreeLaneReader {
+                        ptr: 6791,
+                        acc: 5341445456360767488,
+                        bitpos: 47,
+                    },
+                    RansThreeLaneReader {
+                        ptr: 7062,
+                        acc: 10022179518769823744,
+                        bitpos: 48,
+                    },
+                ],
+                stream_pos: 1922,
+                segment_state: RansStateBuffer {
+                    states: [
+                        221301007954,
+                        4945825627247054004,
+                        63623282601795,
+                        1871725651352470,
+                    ],
+                    flag: 15,
+                },
+            }
+        );
+    }
+
+    /// Byte-group reader (`0x110d7f0`) selector-1 u16 dispatch.
+    ///
+    /// Provenance: refreshed `capture_byte_group_reader.py`, Animal_Bass call 6:
+    /// selector 1, `w2=1,w3=1,w4=30,w5=0`. This routes through one
+    /// `0x110de80` descriptor and u16 mode-0 dispatch `0x110de00`, then returns
+    /// little-endian bytes.
+    #[test]
+    fn byte_group_reader_bass_selector1_u16_dispatch() {
+        let payload = sparse_payload(
+            6568,
+            &[
+                (
+                    550,
+                    "2d0b7de52ebe2a5d4b452e4d10f75029bab99b570751286acd531c0000f47e66",
+                ),
+                (
+                    6536,
+                    "3fe02162ce41bdae0c90a23efb03dcf4038e46eb56f137c3843c42ff7fedcf12",
+                ),
+            ],
+        );
+        let mut state = ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 6546,
+                acc: 5490872100723124416,
+                bitpos: 52,
+            },
+            mode1_extra_readers: [
+                RansThreeLaneReader {
+                    ptr: 6785,
+                    acc: 14801326531105989520,
+                    bitpos: 59,
+                },
+                RansThreeLaneReader {
+                    ptr: 7069,
+                    acc: 11236589065793971168,
+                    bitpos: 53,
+                },
+            ],
+            stream_pos: 550,
+            segment_state: RansStateBuffer {
+                states: [49227725862390, 14614913526, 1246709343325, 657827286397],
+                flag: 15,
+            },
+        };
+
+        let read = byte_group_read(
+            &mut state,
+            ByteGroupReadSpec {
+                payload: &payload,
+                element_shift: 1,
+                group_stride: 1,
+                count: 30,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(read.selector, 1);
+        assert_eq!(
+            read.bytes,
+            hex_bytes(
+                "0a000a000a000a000a000a000a000a000a000a000a000b000b000700050007000700060007000a000b00080008000800050006000600060007000900"
+            )
+        );
+        assert_eq!(
+            state,
+            ByteGroupReadState {
+                reader: RansThreeLaneReader {
+                    ptr: 6541,
+                    acc: 15954232304648028280,
+                    bitpos: 59,
+                },
+                mode1_extra_readers: [
+                    RansThreeLaneReader {
+                        ptr: 6785,
+                        acc: 14801326531105989520,
+                        bitpos: 59,
+                    },
+                    RansThreeLaneReader {
+                        ptr: 7069,
+                        acc: 11236589065793971168,
+                        bitpos: 53,
+                    },
+                ],
+                stream_pos: 566,
+                segment_state: RansStateBuffer {
+                    states: [
+                        100818382515160028,
+                        29931342885566,
+                        20426085882968341,
+                        10777842260191934,
+                    ],
+                    flag: 15,
+                },
+            }
+        );
+    }
+
     /// Byte-group reader (`0x110d7f0`) selector-3 direct-forward branch.
     ///
     /// Provenance: `capture_byte_group_reader.py`, Animal_Bass call 16:
@@ -6421,29 +6840,27 @@ mod tests {
 
     #[test]
     fn byte_group_reader_rejects_unported_selectors_and_bad_bounds() {
-        for selector in 1..=2u64 {
-            let payload = sparse_payload(8, &[(0, "0000000000000000")]);
-            let mut state = byte_group_state(
-                RansThreeLaneReader {
-                    ptr: 0,
-                    acc: selector << 62,
-                    bitpos: 59,
+        let payload = sparse_payload(8, &[(0, "0000000000000000")]);
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 0,
+                acc: 2 << 62,
+                bitpos: 59,
+            },
+            0,
+        );
+        assert_eq!(
+            byte_group_read(
+                &mut state,
+                ByteGroupReadSpec {
+                    payload: &payload,
+                    element_shift: 0,
+                    group_stride: 1,
+                    count: 1,
                 },
-                0,
-            );
-            assert_eq!(
-                byte_group_read(
-                    &mut state,
-                    ByteGroupReadSpec {
-                        payload: &payload,
-                        element_shift: 0,
-                        group_stride: 1,
-                        count: 1,
-                    },
-                ),
-                Err(ByteGroupReadError::UnportedSelector(selector as u8))
-            );
-        }
+            ),
+            Err(ByteGroupReadError::UnportedSelector(2))
+        );
 
         let payload = sparse_payload(8, &[(0, "0000000000000000")]);
         let mut state = byte_group_state(
@@ -6465,6 +6882,52 @@ mod tests {
                 },
             ),
             Err(ByteGroupReadError::UnsupportedElementShift(2))
+        );
+
+        let payload = sparse_payload(8, &[(0, "0000000000000000")]);
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 0,
+                acc: 1 << 62,
+                bitpos: 59,
+            },
+            0,
+        );
+        assert_eq!(
+            byte_group_read(
+                &mut state,
+                ByteGroupReadSpec {
+                    payload: &payload,
+                    element_shift: 2,
+                    group_stride: 1,
+                    count: 1,
+                },
+            ),
+            Err(ByteGroupReadError::UnsupportedElementShift(2))
+        );
+
+        let payload = sparse_payload(8, &[(0, "0000000000000000")]);
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 0,
+                acc: 1 << 62,
+                bitpos: 59,
+            },
+            0,
+        );
+        assert_eq!(
+            byte_group_read(
+                &mut state,
+                ByteGroupReadSpec {
+                    payload: &payload,
+                    element_shift: 0,
+                    group_stride: 1,
+                    count: 0x80000,
+                },
+            ),
+            Err(ByteGroupReadError::UnobservedSelector1LargeWindow {
+                group_symbols: 0x80000,
+            })
         );
 
         let mut state = byte_group_state(
