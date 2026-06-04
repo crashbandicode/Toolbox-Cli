@@ -643,6 +643,28 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP4 chunk byte three-lane decode
+**Committed:** B2-CP4 byte three-lane chunk landed in `425532c`, porting
+`0x110eb50` as `geometry::rans_three_lane_decode_bytes_into` and wiring
+`geometry::rans_segment_dispatch_bytes_into` mode 1 through it. Durable local
+evidence: `verify_rans_byte_three_lane.py` replayed **30/30** byte mode-1 calls
+from `segment_dispatch_byte_capture.json` for output bytes and all three reader
+writebacks. Coverage includes `count % 12` values 0/1/2/4/6/7/8/9/10/11, logs
+1 through 9 as observed, stride 1 and stride 6. Updated
+`verify_segment_dispatch_byte.py` now replays the full byte dispatch population:
+mode0 **28/28**, mode1 **30/30**, mode2 **10/10**. Rust coverage: fixture-free
+Animal_Dragonfly dispatch call 61 (`count=21,log=3,stride=1`) covers the
+12-symbol main loop plus 9-symbol tail, the same golden is wired through byte
+dispatch mode 1, and defensive tests reject missing readers, table mismatch,
+zero stride, undersized output, and truncated payload. Per-chunk sample green:
+`cargo test --lib rans_three_lane_decode_bytes` (1 passed),
+`cargo test --lib rans_segment_dispatch_bytes` (4 passed),
+`cargo test --lib rans_three_lane` (2 passed), and `cargo build`. Last checkpoint
+baseline remains: All green: **195 lib unit** (incl. **49** `mc::geometry`) +
+all integration; clippy `--all-targets` clean; `--no-default-features` builds.
+Next: return to `0x110d7f0` selector 0/1 byte segment paths; `0x110dd80` now has
+all observed dispatch modes available.
+
 ### 2026-06-03 - MeshCodec B2-CP4 chunk byte segment dispatch
 **Committed:** B2-CP4 byte segment dispatch chunk landed in `5501c6f`, porting
 the observed mode-0 and mode-2 branches of `0x110dd80` as
