@@ -643,6 +643,25 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec CP5a vertex driver setup/step
+**Committed:** CP5a ports the observed mode-1 vertex byte-group setup
+`0x10fafe0` plus one `0x10f924c` attribute-driver wrapper step in
+`src/mc/geometry.rs`. Durable local evidence:
+`capture_vertex_driver_setup.py` enumerated Bear/Bass/Dragonfly setup calls,
+`verify_vertex_driver_setup.py` replayed **3/3**, and
+`verify_vertex_attribute_driver.py` replayed the table/limit sequence for
+**25/25** wrapper calls; `verify_byte_group_transform.py` still replays the
+wrapper outputs **25/25**. Fixture-free Rust coverage uses Animal_Dragonfly
+payload bytes inline for setup, an even first wrapper record, and the captured
+active second wrapper step; defensive tests guard zero/oversized setup counts,
+mode-0 preload, malformed table shapes, exhausted cursors, nonzero processed
+vertices, partial blocks, and the unported inter-wrapper continuation. Full
+gate passed: All green: 226 lib unit (incl. 80 mc::geometry) + all
+integration; clippy --all-targets clean; --no-default-features builds. Next:
+port the inter-wrapper setup-dispatch/source-materialization at
+`0x10f9314..0x10f93d8`, because a full table loop diverges at attribute 1
+without those reader/stream side effects.
+
 ### 2026-06-04 - MeshCodec chunk 0 transform-tail cleanup
 **Committed:** chunk 0 code-quality cleanup landed in two behavior-preserving
 commits: `7a222df` DRYs the delta transform-tail cursor initialization and

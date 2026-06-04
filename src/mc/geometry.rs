@@ -4244,6 +4244,229 @@ pub fn byte_group_transform(
     })
 }
 
+/// Mutable state for the observed vertex attribute driver loop (`0x10f924c`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VertexAttributeDriverState {
+    /// Driver cursor stored at `ctx+0x218`.
+    pub current_attribute: usize,
+    /// Vertex count already consumed by prior blocks (`ctx+0x108`).
+    pub processed_vertices: u32,
+    /// Total vertex count for the current sub-block (`ctx+0x10c`).
+    pub vertex_count: u32,
+    /// Per-pass block limit (`ctx+0x110`), compared against remaining vertices.
+    pub block_limit: u32,
+    /// The byte-group transform state rooted at `ctx+0x70`.
+    pub transform_state: ByteGroupTransformState,
+    /// The shared byte-group reader rooted at the driver stack frame.
+    pub byte_state: ByteGroupReadState,
+}
+
+/// One per-attribute output from the vertex driver before writer dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VertexAttributeTransform {
+    /// Attribute/table index selected from `ctx+0x218`.
+    pub index: usize,
+    /// Packed table entry from `ctx+0x240[index]`.
+    pub table_entry: ByteGroupTransformTableEntry,
+    /// Destination byte offset from `ctx+0x27c[index]`.
+    pub out_offset: u32,
+    /// Attribute column offset from `ctx+0x310[index]`.
+    pub column: u8,
+    /// Limit passed as `w6` to `0x10fb2e0`.
+    pub limit: u32,
+    /// Return value from `0x10fb2e0`.
+    pub ret: u32,
+    /// Width records returned through the wrapper out pointer/count pair.
+    pub records: Vec<[u32; 2]>,
+}
+
+/// Errors from the observed vertex attribute driver setup/loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VertexAttributeDriverError {
+    /// The setup bit count has only been observed for non-empty small tables.
+    UnobservedTableCount(usize),
+    /// The setup reverse reader tried to load outside the payload.
+    PayloadTooSmall,
+    /// Bit/counter arithmetic overflowed.
+    ArithmeticOverflow,
+    /// `0x10fafe0` count bits were zero, which would take an unobserved state path.
+    UnobservedZeroSetupCountBits,
+    /// `0x10fafe0` mode 0 preloads four streams; current captures all return in mode 1.
+    UnobservedSetupMode(u32),
+    /// The table arrays do not agree with `ctx+0x2c4`.
+    TableShapeMismatch {
+        symbols: usize,
+        entries: usize,
+        offsets: usize,
+        cols: usize,
+    },
+    /// The driver cursor was outside the table.
+    CurrentAttributeOutOfRange { current: usize, total: usize },
+    /// The caller asked for another step after the table was exhausted.
+    NoAttributesRemaining { current: usize, total: usize },
+    /// Only the first vertex block (`ctx+0x108 == 0`) has been captured.
+    UnobservedNonzeroProcessedVertices(u32),
+    /// Current fixtures have a single block where `ctx+0x110 >= remaining`.
+    UnobservedPartialVertexBlock { remaining: u32, block_limit: u32 },
+    /// Zero-size vertex blocks have not been observed.
+    UnobservedZeroVertexLimit,
+    /// Nested byte-group transform rejected a stream.
+    ByteGroupTransform {
+        index: usize,
+        error: ByteGroupTransformError,
+    },
+    /// A zero wrapper return jumps to an unported driver path at `0x10f9410`.
+    UnobservedZeroTransformReturn { index: usize },
+}
+
+/// Observed port of `0x10fafe0` for vertex byte-group transform setup.
+///
+/// The initializer consumes `table_count` reverse-reader bits into
+/// `count_bits` (`0x10fb018..0x10fb034`), then consumes one more bit into
+/// `mode` (`0x10fb040..0x10fb058`). Current fixtures all set mode 1, so the
+/// stream-preload branch for mode 0 remains guarded.
+pub fn vertex_attribute_driver_setup(
+    state: &mut ByteGroupTransformState,
+    byte_state: &mut ByteGroupReadState,
+    payload: &[u8],
+    table_count: usize,
+) -> Result<(), VertexAttributeDriverError> {
+    if table_count == 0 || table_count > 32 {
+        return Err(VertexAttributeDriverError::UnobservedTableCount(
+            table_count,
+        ));
+    }
+
+    let reader = &mut byte_state.reader;
+    let bitpos = reader.bitpos;
+    let ptr_step = ((bitpos >> 3) ^ 7) as usize;
+    let next_ptr = reader
+        .ptr
+        .checked_sub(ptr_step)
+        .ok_or(VertexAttributeDriverError::PayloadTooSmall)?;
+    let bits = (checked_byte_group_u64_le(payload, reader.ptr)
+        .map_err(|_| VertexAttributeDriverError::PayloadTooSmall)?
+        >> (bitpos & 63))
+        | reader.acc;
+
+    let normalized_bitpos = bitpos | 0x38;
+    let table_count_u32 = table_count as u32;
+    let count_bits = (bits >> (64 - table_count_u32)) as u32;
+    let acc_after_count = bits
+        .checked_shl(table_count_u32)
+        .ok_or(VertexAttributeDriverError::ArithmeticOverflow)?;
+    let bitpos_after_count = normalized_bitpos
+        .checked_sub(table_count_u32)
+        .ok_or(VertexAttributeDriverError::ArithmeticOverflow)?;
+    if count_bits == 0 {
+        return Err(VertexAttributeDriverError::UnobservedZeroSetupCountBits);
+    }
+
+    let mode = (acc_after_count >> 63) as u32;
+    state.count_bits = count_bits;
+    state.mode = mode;
+    reader.ptr = next_ptr;
+    reader.acc = acc_after_count
+        .checked_shl(1)
+        .ok_or(VertexAttributeDriverError::ArithmeticOverflow)?;
+    reader.bitpos = bitpos_after_count
+        .checked_sub(1)
+        .ok_or(VertexAttributeDriverError::ArithmeticOverflow)?;
+
+    if mode != 1 {
+        return Err(VertexAttributeDriverError::UnobservedSetupMode(mode));
+    }
+
+    Ok(())
+}
+
+/// Observed port of one `0x10f924c` per-attribute driver step through wrapper output.
+///
+/// This stops before the setup-dispatch/source-materialization and writer tables
+/// at `0x10f9314..0x10f93d8`; it returns the width records those later stages
+/// consume. Current captures cover the single-block path where `ctx+0x108 == 0`
+/// and `ctx+0x110` is at least the vertex count.
+pub fn vertex_attribute_driver_step(
+    state: &mut VertexAttributeDriverState,
+    table: &TableBuild,
+    payload: &[u8],
+) -> Result<VertexAttributeTransform, VertexAttributeDriverError> {
+    let table_len = table.symbols as usize;
+    if table.entries.len() != table_len
+        || table.offsets.len() != table_len
+        || table.cols.len() != table_len
+    {
+        return Err(VertexAttributeDriverError::TableShapeMismatch {
+            symbols: table_len,
+            entries: table.entries.len(),
+            offsets: table.offsets.len(),
+            cols: table.cols.len(),
+        });
+    }
+    if state.current_attribute > table_len {
+        return Err(VertexAttributeDriverError::CurrentAttributeOutOfRange {
+            current: state.current_attribute,
+            total: table_len,
+        });
+    }
+    if state.current_attribute == table_len {
+        return Err(VertexAttributeDriverError::NoAttributesRemaining {
+            current: state.current_attribute,
+            total: table_len,
+        });
+    }
+    if state.processed_vertices != 0 {
+        return Err(
+            VertexAttributeDriverError::UnobservedNonzeroProcessedVertices(
+                state.processed_vertices,
+            ),
+        );
+    }
+
+    let remaining = state
+        .vertex_count
+        .checked_sub(state.processed_vertices)
+        .ok_or(VertexAttributeDriverError::ArithmeticOverflow)?;
+    if remaining == 0 {
+        return Err(VertexAttributeDriverError::UnobservedZeroVertexLimit);
+    }
+    if state.block_limit < remaining {
+        return Err(VertexAttributeDriverError::UnobservedPartialVertexBlock {
+            remaining,
+            block_limit: state.block_limit,
+        });
+    }
+
+    let index = state.current_attribute;
+    let table_entry = ByteGroupTransformTableEntry {
+        raw: table.entries[index],
+    };
+    let result = byte_group_transform(
+        &mut state.transform_state,
+        &mut state.byte_state,
+        ByteGroupTransformSpec {
+            payload,
+            table_entry,
+            limit: remaining,
+        },
+    )
+    .map_err(|error| VertexAttributeDriverError::ByteGroupTransform { index, error })?;
+    if result.ret == 0 {
+        return Err(VertexAttributeDriverError::UnobservedZeroTransformReturn { index });
+    }
+    state.current_attribute += 1;
+
+    Ok(VertexAttributeTransform {
+        index,
+        table_entry,
+        out_offset: table.offsets[index],
+        column: table.cols[index],
+        limit: remaining,
+        ret: result.ret,
+        records: result.records,
+    })
+}
+
 /// One run/copy record consumed by the `0x10fc5e0` byte-copy transform tail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransformTailRecord {
@@ -8757,6 +8980,440 @@ mod tests {
             }
         );
         assert_eq!(byte_state, initial_byte_state);
+    }
+
+    /// Vertex attribute driver setup (`0x10fafe0`) plus observed wrapper steps
+    /// from the per-attribute loop (`0x10f924c..0x10f92b8`).
+    ///
+    /// Provenance: `capture_vertex_driver_setup.py` and
+    /// `capture_byte_group_transform.py`, Animal_Dragonfly. The setup capture
+    /// enumerates all fixtures: Bear/Bass use `w3=8,count_bits=255`; Dragonfly
+    /// uses `w3=9,count_bits=382`; all set mode 1. `verify_vertex_driver_setup.py`
+    /// replays 3/3 setup calls, and `verify_vertex_attribute_driver.py` replays
+    /// 25/25 attribute-loop wrapper calls across Bear/Bass/Dragonfly.
+    #[test]
+    fn vertex_attribute_driver_dragonfly_setup_and_steps() {
+        let payload = hex_bytes(concat!(
+            "00000c010101845200840b0a001400392402f0fefcfcf0fefe20fe00fe1000fef010f010f020fc00f020f0200010f000",
+            "10f0000008002b09669a4e3184b3b3b35c98457319ab2910021520032030020204203002020202100360020406100384",
+            "30810a4407526548d4e399bb07cedced5dfa99be051fd846a635667359460f3d0a2d2407b874ac18455211e59fef27dd",
+            "9c6083ec4d0e185b120f0b61b9823b461c460a1038f806592d677b431a430042003f009d6905bd43a712d2f1406d5020",
+            "1390440703604bf92c775b47906a1b1435880dca8ec35a9e6298d51835bdb26d124da3adce72141ad464a6c0cb542a21",
+            "3397242d4946102e74d8488d793d4dddadadfe37588dc588960f255dcc0528e3dae68eb2cfff139b1d8cd3464db22a65",
+            "f7d860c9ea08e9929d73af13bedc94561384e4922958e90289cfff07406de6e053184ad3a2b8f9785ec7f9fbb8d1ec59",
+            "62961750ab7a9b21265e1ff509188c6aa65d67af974fbda6a91eb5bbb775c13fff022184fb160c89d92a92aa745097e0",
+            "d77eccdeaaf822225114bcc6bd4060471e7b50effae7a216c5c2fc338d930365b16543f1f8f3dc2266a591e49ed01afd",
+            "49cfc2c7a0be3144b4020c00962e820c256acef5729bced04a0631a4f05002a15c952e8eb20033317003624f1323c968",
+            "5822e90852e271ae9e523c1a38f0a1a1097bb3a4e89e5f33f464104d3082a090006e636580af1e03a91dc26c09676fcf",
+            "3a40c3f1e650234c4184963c30d2650000502bf1a80000a4292bab1124072cb2a90000262b0cb40000422c05b4b31e17",
+            "2ca5b38e241f2b5623000024296d21e725e32b14a800001e2c5a2800006c2e6120a9221c2ec220ad24cf2d82a7b723a5",
+            "2d69a90000742ce3b200006e2c0cb11524512c2cac0000372beaad0000c92c90b30000bc2c0faa00007a2d02aa000038",
+            "2e7aa77f24c52a59276625c12bb426d523b329d02a0000102ac3270000392ca92472226c2b352ce622302cc42a6d219f",
+            "2c942b0000092d012700805a2d3929b123d22c07270000ad286b2b0080342da92a211e1f2da22aa426852c6c2aca234c",
+            "2bdb292b19522d3a29ca27e92b9529ed271f2c5d28ef23392d8f2af126dd2aca28b322562dc4280080872c0e2c0080b3",
+            "2b8a2c9ba4dd2aca2808a6112d92280000352d2dacb626f125109d2321cd9f6328cf24222546a07927a92812a9c120f8",
+            "9da61997252e28aaa96c28ad1828a2d21c8e2a1b25069a9f29f4260c2918261bac931e3c2aaf20da9844295123bb26cf",
+            "2baeae92224c2afb9c751e5c2945106219772a9321a51ec32ae91b7e20282b21a19f26f22b41ac7e1e761de2a9c6249b",
+            "2ba2ac2a25d22b9aab2b25ac26a1198e25b22833a82023192141a2f022d594102322243718dea180210b19e5a1f92045",
+            "2763abc81e438cfea2e5213f254aab441e5a254cab129cc52dada90fb4322eebac0eb4312e9812a21fbe2b0cb1992063",
+            "2c23ae0000662de9ad6a9ed52dd5a5bcac042ea0b00000bc2aacb30000c62a0cb1aa1ded2d20a0a833082f332c0d34f3",
+            "2e00804d1ee22d99a8bd308a2e51ab0db4fe2e0080a8b3132f332caa9df82d20a04d9eed2d99a8bdb0942e51ab030301",
+            "1a021c0104000600427e801103031c190400090006009028d6ff007f807f8002031a1c0007001c20c064a5a1c25aa799",
+            "1d081e287cf86722d136dca4e94a9e0626d329f808163d54d718975e11a86392712f7abbc07b16111b0710000d030300",
+            "03061905020309020b180b0100117430ab8c86c090633daa8d107aef353a584f49af8df526eea804990ae6e6085c6e0a",
+            "32013df2f109f502d0d6fd0a40fbb0116eddb9e9603ed2fd5dfdf5d77ae652edcade20ff1cfa21eb3112b1f8eb2cc900",
+            "1a477b0637e330f2ff0b57f7f3f625f86bffa7eabe1797f711e096bb69039bfab1ea3408a3f253fb0000880e2209e52e",
+            "5807d7f948f76dfa41f85fe6c1ff290ae20bc5f55af4d237000050dbeafcc4f9d936c34ae803bb0bc3fca8f61f0cfcfa",
+            "b90b5effb71029faf647424d7e0ebcfc3ef83d023ef87e0a83eeb50acd0f48f9fbeba3f08d29ee1b140059723ff12290",
+            "0c1370716eff1e95f31124f7c80f66970d00fdff7fed64000c00993fd3f1b6c44c005001cdf3c925233b052a0000f3c6",
+            "96494f8abd2f9ffa9901e8f29fc170fe4f958128560a5c03e93f12002aa36a3f2b41abf7ae0242344ec13eec63998d29",
+            "073dbae252fdbecbd5be55084f077eb7882cd886abcaae719c24d81e92501891e2ee9e4989c3f9b41906cf729cabe4a5",
+            "098ce6d1140f8f191c8bc44f0e64fa609b6f7cc35a18fd626cfc412a4244d22588344191f465d241f97598ce04f840fd",
+            "7478e15e16e437bbeae99dffa745d72ede75c67c897204a156f29fda04061c151914554843b2a90065331ce2de1a03f0",
+            "f503f740076003e89aebfacb004001f9052aa1631252f4c701220e2915af01add88f1bc002690b12113dff0c14bc0bdd",
+            "020cfb480b2a005d1b19030a2c25faaaeed1f92e0744055d048505cdfcca0b4bf5a784940a94031c0262fa53f1440364",
+            "f606f6b000cedf45061504bb04fe033cfa9411c6fa06f9d5ff86082908e9c2a206752e5ef14404fafd35ba3ee8c1082e",
+            "fc5906dafd38fb9ef89fff52f910fdecf466d7dee7a9fe25f7b0fa77feb0faccf89cf3d8f5b209b902f6f453f48974f2",
+            "3812006c1cad0388e419e0c2fe2c005418750365e9e7427011a200b4e5b2fb8dfe0df86d24bdff2fe88dfbddfda8f50a",
+            "16c8ff49e5b2fbcbfdf2028be6320212e9aa0267e6f3c459fd30002619ea0330e83bf8c0ff6928ec0639e027019ea93b",
+            "06efff1b0fae034ff2c7f8ecff58f0d1060500370e8a0328f3dbf83000f4c0df7a9819209091dcb0fb9b5672a028fc5b",
+            "1fc0ff3bf61000347248172e544f068a011a27d9ff7d04a59d3493b9e2d9fa6f1e3572a80b38bf870c312af8bf38e158",
+            "023113056fbc0c6e016912a4c08607c425003897becb2ea455d20017e1ff25637baaee256be7feea122257841d894ccb",
+            "184251a692351be59e75276a82fa0a008d9c1c25de636eec216fb1f75774e6fc00966af3f24279f201b19921ddaa9a51",
+            "de2826e443f36483ed4667d5efd8d91cbcbf2d4c3c462cfdf2c72469f20dc3520f20c7e3fb4ae80afd82d435ed9dca5e",
+            "f5c8bddeed1bbb4bd52fb970d538422212bab457e86b3e0aaff333afb9433da3b03a2a57c3732930c46a2047cd880919",
+            "e4f90fa8dd57104addd35f10ec29096b3a00fbaa45b6502dfb9c1605d7091a97d3d7f695c53ee523c3bdddfbe3de7cb3",
+            "024b806e042b88db0292d4d0daa8cde6d2d910e0e1e01fe71de45bea4eee8df4c79a97efef8bb50811744bf74ba728e1",
+            "d57725fda3835c02db941901d25bab2dc1e71f384f66df228f817de8bf7a4c5d7ca4fdd91e521a7e2bcb120d9b7d1200",
+            "b9f1d0f738eac1f71cf1cff7fed342fcbccc42fca6390c3c08c7134308280b3a08bc244bf7372e4ef750254cf7bf41e4",
+            "05534ad205c1a305630865204af7023cf005fef24405d1ea570515f3450559fa320506f8def73cdb43fcf9e13f00bcda",
+            "3700fbe13e002ee946e0e45500bedd4a00ace4540007ec5f00bc655104f248192188428427e37129f8b617f60234d02b",
+            "421e204c3864e9fb2858e3062f6335a20aaeddb13400e2dfb4c731c22a27e1aee5d8159a0f50f8c3e6fb02a7eaeee5d1",
+            "ea3965691030f2c524fb9516deab5f620a0eb7e7debf90340551e8a3ad16eddea855a09ef511c1e4d41b618bd8229c92",
+            "13a98b1a034185b41052224fcbb57f92fbcc2fd5bd2e6afdfa772640604863a72306b02ed7b6451d41dab762cf5aa8d1",
+            "8880f04225414a6a2c8d01e0529216e40142d009014245424f04824840155228915285360e206edaf2f764cf92b26d72",
+            "9355eb5c2aaedc846c4104b7c93e205331b0639df0c78aa272b1c558daa198fa68bbceb63354cf9a3d61959244b75876",
+            "3586024419757afa03cb25c4e6424c1cc72bb844f378abf913b06a9304ee0d3cd8853ffa6ce42f9ce9c5000dd640dabf",
+            "edd7a3717488d685ea15eb65d1ecb48e2a6bfc02130103021c04050100dd0081008100ca8f0c960c9309813a6f7c063c",
+            "6f664b7b07397082fb820ba13fb1632e70bd683f687f003b650b837f007fff0d82810083fc4fab7eff0a821b6ea83eb8",
+            "5e7f027f003e6b3271b164b96281fda148b5648825880ba1532f09ce1b2f06a9b2eefda74e3cee7ffd43027d1739f765",
+            "12f820f40bf7d04fda21d95ba8f005be31d80dd514d20eae07aa51edf6cf09c53f820a820dc01ae1fac308e4f332ebff",
+            "1810d1001933ed0a827eff7f000dfc0d09edf960533f6d4367f2aa08b509810686dea3f9812078376ff770fdb5fdf7e5",
+            "a200d4004bee45e63f2409fcd4f539086cf442008100b5009ae9840a821a971883f587f7870bf70e4008f4fd8af98b20",
+            "86eff7f3f6d8a82a8bff8f078171e379dc7ff8ef842297ff8303f7033906419ec7eb86ee8578da7ffa7ef47ef37ff876",
+            "fd1c3ee0035040bafaa806b039810688e883027df84c9b67b868bb7df37efc810281fb8fda81028fe182f1a8f8cb259b",
+            "e581038fdf81ffad07b42094045d266b004dd58e00bff7a539bb0dacf0bc11ba372df93323b426df371be717e3e339fb",
+            "d86bf26dea4c1fbc47b230be2632fb6fed67f782ff81fa8100a23bbb0bbd0eed3cf340f9f406f508d9f23e51ff41b74b",
+            "e5a123a614b2203064d11bba1e81000e82ce8b7dfc76e009bdefcb484734e92d8d43960690ae0eb929b428217a247a0c",
+            "7e1e70bc60b162bf32f107dd1f2a6d1f71b766af1dd111d515d0aee6a39be0f4d000ccadfb05560c593a63167c197c38",
+            "72fb7a087b396c1c37d10a23381c79e06c1f79027fbf6c0f7eece9f1e7ab064de9fb05f7084ac603dbf7f05bd30ff007",
+            "fa74e775e5278b3670750b760d7dfb7c0c309e315774e671d7cf539a21e55ff430ad05003406ab3b9e0da81784388e1a",
+            "84fb883794078718c320c1cdf21c871f87e09401810e82bf94ed14acf8f2164d15f8f4fcf74a3bf61102265b2d07060f",
+            "10731a2776741c369077f476f67e0930637ef831ab6e2c721df1fef101f100f987018496f597f50f88f007f315f309f3",
+            "09fe060c15f9ff0ce7daf8ec07e9eb310e2de6320b051e315cfd73e477132c2c58097cf76f003900611069017f056d23",
+            "76ff6e002ce47799fb94c082008200bac13b9c58a774ce5fac73cc9bc5f08fec8694bfb79b7df67ef578d85daa7bef70",
+            "c4982c81fd82f788ef8208990a8102992599058b014bd632f867f948186be6f400f4fbf4fef501f503ee00e098eeee00",
+            "0900fcfffefefffbee070407ec00ee000409ecf000e614f9fcdfeddf07e4e118e7ff82f8817fff0a826efb66f4fb830c",
+            "85078285fcb9a7f88183fd810082fd3171bc622c76ee7d82038206b1639b460e827dfcf3a07efd851e9cf6870ac44528",
+            "8a0d8257a649a0eaf4a9f3c2ebbfe8a8fb81fd91f788f2810082f483f088dcb529331abd0df20d81f881f782fd82fd82",
+            "fdeffeeffdeffeefffef039bec0999cffbf1af5eb05fb578d44fe1f3e08f23b7a330b5196d65a5b2e90822df3462e565",
+            "0ec85378dfee23d3fc099435aaf8fbd7514b6fd90841ba564c65bbf8d5e076c7630252e64c4935b80bd5ad94e30d48b6",
+            "9e6b0d4d64cce5670c3df311e85ff9c4eab05defbd339c145e62cbc2c791a8b0ca4e179b6df48390c780c72c28e4e8ad",
+            "e3e545ba9cbaa9b7c661c16cbca62131445e70bc0947f70203011b1c0400090042026011f1a106940000623a38020e11",
+            "e8df1fe8f19df28043fd003620c8dfebf1fffff7fbfd0400d0498e215b22b1399b96d244781d50f180ecf5c918fa3cfa",
+            "020800746031e1849d08707fdc2700844968a34642adb3c54afa840cc561804508d710e02bb984607340850da007534c",
+            "0f4fdf0455190820d5ef4801844b22c243c28c08b077414d064425fe63d004c2495f626764eec63de033052602461064",
+            "225039200a3281377012ded1675b70d764cc1371712927697ef23f8029e482c1c9d3318482ad09371fc0aa9e05622981",
+            "042b92cd17363ba66723af33c0c6e8ce7ce7ef298cdabe0ccf34ca7a7174a7227c596b1ed88092f7d281280731aacf5f",
+            "c0c5af5083bd907e2e49b6a8ee7d3ba544ad64659414335b945182d2266142edbb49ab8eb2610461aec4be476a2d23e4",
+            "5806a2a80a73c44cbb46993d8b44a0115708b7148a623121047d3faedb020d20119c36c384c6008bc90efc07781b4404",
+            "f866efff43fe001000d08c502d459eff00a075fd4ef5fc2a23d1aa9e4345a9750c8d73a0831cea552f4bf6a10ef64a24",
+            "222ae75fd103c6bed0d8cb5d5966d02043f76610b5a488f7e6a3dea353ec341174e46de67055e1b88f1fa4d596778df9",
+            "9b778f7a72b778705609392724fa9020ea40ca7de913000021fffe63ffffe917bfb0c80c03a68f00947be0e071da0087",
+            "df002620f89bc3f9ff5f37f7ff031014225f3b28f8ee18139e0b245791681048a6b373a9908555eb47fd558be89f64d7",
+            "750fbe7ce6ff078197fc1c2e0ece2947abff427a0d8ddbec5873c3081494b081aafa1c551502",
+        ));
+        let table = TableBuild {
+            fwd: 0,
+            rev_ptr: 0,
+            rev_acc: 0,
+            rev_bitpos: 0,
+            w8: 523,
+            symbols: 9,
+            dir_bit: 1,
+            entries: vec![
+                0x0a00_100b,
+                0x0a00_0802,
+                0x0a00_0802,
+                0x1400_0a13,
+                0x1400_100a,
+                0x1400_100a,
+                0x1400_0803,
+                0x1400_0801,
+                0x1400_0804,
+            ],
+            offsets: vec![0, 6, 8, 5232, 5236, 5240, 5244, 5247, 5248],
+            cols: vec![0, 6, 8, 0, 4, 8, 12, 15, 16],
+            longs: vec![131082, 524308],
+            byte_group_total: 15696,
+            max_prod: 48,
+        };
+        let mut state = VertexAttributeDriverState {
+            current_attribute: 0,
+            processed_vertices: 0,
+            vertex_count: 523,
+            block_limit: 32768,
+            transform_state: ByteGroupTransformState {
+                mode: 2,
+                count_bits: 0,
+                record_count: 0,
+                second_count: 0,
+                third_count: 0,
+                tail_count: 0,
+            },
+            byte_state: ByteGroupReadState {
+                reader: RansThreeLaneReader {
+                    ptr: 4469,
+                    acc: 13789291984359756104,
+                    bitpos: 58,
+                },
+                mode1_extra_readers: [
+                    RansThreeLaneReader {
+                        ptr: 4524,
+                        acc: 4679714676352931668,
+                        bitpos: 58,
+                    },
+                    RansThreeLaneReader {
+                        ptr: 4673,
+                        acc: 11559655046995041492,
+                        bitpos: 58,
+                    },
+                ],
+                stream_pos: 542,
+                segment_state: RansStateBuffer::cold(),
+                selector2_history: Vec::new(),
+            },
+        };
+
+        vertex_attribute_driver_setup(
+            &mut state.transform_state,
+            &mut state.byte_state,
+            &payload,
+            table.entries.len(),
+        )
+        .unwrap();
+        assert_eq!(
+            state.transform_state,
+            ByteGroupTransformState {
+                mode: 1,
+                count_bits: 382,
+                record_count: 0,
+                second_count: 0,
+                third_count: 0,
+                tail_count: 0,
+            }
+        );
+        assert_eq!(
+            state.byte_state.reader,
+            RansThreeLaneReader {
+                ptr: 4469,
+                acc: 8475775596583267328,
+                bitpos: 48,
+            }
+        );
+
+        let first = vertex_attribute_driver_step(&mut state, &table, &payload).unwrap();
+        assert_eq!(state.current_attribute, 1);
+        assert_eq!(
+            first,
+            VertexAttributeTransform {
+                index: 0,
+                table_entry: ByteGroupTransformTableEntry { raw: 0x0a00_100b },
+                out_offset: 0,
+                column: 0,
+                limit: 523,
+                ret: 523,
+                records: hex_width_records("0b02000000000000"),
+            }
+        );
+        assert_eq!(
+            state.transform_state,
+            ByteGroupTransformState {
+                mode: 1,
+                count_bits: 191,
+                record_count: 1,
+                second_count: 0,
+                third_count: 0,
+                tail_count: 0,
+            }
+        );
+        assert_eq!(
+            state.byte_state.reader,
+            RansThreeLaneReader {
+                ptr: 4469,
+                acc: 8475775596583267328,
+                bitpos: 48,
+            }
+        );
+
+        let mut second_state = VertexAttributeDriverState {
+            current_attribute: 1,
+            processed_vertices: 0,
+            vertex_count: 523,
+            block_limit: 32768,
+            transform_state: ByteGroupTransformState {
+                mode: 1,
+                count_bits: 191,
+                record_count: 0,
+                second_count: 0,
+                third_count: 0,
+                tail_count: 0,
+            },
+            byte_state: ByteGroupReadState {
+                reader: RansThreeLaneReader {
+                    ptr: 4466,
+                    acc: 18419235586919153664,
+                    bitpos: 48,
+                },
+                mode1_extra_readers: [zero_three_lane_reader(); 2],
+                stream_pos: 1149,
+                segment_state: RansStateBuffer::cold(),
+                selector2_history: Vec::new(),
+            },
+        };
+        let second = vertex_attribute_driver_step(&mut second_state, &table, &payload).unwrap();
+        assert_eq!(second_state.current_attribute, 2);
+        assert_eq!(
+            second,
+            VertexAttributeTransform {
+                index: 1,
+                table_entry: ByteGroupTransformTableEntry { raw: 0x0a00_0802 },
+                out_offset: 6,
+                column: 6,
+                limit: 523,
+                ret: 162,
+                records: hex_width_records("010065010a0000009f0004005a0000000200000000000000"),
+            }
+        );
+        assert_eq!(
+            second_state.transform_state,
+            ByteGroupTransformState {
+                mode: 1,
+                count_bits: 95,
+                record_count: 3,
+                second_count: 2,
+                third_count: 2,
+                tail_count: 3,
+            }
+        );
+        assert_eq!(
+            second_state.byte_state,
+            ByteGroupReadState {
+                reader: RansThreeLaneReader {
+                    ptr: 4464,
+                    acc: 4362398837027897376,
+                    bitpos: 55,
+                },
+                mode1_extra_readers: [zero_three_lane_reader(); 2],
+                stream_pos: 1163,
+                segment_state: RansStateBuffer::cold(),
+                selector2_history: Vec::new(),
+            }
+        );
+        assert_eq!(
+            vertex_attribute_driver_step(&mut state, &table, &payload),
+            Err(VertexAttributeDriverError::ByteGroupTransform {
+                index: 1,
+                error: ByteGroupTransformError::UnobservedZeroTailBitstream,
+            })
+        );
+    }
+
+    #[test]
+    fn vertex_attribute_driver_rejects_unobserved_and_malformed_inputs() {
+        let mut transform_state = ByteGroupTransformState {
+            mode: 2,
+            count_bits: 0,
+            record_count: 0,
+            second_count: 0,
+            third_count: 0,
+            tail_count: 0,
+        };
+        let mut byte_state = byte_group_state(zero_three_lane_reader(), 0);
+        assert_eq!(
+            vertex_attribute_driver_setup(&mut transform_state, &mut byte_state, &[], 0),
+            Err(VertexAttributeDriverError::UnobservedTableCount(0))
+        );
+
+        let payload = sparse_payload(8, &[(0, "0000000000000000")]);
+        let mut byte_state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 0,
+                acc: 1 << 63,
+                bitpos: 63,
+            },
+            0,
+        );
+        assert_eq!(
+            vertex_attribute_driver_setup(&mut transform_state, &mut byte_state, &payload, 1),
+            Err(VertexAttributeDriverError::UnobservedSetupMode(0))
+        );
+
+        let table = TableBuild {
+            fwd: 0,
+            rev_ptr: 0,
+            rev_acc: 0,
+            rev_bitpos: 0,
+            w8: 1,
+            symbols: 2,
+            dir_bit: 1,
+            entries: vec![0x0a00_0802],
+            offsets: vec![0],
+            cols: vec![0],
+            longs: Vec::new(),
+            byte_group_total: 0,
+            max_prod: 0,
+        };
+        let mut state = VertexAttributeDriverState {
+            current_attribute: 0,
+            processed_vertices: 0,
+            vertex_count: 1,
+            block_limit: 1,
+            transform_state,
+            byte_state: byte_group_state(zero_three_lane_reader(), 0),
+        };
+        assert_eq!(
+            vertex_attribute_driver_step(&mut state, &table, &[]),
+            Err(VertexAttributeDriverError::TableShapeMismatch {
+                symbols: 2,
+                entries: 1,
+                offsets: 1,
+                cols: 1,
+            })
+        );
+
+        let mut table = table;
+        table.symbols = 1;
+        let mut state = VertexAttributeDriverState {
+            current_attribute: 1,
+            processed_vertices: 0,
+            vertex_count: 1,
+            block_limit: 1,
+            transform_state,
+            byte_state: byte_group_state(zero_three_lane_reader(), 0),
+        };
+        assert_eq!(
+            vertex_attribute_driver_step(&mut state, &table, &[]),
+            Err(VertexAttributeDriverError::NoAttributesRemaining {
+                current: 1,
+                total: 1,
+            })
+        );
+
+        let mut state = VertexAttributeDriverState {
+            current_attribute: 2,
+            processed_vertices: 0,
+            vertex_count: 1,
+            block_limit: 1,
+            transform_state,
+            byte_state: byte_group_state(zero_three_lane_reader(), 0),
+        };
+        assert_eq!(
+            vertex_attribute_driver_step(&mut state, &table, &[]),
+            Err(VertexAttributeDriverError::CurrentAttributeOutOfRange {
+                current: 2,
+                total: 1,
+            })
+        );
+
+        let mut state = VertexAttributeDriverState {
+            current_attribute: 0,
+            processed_vertices: 1,
+            vertex_count: 2,
+            block_limit: 2,
+            transform_state,
+            byte_state: byte_group_state(zero_three_lane_reader(), 0),
+        };
+        assert_eq!(
+            vertex_attribute_driver_step(&mut state, &table, &[]),
+            Err(VertexAttributeDriverError::UnobservedNonzeroProcessedVertices(1))
+        );
+
+        let mut state = VertexAttributeDriverState {
+            current_attribute: 0,
+            processed_vertices: 0,
+            vertex_count: 2,
+            block_limit: 1,
+            transform_state,
+            byte_state: byte_group_state(zero_three_lane_reader(), 0),
+        };
+        assert_eq!(
+            vertex_attribute_driver_step(&mut state, &table, &[]),
+            Err(VertexAttributeDriverError::UnobservedPartialVertexBlock {
+                remaining: 2,
+                block_limit: 1,
+            })
+        );
     }
 
     #[test]
