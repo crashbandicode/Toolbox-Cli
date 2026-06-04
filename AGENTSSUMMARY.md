@@ -643,6 +643,22 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec B2-CP4 chunk three-u16 signed-delta writer
+**Ready to commit:** `0x1100c90` is ported in `src/mc/geometry.rs` as
+`transform_tail_u16x3_delta_into`. Durable local evidence:
+`capture_transform_tail_1100c90.py` enumerated **3** observed calls
+(Bear/Bass/Dragonfly current 0), and `verify_transform_tail_1100c90.py`
+replayed **3/3**. Coverage totals are direct literals 1193, matched literals
+3067, copy units 149, sign flips 881, match entries 4409, source0 7158 bytes,
+and source1 18402 bytes. Discriminators: no-sign-flip fails 3/3 and byte-delta
+fails 3/3. Rust coverage: fixture-free Bear first-record golden plus malformed
+guards; `cargo test --lib transform_tail_u16x3_delta` passed 2 tests,
+`cargo test --lib transform_tail` passed 19 tests, and `cargo build` passed.
+Updated Dragonfly sparse bufB probe now matches **5753/5753** touched oracle
+bytes; full bufB first diff moved to byte 5233, which maps to Dragonfly current
+3 at `bufB+5232`, target `0x110afb0`. Next after commit: enumerate/replay
+`0x110afb0` before porting any other writer target.
+
 ### 2026-06-04 - MeshCodec B2-CP4 state-5 writer target capture
 **Captured:** `local-assets/re/capture_state5_writer_targets.py` now records the
 actual state-5 indirect writer target for every observed table column across
