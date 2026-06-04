@@ -966,6 +966,9 @@ pub fn rans_read_segment_header(
         };
 
         if shifted >> 63 == 0 {
+            // 0x110df28 selects x14 (`bits << 9`) on the low-count path; using
+            // x10 from the earlier `bits << 5` stage reads mode/log four bits early.
+            shifted = high_bits;
             (low_count, refill_bitpos.wrapping_sub(9))
         } else {
             shifted = selected_bits;
@@ -1584,6 +1587,7 @@ pub fn rans_read_freqs(buf: &[u8], reader: RansFreqReader, params: RansFreqParam
                 let clz = clz64(acc);
                 if nbits_count <= clz {
                     // 0x110e8e8 — `w18 = 0`; `w1` (remaining) is unchanged.
+                    remaining_after_run = 0;
                     bitpos = (bitpos | 0x38).wrapping_sub(nbits_count);
                     acc = (acc << (nbits_count & 63)) & MASK64;
                     site = FreqSite::RunBody;
@@ -1972,6 +1976,9 @@ fn rans_read_freqs_checked(
                 let nbits_count = count_bitlen_base.wrapping_sub(clz32(remaining));
                 let clz = clz64(acc);
                 if nbits_count <= clz {
+                    // 0x110e8e8 clears the saved post-run count; otherwise a
+                    // previous run can leak into dense mode-0 frequency tables.
+                    remaining_after_run = 0;
                     bitpos = (bitpos | 0x38).wrapping_sub(nbits_count);
                     acc = (acc << (nbits_count & 63)) & MASK64;
                     site = FreqSite::RunBody;
@@ -3119,6 +3126,23 @@ fn decode_selector2_zstd_window(
     Ok((decoded, src_end))
 }
 
+fn append_byte_group_history(
+    state: &mut ByteGroupReadState,
+    bytes: &[u8],
+) -> Result<(), ByteGroupReadError> {
+    let history_len = state.selector2_history.len();
+    match history_len.checked_add(bytes.len()) {
+        Some(end) if end <= 0x80000 => {
+            state.selector2_history.extend_from_slice(bytes);
+            Ok(())
+        }
+        _ => Err(ByteGroupReadError::UnobservedSelector2HistoryWrap {
+            history_len,
+            byte_count: bytes.len(),
+        }),
+    }
+}
+
 /// Read one byte-group stream (`0x110d7f0`).
 ///
 /// The common selector prologue consumes two reverse-reader bits
@@ -3266,7 +3290,7 @@ pub fn byte_group_read(
                 &state.selector2_history,
             )?;
             state.stream_pos = stream_pos;
-            state.selector2_history.extend_from_slice(&bytes);
+            append_byte_group_history(state, &bytes)?;
             Ok(ByteGroupRead { selector, bytes })
         }
         3 => {
@@ -4390,6 +4414,15 @@ pub struct VertexAttributeWriterCall<'a> {
     pub block_index: usize,
 }
 
+/// Writer-table state rooted at `ctx+0x218`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexAttributeWriterTable<'a> {
+    /// Match words read by writer targets through `x0+0x10` (`ctx+0x228`).
+    pub matches: &'a [u32],
+    /// Block index stored at writer-table `[x0+0xa0]`.
+    pub block_index: usize,
+}
+
 /// Source/table consumption reported by the selected writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VertexAttributeWriterUsage {
@@ -4411,6 +4444,37 @@ pub enum VertexAttributeWriterError {
     Copy(TransformTailCopyError),
     /// Delta/match writer rejected its inputs.
     Delta(TransformTailDeltaError),
+}
+
+/// One completed per-attribute writer-loop step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VertexAttributeWriterLoopStep {
+    /// Wrapper records returned by `0x10fb2e0`.
+    pub transform: VertexAttributeTransform,
+    /// Dispatch/source materialization from `0x10f92c8..0x10f9394`.
+    pub interstage: VertexAttributeInterstage,
+    /// Source and match-table consumption from the selected writer.
+    pub usage: VertexAttributeWriterUsage,
+}
+
+/// Errors from the composed per-attribute writer loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VertexAttributeWriterLoopError {
+    /// The writer table at `x0+0x10` must cover the full vertex block.
+    MatchTableTooSmall { expected: usize, actual: usize },
+    /// The `0x10fb2e0` wrapper step rejected its stream or table state.
+    Driver(VertexAttributeDriverError),
+    /// The setup/source-materialization stage rejected its stream.
+    Interstage {
+        index: usize,
+        error: VertexAttributeInterstageError,
+    },
+    /// The selected writer rejected its input contract.
+    Writer {
+        index: usize,
+        target: VertexAttributeWriterTarget,
+        error: VertexAttributeWriterError,
+    },
 }
 
 /// Errors from the observed vertex attribute driver setup/loop.
@@ -5206,6 +5270,80 @@ pub fn vertex_attribute_apply_writer(
             )
             .map(vertex_pack10_usage)
             .map_err(VertexAttributeWriterError::Delta)
+        }
+    }
+}
+
+/// Run one observed `0x10f924c` attribute step through writer dispatch.
+///
+/// This composes the already-validated wrapper (`0x10fb2e0`), seven-bit
+/// interstage/source materialization (`0x10f92c8..0x10f9394`), and writer-table
+/// call (`0x10f93d8`). The caller supplies the writer table's stable match
+/// slice from `ctx+0x228`; captures show it is not advanced per attribute.
+pub fn vertex_attribute_writer_loop_step(
+    out: &mut [u8],
+    state: &mut VertexAttributeDriverState,
+    table: &TableBuild,
+    payload: &[u8],
+    writer_table: VertexAttributeWriterTable<'_>,
+) -> Result<VertexAttributeWriterLoopStep, VertexAttributeWriterLoopError> {
+    let expected_matches = state.vertex_count as usize;
+    if writer_table.matches.len() < expected_matches {
+        return Err(VertexAttributeWriterLoopError::MatchTableTooSmall {
+            expected: expected_matches,
+            actual: writer_table.matches.len(),
+        });
+    }
+
+    let transform = vertex_attribute_driver_step(state, table, payload)
+        .map_err(VertexAttributeWriterLoopError::Driver)?;
+    let index = transform.index;
+    let interstage = vertex_attribute_interstage_sources(
+        &mut state.byte_state,
+        payload,
+        transform.table_entry,
+        transform.ret,
+    )
+    .map_err(|error| VertexAttributeWriterLoopError::Interstage { index, error })?;
+    let target = interstage.writer;
+    let usage = vertex_attribute_apply_writer(
+        out,
+        VertexAttributeWriterCall {
+            transform: &transform,
+            interstage: &interstage,
+            matches: writer_table.matches,
+            block_index: writer_table.block_index,
+        },
+    )
+    .map_err(|error| VertexAttributeWriterLoopError::Writer {
+        index,
+        target,
+        error,
+    })?;
+
+    Ok(VertexAttributeWriterLoopStep {
+        transform,
+        interstage,
+        usage,
+    })
+}
+
+/// Run the observed single-block vertex attribute writer loop to exhaustion.
+pub fn vertex_attribute_writer_loop(
+    out: &mut [u8],
+    state: &mut VertexAttributeDriverState,
+    table: &TableBuild,
+    payload: &[u8],
+    writer_table: VertexAttributeWriterTable<'_>,
+) -> Result<Vec<VertexAttributeWriterLoopStep>, VertexAttributeWriterLoopError> {
+    let mut steps = Vec::new();
+    loop {
+        match vertex_attribute_writer_loop_step(out, state, table, payload, writer_table) {
+            Ok(step) => steps.push(step),
+            Err(VertexAttributeWriterLoopError::Driver(
+                VertexAttributeDriverError::NoAttributesRemaining { .. },
+            )) => return Ok(steps),
+            Err(error) => return Err(error),
         }
     }
 }
@@ -8190,6 +8328,40 @@ mod tests {
         );
     }
 
+    /// Long segment-header low-count form still takes mode/log from `bits << 9`.
+    ///
+    /// Provenance: `capture_vertex_writer_loop.py`, Animal_Bear current 0,
+    /// writer-source 0, descriptor 1. This rules out reading mode/log from the
+    /// earlier `bits << 5` stage, which mis-parses the same header as mode 0,
+    /// log 5, table count 63.
+    #[test]
+    fn rans_segment_header_long_low_count_uses_high_bits() {
+        let payload = hex_bytes("00c6fd3b903638d907");
+        let header = rans_read_segment_header(
+            &payload,
+            RansFreqReader {
+                ptr: 1,
+                acc: 0xf16007396341c038,
+                bitpos: 53,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            header,
+            RansSegmentHeader {
+                mode: 1,
+                log: 8,
+                table_count: Some(63),
+                value: 0,
+                reader: RansFreqReader {
+                    ptr: 0,
+                    acc: 0x01ce58d0700f8000,
+                    bitpos: 47,
+                },
+            }
+        );
+    }
+
     /// Long segment-header form selecting the widest observed count.
     ///
     /// Provenance: `capture_segment_dispatch.py`, Animal_Bear table-build 26.
@@ -8386,6 +8558,59 @@ mod tests {
                 count: 65,
                 mass: 64
             })
+        );
+    }
+
+    /// Dense mode-0 table builder with a stale run-remainder discriminator.
+    ///
+    /// Provenance: `capture_vertex_writer_loop.py`, Animal_Bear current 0,
+    /// writer-source 0, descriptor 2. This covers a 244-of-256 sparse table; a
+    /// reader that misses `mov w18, wzr` at `0x110e8e8` carries an old
+    /// post-run count into the next run body and rejects this as overfull mass.
+    #[test]
+    fn rans_mode0_table_builder_dense_count_resets_run_remainder() {
+        let payload = hex_bytes(
+            "c1e6220cc4f5f1430f8832ce2439be8085c2e282850c2c1c272e2c5bb80612\
+             f0e20b9bcf7a37666cde",
+        );
+        let header = rans_read_segment_header(
+            &payload,
+            RansFreqReader {
+                ptr: 33,
+                acc: 0x9f0446609f0c0000,
+                bitpos: 44,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            header,
+            RansSegmentHeader {
+                mode: 0,
+                log: 8,
+                table_count: Some(244),
+                value: 0,
+                reader: RansFreqReader {
+                    ptr: 31,
+                    acc: 0x8cc13e1bcd8c0000,
+                    bitpos: 43,
+                },
+            }
+        );
+
+        let built = rans_build_mode0_table(&payload, header.reader, 244, 8).unwrap();
+        assert_eq!(built.symbols.len(), 244);
+        assert_eq!(built.freqs.len(), 244);
+        assert_eq!(
+            built.freqs.iter().map(|&freq| freq as u32).sum::<u32>(),
+            256
+        );
+        assert_eq!(
+            built.reader,
+            RansFreqReader {
+                ptr: 0,
+                acc: 0x5f1c9267194407a1,
+                bitpos: 57,
+            }
         );
     }
 
@@ -9494,6 +9719,31 @@ mod tests {
         );
     }
 
+    /// Selector-2 zstd windows need the caller's prior selector-2 history.
+    ///
+    /// Provenance: `capture_vertex_writer_loop.py`, Animal_Bear current 1,
+    /// source 0, with the minimal 1243-byte suffix from the earlier selector-2
+    /// outputs in `byte_group_reader_capture.py`. This rules out starting the
+    /// writer loop with an empty selector-2 history.
+    #[test]
+    fn selector2_zstd_window_allows_existing_history() {
+        let history = hex_bytes(
+            "110202020f040e0202020202020301080f011202020210120202170208160d1002020205040401011c1c0202021b1b020202030402020306030615131b1b1b1b0202020202030602020202020306020202020202020202020201050a070a0d1001040b0408070a010411011402021818020202181802090c0205080209040b1004070a0502020306021a1a020219190508021a1a020202021d1d0308021a19020202021b1c06040202020202021919020202020207061d1d0202020202020219190202020201031b1b0218180202020201031b1b181702021b1b020504040202020202021c1c1c1c1c18161c1b161c1c1401071a030202090f191b1b010805181a041b021b021b02021c0a1c020202021c11161c1c1c0205080202000104020f061c0e1b1b1c12140202011c1c1c1c01021c061d1d1c02021c1c0202031b1b001b021b150b1c081c0a1c1c1b1b1b1b0202020202020306020202121402020d100215160104100d011616160214150202160214000b0f1b011c1c04010e181800180300041b1c180804040700070c04031b001b031b02021b1c1c1b1b1b1b1b011c1c1a021d1d011b1c1c0208031d1d04021c1c0406031c1c0508040104040104021b1b0603011d1d020401060104021b1b020803041c1c061b1b020803041c1c06021b1b1c1c00060104040108010111011c1c1a1a0713111a1a1c1c1a1a1a1a1a190e0b14020b18021a0418011116151d1e1c1c100d00031c1c1d1c1c0a1c0102001819020214140415141a19151c1c0b0e1a041b1c1c08190b14151b1a1c161c1c04050d021c081c1c1c1c131c021c1c1c021b1b021c021c1c031c07071212131c1c031c1a1c1916181c1c1517141c1c1c1d0608071d1c0f01140614151c1c171802181c1c01010c1c1c191c1c1313150d02080d1b011b14120401010301041c1b0103171c1c19191e1d1c1c021a1c14191c1c0618121b1b021c1c0b0712041b1b1a0106011c1c1c031c1c1a1a1a020202000202090c1b011b191a1b01051a161a19021a1a1b1a1a1b1c1b1d1d081d1d1c141601151a191a1c1c0610060a090c150015141a1918071a0201041a16191a13141a1c1c1b1b1c181c141a191b1c0c111c0c020f1c1c1a1a1c0204091c1b021c1c011b1d181d1d021c191c021c1d190312011b1b02181d1d191b1c1c041c1c1501161c1c0e0f1c1902021c04011c1c02171c1c15161a1c011b021c14050904051a041b1b1b1c1c071c1c131b031b1b1d1c1c1d1d1c0c0f1b151b1d1d1d1d1b1a1a1a1c1c1c1b1c1a1b15160702000918180101171b1b1b0c1c1b1d1e1c1d1b1c1c1b181c1c1c011c1a1a0a0e0f1a0b14141a190417171a1b181818181c1c1c191c1b1c181b1b1b041b1c1d1b1c1c1c181c09091c18190d1c1c101c110c1b1b1c1901191c1c1d1b1c1d1e1d1b1d1a021a09021b0d1d051d1a1b011a011905011a1a0c1a1a1917161a1a1614141a1a1a1a1819191b1d1c1c1a1a04150b031a18021c1c1c1c18181a19191c1c1c141506041c1c1c191c01141c191a1b19061c1c1b1819140215191a1a1a19040d181901011b1b1b1a17021c1c18141a071a0d000002020000050000050000050000030205010301001a08020801101a000301020201021a0100011a02011c000000010000031d101c0100000118000001181a0009000003000800060000030007000003000700090203000014000f1819000408011a030109101a1b191a",
+        );
+        let payload = sparse_payload(7746, &[(7452, "822452cc1e0b309afabb3920f09eb01647fad33c22febf83ee0cc7e0a160d0603343927e2dd51af761746bbe92d020003c013f70a588cd4c4dbde68ba2d82508a27079fa5dafe7e871188c20089dc6123e7db95f771b467373372fb52608022304a6314e5bb02bcfef5a6bd76afef629fdfa679e5961666684509224bbab940a67a8e08c8692340730083221621d00b3a603f006e1de3e3b2aabbfb612e8c0268674638903d9bdd4fc455678044c6a5c2a7b439adacb77c1d1e2ed198da87e65c4e5b3ed233481994224506b30ba044652abaf1a96a605ebf9579d8cc00e61e0acbed96c5b9050a5e0134cc1d4b1dc81f1d58e28f869dc197ec96e0ebf9b9f7ba651ae4b4a9135aebef4ab226a28b9390b8d1453bc4ef00eab7a35571cd33db98aa1962ca214")]);
+        let expected = hex_bytes(
+            "0f0f0f0e0e0e1b1b1b0b0b0b1519191c1c1c151c151c1c1c1b1b1b151515001515151915151515020808020808020802020902020d0d020d020d0e0d020d0e0102080102080102090102090e0f0f0e140e1414140e0e0e0e14140e0e0e020d0d020202020d0d0208020e0e0e0001150015190e0f0f0e0f0f0e0f0e0e140e0e130e0d0e0e0e0e0e0d0e0f0e0f0e15191c1c1c1c0506070506060506070606060506050e0f140e140e0e140e0e14140e140e0e14141414141516161516151516151516151617171617161717171617161617171616160d0e0f0102010001020102090001150102010001020102020102150102010102020102010102150102151a1b1a1a1b1b1a1b1b15191a15191515191c0a0b0b0a0b0b001519191919151919151919191a1a1519191a1a1a15191915191a0015191519150015191717171717171718171718180e0f0f090a0a090a0a090a09090a0a0a0a0a0a0a0a0a0a0a090a0a0a0a0a02090201020d0202020202020015000015001111110e11110e0e0e1111110202020d0e0e020d0e0e13130e13130e0e0e13131302080902090902090a02090902090902090a0809090909090208090809090808080e110e0f140f0e0f140f140f0f0f0f0e0f0e02030202030d0203030102010204050d0e0e02040d00011515161500011517181715161715161c161718181818161716161716151c1c0f14140e0f1402090d0f140f02090a11111115191a151915191a1b191a190015190102090015160405040507050405040104050a0c0a01090a0a0b0a010202020402020304020404020809010209",
+        );
+
+        assert_eq!(history.len(), 1243);
+        assert_eq!(expected.len(), 591);
+        assert!(decode_selector2_zstd_window(&payload, 7452, expected.len(), &[]).is_err());
+        let (decoded, stream_pos) =
+            decode_selector2_zstd_window(&payload, 7452, expected.len(), &history).unwrap();
+        assert_eq!(stream_pos, 7746);
+        assert_eq!(decoded, expected);
+    }
+
     /// Byte-group reader (`0x110d7f0`) selector-3 direct-forward branch.
     ///
     /// Provenance: `capture_byte_group_reader.py`, Animal_Bass call 16:
@@ -10340,6 +10590,134 @@ mod tests {
         assert_eq!(out[7], 0xee, "out_offset is byte-based, not contiguous");
     }
 
+    /// Composed per-attribute writer-loop step (`0x10f924c..0x10f93d8`).
+    ///
+    /// Provenance: compact Animal_Dragonfly current-2 slice from
+    /// `capture_vertex_interstage.py` plus the already-validated copy2 writer
+    /// path. This fixture-free golden drives `vertex_attribute_driver_step`,
+    /// `vertex_attribute_interstage_sources`, and `vertex_attribute_apply_writer`
+    /// together so the writer receives the shared `ctx+0x228` match table.
+    #[test]
+    fn vertex_attribute_writer_loop_step_dragonfly_copy2() {
+        let payload = sparse_payload(
+            4470,
+            &[
+                (
+                    1160,
+                    "427e801103031c190400090006009028d6ff007f807f8002031a1c000700",
+                ),
+                (4450, "36c384c6008bc90efc07781b4404f866efff"),
+            ],
+        );
+        let table = TableBuild {
+            fwd: 0,
+            rev_ptr: 0,
+            rev_acc: 0,
+            rev_bitpos: 0,
+            w8: 523,
+            symbols: 1,
+            dir_bit: 1,
+            entries: vec![0x0a00_0802],
+            offsets: vec![8],
+            cols: vec![8],
+            longs: vec![131082, 524308],
+            byte_group_total: 15696,
+            max_prod: 2,
+        };
+        let mut state = VertexAttributeDriverState {
+            current_attribute: 0,
+            processed_vertices: 0,
+            vertex_count: 523,
+            block_limit: 523,
+            transform_state: ByteGroupTransformState {
+                mode: 1,
+                count_bits: 95,
+                record_count: 3,
+                second_count: 2,
+                third_count: 2,
+                tail_count: 3,
+            },
+            byte_state: ByteGroupReadState {
+                reader: RansThreeLaneReader {
+                    ptr: 4458,
+                    acc: 2306402145233977344,
+                    bitpos: 47,
+                },
+                mode1_extra_readers: [
+                    RansThreeLaneReader {
+                        ptr: 4525,
+                        acc: 7776887029535970912,
+                        bitpos: 52,
+                    },
+                    RansThreeLaneReader {
+                        ptr: 4671,
+                        acc: 1333770381586800016,
+                        bitpos: 59,
+                    },
+                ],
+                stream_pos: 1164,
+                segment_state: RansStateBuffer::cold(),
+                selector2_history: Vec::new(),
+            },
+        };
+        let mut out = vec![0xee; 5230];
+        let matches = [0u32; 523];
+
+        let step = vertex_attribute_writer_loop_step(
+            &mut out,
+            &mut state,
+            &table,
+            &payload,
+            VertexAttributeWriterTable {
+                matches: &matches,
+                block_index: 0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.current_attribute, 1);
+        assert_eq!(
+            step.transform,
+            VertexAttributeTransform {
+                index: 0,
+                table_entry: ByteGroupTransformTableEntry { raw: 0x0a00_0802 },
+                out_offset: 8,
+                column: 8,
+                limit: 523,
+                ret: 3,
+                records: hex_width_records("0100b3010a00000001004d00f80200000100080064000000"),
+            }
+        );
+        assert_eq!(
+            step.interstage,
+            VertexAttributeInterstage {
+                dispatch: 16,
+                writer: VertexAttributeWriterTarget::Copy2,
+                descriptors: vec![VertexAttributeSourceDescriptor {
+                    element_shift: 0,
+                    group_stride: 2,
+                    count: 3,
+                }],
+                sources: vec![VertexAttributeSource {
+                    selector: 3,
+                    bytes: hex_bytes("ff007f807f80"),
+                }],
+            }
+        );
+        assert_eq!(
+            step.usage,
+            VertexAttributeWriterUsage {
+                sources: [6, 0, 0, 0],
+                match_entries: 0,
+            }
+        );
+        assert_eq!(&out[8..10], &hex_bytes("ff00"));
+        assert_eq!(&out[18..20], &hex_bytes("ff00"));
+        assert_eq!(&out[4368..4370], &hex_bytes("7f80"));
+        assert_eq!(&out[5148..5150], &hex_bytes("7f80"));
+        assert_eq!(out[7], 0xee);
+    }
+
     #[test]
     fn vertex_attribute_driver_rejects_unobserved_and_malformed_inputs() {
         let mut transform_state = ByteGroupTransformState {
@@ -10643,6 +11021,53 @@ mod tests {
             Err(VertexAttributeWriterError::Delta(
                 TransformTailDeltaError::MatchTableTooSmall
             ))
+        );
+
+        let table = TableBuild {
+            fwd: 0,
+            rev_ptr: 0,
+            rev_acc: 0,
+            rev_bitpos: 0,
+            w8: 2,
+            symbols: 1,
+            dir_bit: 1,
+            entries: vec![0x0a00_0802],
+            offsets: vec![0],
+            cols: vec![0],
+            longs: Vec::new(),
+            byte_group_total: 0,
+            max_prod: 0,
+        };
+        let mut state = VertexAttributeDriverState {
+            current_attribute: 0,
+            processed_vertices: 0,
+            vertex_count: 2,
+            block_limit: 2,
+            transform_state: ByteGroupTransformState {
+                mode: 1,
+                count_bits: 0,
+                record_count: 0,
+                second_count: 0,
+                third_count: 0,
+                tail_count: 0,
+            },
+            byte_state: byte_group_state(zero_three_lane_reader(), 0),
+        };
+        assert_eq!(
+            vertex_attribute_writer_loop_step(
+                &mut out,
+                &mut state,
+                &table,
+                &[],
+                VertexAttributeWriterTable {
+                    matches: &[0],
+                    block_index: 0,
+                },
+            ),
+            Err(VertexAttributeWriterLoopError::MatchTableTooSmall {
+                expected: 2,
+                actual: 1,
+            })
         );
     }
 

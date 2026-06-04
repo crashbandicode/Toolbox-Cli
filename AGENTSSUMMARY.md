@@ -643,6 +643,26 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec CP5b vertex writer loop
+**Committed:** CP5b wires the observed per-attribute writer loop
+`0x10f924c..0x10f93d8` end to end as `vertex_attribute_writer_loop_step` and
+`vertex_attribute_writer_loop`, with explicit writer-table state for the stable
+match slice at `ctx+0x228` / writer `x0+0x10`. Durable local evidence:
+`capture_vertex_writer_loop.py` captured **25** rows across Bear, Bass, and
+Dragonfly, and `verify_vertex_writer_loop.py` replayed **25/25** rows with
+**22/22** threaded reader transitions; resetting byte-state per attribute fails
+**22/22**. Dispatch coverage remains `7:1, 8:1, 15:3, 16:1, 18:2, 30:1,
+31:1, 32:1, 58:3, 76:1, 81:4, 107:3, 111:3`; match lengths are Bear 3327,
+Bass 559, and Dragonfly 523. The ignored integration replay
+`cargo test --test mc_vertex_writer_loop_capture -- --ignored` passed after
+seeding selector-2 history from the full byte-group capture before the writer
+setup stream. Fixture-free Rust coverage adds the Dragonfly copy2 composed
+writer-loop golden plus Bear regressions for selector-2 history, segment-header
+low-count high bits, and dense mode-0 run-remainder reset. Checkpoint gate
+passed: All green: 236 lib unit (incl. 90 mc::geometry) + all integration;
+clippy --all-targets clean; --no-default-features builds. Next: hand off or
+start the next MeshCodec checkpoint from a clean committed CP5b base.
+
 ### 2026-06-04 - MeshCodec CP5a Bass `0x11033e0` writer
 **Committed:** CP5a ports the remaining observed writer target, Bass current 1
 `0x11033e0`, as `transform_tail_u8x2_delta_into` and routes dispatch 76 through
