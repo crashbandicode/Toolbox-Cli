@@ -3929,6 +3929,320 @@ pub fn width_combiner_into(
     })
 }
 
+/// Mutable state for the byte-group transform wrapper (`0x10fb2e0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteGroupTransformState {
+    /// Descriptor mode at `x0+0xc`; only mode 1 is observed in current fixtures.
+    pub mode: u32,
+    /// Bit-count field at `x0+0x10`; the wrapper shifts it right on every call.
+    pub count_bits: u32,
+    /// Current record count mirrored at `x0+8`/`x0+0x14`.
+    pub record_count: u32,
+    /// Second byte-stream count stored at `x0+0x18`.
+    pub second_count: u32,
+    /// Halfword stream count stored at `x0+0x1c`.
+    pub third_count: u32,
+    /// Width-bitstream byte count stored at `x0+0x20`.
+    pub tail_count: u32,
+}
+
+/// One packed table entry consumed by `0x10fb2e0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteGroupTransformTableEntry {
+    /// Raw `ctx+0x240` entry built by `0x10f8d20`.
+    pub raw: u32,
+}
+
+impl ByteGroupTransformTableEntry {
+    fn byte_count(self) -> u32 {
+        (self.raw >> 8) & 0xff
+    }
+
+    fn group_width(self) -> u32 {
+        self.raw & 7
+    }
+
+    fn width_stride(self) -> u32 {
+        self.raw >> 24
+    }
+
+    fn shift(self) -> u32 {
+        (self.raw >> 3) & 3
+    }
+
+    fn width_class(self) -> Result<u32, ByteGroupTransformError> {
+        let byte_count = self.byte_count();
+        let group_width = self.group_width();
+        if byte_count == 0 {
+            return Err(ByteGroupTransformError::UnobservedZeroTableByteCount);
+        }
+        if group_width == 0 {
+            return Err(ByteGroupTransformError::UnobservedZeroTableGroupWidth);
+        }
+        let rounded_bytes = byte_count
+            .checked_add(7)
+            .ok_or(ByteGroupTransformError::ArithmeticOverflow)?
+            >> 3;
+        let product = group_width
+            .checked_mul(rounded_bytes)
+            .ok_or(ByteGroupTransformError::ArithmeticOverflow)?;
+        Ok(if product <= 2 {
+            3
+        } else if product <= 5 {
+            2
+        } else {
+            1
+        })
+    }
+}
+
+/// Inputs for one byte-group transform-wrapper call (`0x10fb2e0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteGroupTransformSpec<'a> {
+    /// Payload bytes addressed by byte-group readers and direct bitstreams.
+    pub payload: &'a [u8],
+    /// Current packed table entry selected from `ctx+0x240`.
+    pub table_entry: ByteGroupTransformTableEntry,
+    /// Vertex/count limit passed in `w6`.
+    pub limit: u32,
+}
+
+/// Result of one byte-group transform-wrapper call (`0x10fb2e0`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ByteGroupTransformResult {
+    /// `w0` on return: sum of first-stream widths, or `limit` for the early path.
+    pub ret: u32,
+    /// Records returned through the caller's `x1`/`x2` out pointer/count pair.
+    pub records: Vec<[u32; 2]>,
+}
+
+/// Errors from the byte-group transform wrapper (`0x10fb2e0`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ByteGroupTransformError {
+    /// The wrapper only observed descriptor mode 1.
+    UnobservedMode(u32),
+    /// Active mode observed `record_count >= 2`.
+    UnobservedShortActiveCount(u32),
+    /// Active mode observed a non-empty fourth stream for width bits.
+    UnobservedZeroTailBitstream,
+    /// The fourth stream is always direct selector 3 in current captures.
+    UnobservedTailSelector(u8),
+    /// Packed table entries should have non-zero byte counts.
+    UnobservedZeroTableByteCount,
+    /// Packed table entries should have non-zero group widths.
+    UnobservedZeroTableGroupWidth,
+    /// Forward varint read exceeded the observed u32-shaped encoding.
+    VarintTooLong,
+    /// The shared payload ended before a forward varint or bitstream slop read.
+    StreamTooShort,
+    /// The reverse count-bit reader tried to load outside the payload.
+    PayloadTooSmall,
+    /// Count/table arithmetic overflowed.
+    ArithmeticOverflow,
+    /// Nested byte-group reader rejected a stream.
+    ByteGroupRead(ByteGroupReadError),
+    /// Nested width combiner rejected the decoded streams.
+    WidthCombiner(WidthCombinerError),
+    /// `0x110d360` did not consume the three logical byte-group streams exactly.
+    WidthCombinerUnusedInput {
+        expected: [usize; 3],
+        actual: [usize; 3],
+    },
+}
+
+fn read_byte_group_transform_varint(
+    payload: &[u8],
+    stream_pos: &mut usize,
+) -> Result<usize, ByteGroupTransformError> {
+    let mut value = 0usize;
+    for _ in 0..5 {
+        let byte = payload
+            .get(*stream_pos)
+            .copied()
+            .ok_or(ByteGroupTransformError::StreamTooShort)?;
+        *stream_pos += 1;
+        value = value
+            .checked_shl(7)
+            .and_then(|v| v.checked_add((byte & 0x7f) as usize))
+            .ok_or(ByteGroupTransformError::VarintTooLong)?;
+        if value > u32::MAX as usize {
+            return Err(ByteGroupTransformError::VarintTooLong);
+        }
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(ByteGroupTransformError::VarintTooLong)
+}
+
+fn take_byte_group_transform_count_bit(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+) -> Result<u8, ByteGroupTransformError> {
+    let bitpos = reader.bitpos;
+    let ptr_step = ((bitpos >> 3) ^ 7) as usize;
+    let ptr = reader
+        .ptr
+        .checked_sub(ptr_step)
+        .ok_or(ByteGroupTransformError::PayloadTooSmall)?;
+    let bits = (checked_byte_group_u64_le(payload, reader.ptr)
+        .map_err(|_| ByteGroupTransformError::PayloadTooSmall)?
+        >> (bitpos & 63))
+        | reader.acc;
+    let flag = (bits >> 63) as u8;
+    reader.ptr = ptr;
+    reader.acc = bits << 1;
+    reader.bitpos = (bitpos | 0x38).wrapping_sub(1);
+    Ok(flag)
+}
+
+fn read_transform_byte_group(
+    byte_state: &mut ByteGroupReadState,
+    payload: &[u8],
+    element_shift: u32,
+    count: usize,
+) -> Result<ByteGroupRead, ByteGroupTransformError> {
+    byte_group_read(
+        byte_state,
+        ByteGroupReadSpec {
+            payload,
+            element_shift,
+            group_stride: 1,
+            count,
+        },
+    )
+    .map_err(ByteGroupTransformError::ByteGroupRead)
+}
+
+fn peek_byte_group_transform_selector(
+    payload: &[u8],
+    reader: &RansThreeLaneReader,
+) -> Result<u8, ByteGroupTransformError> {
+    let bitpos = reader.bitpos;
+    let bits = checked_byte_group_u64_le(payload, reader.ptr)
+        .map_err(|_| ByteGroupTransformError::PayloadTooSmall)?
+        .checked_shr(bitpos & 63)
+        .unwrap_or(0)
+        | reader.acc;
+    Ok((bits >> 62) as u8)
+}
+
+/// Port of the observed byte-group transform wrapper (`0x10fb2e0`).
+///
+/// The wrapper first shifts the state count field (`0x10fb2fc..0x10fb318`).
+/// Even counts take the captured early path, returning one `[limit, 0]` record.
+/// Odd counts in mode 1 read two forward varints, consume one reverse count bit,
+/// materialize three logical byte streams plus one direct bitstream through
+/// `0x110d7f0`, then run `0x110d360` over a fresh record buffer.
+pub fn byte_group_transform(
+    state: &mut ByteGroupTransformState,
+    byte_state: &mut ByteGroupReadState,
+    spec: ByteGroupTransformSpec<'_>,
+) -> Result<ByteGroupTransformResult, ByteGroupTransformError> {
+    let count_bits = state.count_bits;
+    state.count_bits >>= 1;
+    if count_bits & 1 == 0 {
+        state.record_count = 1;
+        state.second_count = 0;
+        state.third_count = 0;
+        state.tail_count = 0;
+        return Ok(ByteGroupTransformResult {
+            ret: spec.limit,
+            records: vec![[spec.limit, 0]],
+        });
+    }
+
+    if state.mode != 1 {
+        return Err(ByteGroupTransformError::UnobservedMode(state.mode));
+    }
+    let width_class = spec.table_entry.width_class()?;
+
+    let first_count = read_byte_group_transform_varint(spec.payload, &mut byte_state.stream_pos)?;
+    let tail_count = read_byte_group_transform_varint(spec.payload, &mut byte_state.stream_pos)?;
+    let high_count_bit =
+        take_byte_group_transform_count_bit(spec.payload, &mut byte_state.reader)? as usize;
+    if first_count < 2 {
+        return Err(ByteGroupTransformError::UnobservedShortActiveCount(
+            first_count as u32,
+        ));
+    }
+    if tail_count == 0 {
+        return Err(ByteGroupTransformError::UnobservedZeroTailBitstream);
+    }
+
+    let second_count = first_count
+        .checked_sub(1)
+        .ok_or(ByteGroupTransformError::ArithmeticOverflow)?;
+    let third_count = first_count
+        .checked_sub(high_count_bit)
+        .ok_or(ByteGroupTransformError::ArithmeticOverflow)?;
+
+    state.record_count = first_count as u32;
+    state.second_count = second_count as u32;
+    state.third_count = third_count as u32;
+    state.tail_count = tail_count as u32;
+
+    let stream0 = read_transform_byte_group(byte_state, spec.payload, 0, first_count)?;
+    let stream1 = read_transform_byte_group(byte_state, spec.payload, 0, second_count)?;
+    let stream2 = read_transform_byte_group(byte_state, spec.payload, 1, third_count)?;
+
+    let tail_stream_start = byte_state.stream_pos;
+    let tail_selector = peek_byte_group_transform_selector(spec.payload, &byte_state.reader)?;
+    if tail_selector != 3 {
+        return Err(ByteGroupTransformError::UnobservedTailSelector(
+            tail_selector,
+        ));
+    }
+    let _bitstream = read_transform_byte_group(byte_state, spec.payload, 0, tail_count)?;
+    let bitstream_end = tail_stream_start
+        .checked_add(tail_count)
+        .and_then(|v| v.checked_add(16))
+        .ok_or(ByteGroupTransformError::ArithmeticOverflow)?;
+    let bitstream_payload = spec
+        .payload
+        .get(tail_stream_start..bitstream_end)
+        .ok_or(ByteGroupTransformError::StreamTooShort)?;
+
+    let mut records = vec![[0u32; 2]; first_count];
+    let mut width_reader = RansThreeLaneReader {
+        ptr: 0,
+        acc: 0,
+        bitpos: 0,
+    };
+    let width = width_combiner_into(
+        &mut records,
+        WidthCombinerSpec {
+            count: first_count,
+            stride: spec.table_entry.width_stride(),
+            shift: spec.table_entry.shift(),
+            attr_width: width_class,
+            limit: spec.limit,
+            payload: bitstream_payload,
+            stream0: &stream0.bytes,
+            stream1: &stream1.bytes,
+            stream2: &stream2.bytes,
+            reader: &mut width_reader,
+        },
+    )
+    .map_err(ByteGroupTransformError::WidthCombiner)?;
+    let expected_consumed = [
+        stream0.bytes.len(),
+        stream1.bytes.len(),
+        stream2.bytes.len(),
+    ];
+    if width.consumed != expected_consumed {
+        return Err(ByteGroupTransformError::WidthCombinerUnusedInput {
+            expected: expected_consumed,
+            actual: width.consumed,
+        });
+    }
+
+    Ok(ByteGroupTransformResult {
+        ret: width.ret,
+        records,
+    })
+}
+
 /// One run/copy record consumed by the `0x10fc5e0` byte-copy transform tail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransformTailRecord {
@@ -7299,6 +7613,303 @@ mod tests {
                 },
             ),
             Err(ByteGroupReadError::OutputSizeOverflow)
+        );
+    }
+
+    /// Byte-group transform wrapper (`0x10fb2e0`) active mode-1 path.
+    ///
+    /// Provenance: refreshed `capture_byte_group_transform.py`,
+    /// Animal_Dragonfly call 1. This compact call has four direct selector-3
+    /// `0x110d7f0` streams (`first=3,second=2,third=2,tail=3`) and then runs
+    /// `0x110d360` for three records, covering the wrapper's forward varints,
+    /// reverse count-bit consumption, direct tail bitstream slop, and table
+    /// entry class derivation from `0xa000802`.
+    #[test]
+    fn byte_group_transform_dragonfly_active_direct_streams() {
+        let payload = sparse_payload(
+            4480,
+            &[
+                (
+                    1149,
+                    "0303011a021c0104000600427e801103031c190400090006009028d6ff00",
+                ),
+                (4464, "f866efff43fe001000d0"),
+            ],
+        );
+        let mut transform_state = ByteGroupTransformState {
+            mode: 1,
+            count_bits: 191,
+            record_count: 0,
+            second_count: 0,
+            third_count: 0,
+            tail_count: 0,
+        };
+        let mut byte_state = ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 4466,
+                acc: 18419235586919153664,
+                bitpos: 48,
+            },
+            mode1_extra_readers: [zero_three_lane_reader(); 2],
+            stream_pos: 1149,
+            segment_state: RansStateBuffer::cold(),
+            selector2_history: Vec::new(),
+        };
+
+        let result = byte_group_transform(
+            &mut transform_state,
+            &mut byte_state,
+            ByteGroupTransformSpec {
+                payload: &payload,
+                table_entry: ByteGroupTransformTableEntry { raw: 0x0a00_0802 },
+                limit: 523,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ByteGroupTransformResult {
+                ret: 162,
+                records: hex_width_records("010065010a0000009f0004005a0000000200000000000000"),
+            }
+        );
+        assert_eq!(
+            transform_state,
+            ByteGroupTransformState {
+                mode: 1,
+                count_bits: 95,
+                record_count: 3,
+                second_count: 2,
+                third_count: 2,
+                tail_count: 3,
+            }
+        );
+        assert_eq!(
+            byte_state,
+            ByteGroupReadState {
+                reader: RansThreeLaneReader {
+                    ptr: 4464,
+                    acc: 4362398837027897376,
+                    bitpos: 55,
+                },
+                mode1_extra_readers: [zero_three_lane_reader(); 2],
+                stream_pos: 1163,
+                segment_state: RansStateBuffer::cold(),
+                selector2_history: Vec::new(),
+            }
+        );
+    }
+
+    /// Byte-group transform wrapper (`0x10fb2e0`) early even-count path.
+    ///
+    /// Provenance: refreshed `capture_byte_group_transform.py`,
+    /// Animal_Dragonfly call 0. `count_bits=382` has low bit 0, so
+    /// `0x10fb31c..0x10fb328` returns one `[limit, 0]` record without touching
+    /// the byte-group reader.
+    #[test]
+    fn byte_group_transform_dragonfly_even_count_early_record() {
+        let mut transform_state = ByteGroupTransformState {
+            mode: 1,
+            count_bits: 382,
+            record_count: 0,
+            second_count: 0,
+            third_count: 0,
+            tail_count: 0,
+        };
+        let initial_byte_state = byte_group_state(zero_three_lane_reader(), 0);
+        let mut byte_state = initial_byte_state.clone();
+
+        let result = byte_group_transform(
+            &mut transform_state,
+            &mut byte_state,
+            ByteGroupTransformSpec {
+                payload: &[],
+                table_entry: ByteGroupTransformTableEntry { raw: 0x0a00_100b },
+                limit: 523,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ByteGroupTransformResult {
+                ret: 523,
+                records: vec![[523, 0]],
+            }
+        );
+        assert_eq!(
+            transform_state,
+            ByteGroupTransformState {
+                mode: 1,
+                count_bits: 191,
+                record_count: 1,
+                second_count: 0,
+                third_count: 0,
+                tail_count: 0,
+            }
+        );
+        assert_eq!(byte_state, initial_byte_state);
+    }
+
+    #[test]
+    fn byte_group_transform_rejects_unobserved_and_malformed_inputs() {
+        let valid_table = ByteGroupTransformTableEntry { raw: 0x0a00_0802 };
+        let mut transform_state = ByteGroupTransformState {
+            mode: 0,
+            count_bits: 1,
+            record_count: 0,
+            second_count: 0,
+            third_count: 0,
+            tail_count: 0,
+        };
+        let mut byte_state = byte_group_state(zero_three_lane_reader(), 0);
+        assert_eq!(
+            byte_group_transform(
+                &mut transform_state,
+                &mut byte_state,
+                ByteGroupTransformSpec {
+                    payload: &[],
+                    table_entry: valid_table,
+                    limit: 1,
+                },
+            ),
+            Err(ByteGroupTransformError::UnobservedMode(0))
+        );
+
+        let mut transform_state = ByteGroupTransformState {
+            mode: 1,
+            count_bits: 1,
+            record_count: 0,
+            second_count: 0,
+            third_count: 0,
+            tail_count: 0,
+        };
+        let mut byte_state = byte_group_state(zero_three_lane_reader(), 0);
+        assert_eq!(
+            byte_group_transform(
+                &mut transform_state,
+                &mut byte_state,
+                ByteGroupTransformSpec {
+                    payload: &[],
+                    table_entry: ByteGroupTransformTableEntry { raw: 0 },
+                    limit: 1,
+                },
+            ),
+            Err(ByteGroupTransformError::UnobservedZeroTableByteCount)
+        );
+
+        let payload = sparse_payload(8, &[(0, "8080808080000000")]);
+        let mut transform_state = ByteGroupTransformState {
+            mode: 1,
+            count_bits: 1,
+            record_count: 0,
+            second_count: 0,
+            third_count: 0,
+            tail_count: 0,
+        };
+        let mut byte_state = byte_group_state(zero_three_lane_reader(), 0);
+        assert_eq!(
+            byte_group_transform(
+                &mut transform_state,
+                &mut byte_state,
+                ByteGroupTransformSpec {
+                    payload: &payload,
+                    table_entry: valid_table,
+                    limit: 1,
+                },
+            ),
+            Err(ByteGroupTransformError::VarintTooLong)
+        );
+
+        let payload = sparse_payload(8, &[(0, "0101000000000000")]);
+        let mut transform_state = ByteGroupTransformState {
+            mode: 1,
+            count_bits: 1,
+            record_count: 0,
+            second_count: 0,
+            third_count: 0,
+            tail_count: 0,
+        };
+        let mut byte_state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 0,
+                acc: 0,
+                bitpos: 59,
+            },
+            0,
+        );
+        assert_eq!(
+            byte_group_transform(
+                &mut transform_state,
+                &mut byte_state,
+                ByteGroupTransformSpec {
+                    payload: &payload,
+                    table_entry: valid_table,
+                    limit: 1,
+                },
+            ),
+            Err(ByteGroupTransformError::UnobservedShortActiveCount(1))
+        );
+
+        let payload = sparse_payload(8, &[(0, "0200000000000000")]);
+        let mut transform_state = ByteGroupTransformState {
+            mode: 1,
+            count_bits: 1,
+            record_count: 0,
+            second_count: 0,
+            third_count: 0,
+            tail_count: 0,
+        };
+        let mut byte_state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 0,
+                acc: 0,
+                bitpos: 59,
+            },
+            0,
+        );
+        assert_eq!(
+            byte_group_transform(
+                &mut transform_state,
+                &mut byte_state,
+                ByteGroupTransformSpec {
+                    payload: &payload,
+                    table_entry: valid_table,
+                    limit: 1,
+                },
+            ),
+            Err(ByteGroupTransformError::UnobservedZeroTailBitstream)
+        );
+
+        let payload = sparse_payload(48, &[(16, "0201aabbccddeeff1122")]);
+        let mut transform_state = ByteGroupTransformState {
+            mode: 1,
+            count_bits: 1,
+            record_count: 0,
+            second_count: 0,
+            third_count: 0,
+            tail_count: 0,
+        };
+        let mut byte_state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 1,
+                acc: (0b0_11_11_11_01u64) << (64 - 9),
+                bitpos: 59,
+            },
+            16,
+        );
+        assert_eq!(
+            byte_group_transform(
+                &mut transform_state,
+                &mut byte_state,
+                ByteGroupTransformSpec {
+                    payload: &payload,
+                    table_entry: valid_table,
+                    limit: 32,
+                },
+            ),
+            Err(ByteGroupTransformError::UnobservedTailSelector(1))
         );
     }
 
