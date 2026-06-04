@@ -2574,7 +2574,7 @@ pub struct RansSegmentLoopContext {
 }
 
 /// Mutable `0x110d7f0` byte-group reader state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ByteGroupReadState {
     /// Primary reverse selector/descriptor reader at `x6+0`.
     pub reader: RansThreeLaneReader,
@@ -2584,6 +2584,8 @@ pub struct ByteGroupReadState {
     pub stream_pos: usize,
     /// rANS state buffer living in the descriptor workspace used by selector 0.
     pub segment_state: RansStateBuffer,
+    /// Selector-2 zstd history window rooted at the caller's `[x0+8]` buffer.
+    pub selector2_history: Vec<u8>,
 }
 
 /// Inputs for one `0x110d7f0` byte-group reader call.
@@ -2617,9 +2619,9 @@ pub enum ByteGroupReadError {
     OutputSizeOverflow,
     /// The direct selector's forward byte slice was truncated.
     StreamTooShort,
-    /// Selector 2 requires the zstd/raw window path not yet ported.
+    /// Reserved selector value.
     UnportedSelector(u8),
-    /// Selectors 0 and 1 have only observed byte and u16 element shifts.
+    /// Selectors 0, 1, and 2 have only observed byte and u16 element shifts.
     UnsupportedElementShift(u32),
     /// Selector 1's multi-window split at 0x80000 groups has not been observed.
     UnobservedSelector1LargeWindow { group_symbols: usize },
@@ -2629,6 +2631,21 @@ pub enum ByteGroupReadError {
     SegmentDispatchBytes(RansSegmentDispatchBytesError),
     /// Selector 1 u16 dispatch rejected the stream.
     SegmentDispatch(RansSegmentDispatchError),
+    /// Selector 2's multi-window loop above 0x20000 output bytes is unobserved.
+    UnobservedSelector2MultiWindow { byte_count: usize },
+    /// Selector 2's 0x80000 history wrap is unobserved.
+    UnobservedSelector2HistoryWrap {
+        history_len: usize,
+        byte_count: usize,
+    },
+    /// Selector 2 raw-copy windows have not been observed in current fixtures.
+    UnobservedSelector2RawWindow,
+    /// Selector 2's forward window-size varint exceeded the u32-shaped encoding.
+    Selector2VarintTooLong,
+    /// Selector 2 zstd block decode failed.
+    Selector2ZstdDecode,
+    /// Selector 2 zstd block regenerated a different size than the caller asked.
+    Selector2OutputSizeMismatch { expected: usize, actual: usize },
     /// Selector 0 byte segment loop rejected the stream.
     ByteSegmentLoop(RansByteSegmentLoopError),
     /// Selector 0 u16 segment loop rejected the stream.
@@ -3026,6 +3043,81 @@ fn dispatch_selector1_u16(
     Ok(())
 }
 
+fn take_byte_group_window_flag(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+) -> Result<u8, ByteGroupReadError> {
+    let bitpos = reader.bitpos;
+    let ptr_step = ((bitpos >> 3) ^ 7) as usize;
+    let ptr = reader
+        .ptr
+        .checked_sub(ptr_step)
+        .ok_or(ByteGroupReadError::PayloadTooSmall)?;
+    let bits = (checked_byte_group_u64_le(payload, reader.ptr)? >> (bitpos & 63)) | reader.acc;
+    let flag = (bits >> 63) as u8;
+    reader.ptr = ptr;
+    reader.acc = bits << 1;
+    reader.bitpos = (bitpos | 0x38).wrapping_sub(1);
+    Ok(flag)
+}
+
+fn read_selector2_window_size(
+    payload: &[u8],
+    mut pos: usize,
+) -> Result<(usize, usize), ByteGroupReadError> {
+    let mut value = 0usize;
+    for _ in 0..5 {
+        let byte = payload
+            .get(pos)
+            .copied()
+            .ok_or(ByteGroupReadError::StreamTooShort)?;
+        pos += 1;
+        value = value
+            .checked_shl(7)
+            .and_then(|v| v.checked_add((byte & 0x7f) as usize))
+            .ok_or(ByteGroupReadError::Selector2VarintTooLong)?;
+        if byte & 0x80 == 0 {
+            return Ok((value, pos));
+        }
+    }
+
+    Err(ByteGroupReadError::Selector2VarintTooLong)
+}
+
+fn decode_selector2_zstd_window(
+    payload: &[u8],
+    stream_pos: usize,
+    byte_count: usize,
+    history: &[u8],
+) -> Result<(Vec<u8>, usize), ByteGroupReadError> {
+    let (src_size, src_start) = read_selector2_window_size(payload, stream_pos)?;
+    let src_end = src_start
+        .checked_add(src_size)
+        .ok_or(ByteGroupReadError::StreamTooShort)?;
+    let block = payload
+        .get(src_start..src_end)
+        .ok_or(ByteGroupReadError::StreamTooShort)?;
+    let mut state = zstd_pure::block::BlockState {
+        out: history.to_vec(),
+        dict_len: history.len(),
+        max_output: byte_count,
+        huff: None,
+        seq: zstd_pure::sequences::SeqTables::default(),
+        rep: [1, 4, 8],
+    };
+    state
+        .decode_compressed(block)
+        .map_err(|_| ByteGroupReadError::Selector2ZstdDecode)?;
+    let decoded = state.out.split_off(history.len());
+    if decoded.len() != byte_count {
+        return Err(ByteGroupReadError::Selector2OutputSizeMismatch {
+            expected: byte_count,
+            actual: decoded.len(),
+        });
+    }
+    Ok((decoded, src_end))
+}
+
 /// Read one byte-group stream (`0x110d7f0`).
 ///
 /// The common selector prologue consumes two reverse-reader bits
@@ -3035,9 +3127,11 @@ fn dispatch_selector1_u16(
 /// Selector 1 builds one descriptor via `0x110de80` and dispatches one window
 /// through `0x110dd80`/`0x110de00`; the unobserved large-window split remains
 /// guarded.
+/// Selector 2 follows the observed single zstd-window path through
+/// `0x1110cc0`/`0x1110a60`; raw windows, multi-window output, and history wrap
+/// remain guarded until captured.
 /// Selector 3 returns the current forward stream slice and advances `x6+0x48`
-/// by `(w4 * w3) << w2` (`0x110da00..0x110dab8`). Selector 2 remains guarded
-/// for its zstd/raw window path.
+/// by `(w4 * w3) << w2` (`0x110da00..0x110dab8`).
 pub fn byte_group_read(
     state: &mut ByteGroupReadState,
     spec: ByteGroupReadSpec<'_>,
@@ -3134,6 +3228,44 @@ pub fn byte_group_read(
             };
 
             write_byte_group_context(state, context);
+            Ok(ByteGroupRead { selector, bytes })
+        }
+        2 => {
+            if spec.element_shift > 1 {
+                return Err(ByteGroupReadError::UnsupportedElementShift(
+                    spec.element_shift,
+                ));
+            }
+            if out_len > 0x20000 {
+                return Err(ByteGroupReadError::UnobservedSelector2MultiWindow {
+                    byte_count: out_len,
+                });
+            }
+
+            let history_len = state.selector2_history.len();
+            match history_len.checked_add(out_len) {
+                Some(end) if end <= 0x80000 => {}
+                _ => {
+                    return Err(ByteGroupReadError::UnobservedSelector2HistoryWrap {
+                        history_len,
+                        byte_count: out_len,
+                    });
+                }
+            }
+
+            let flag = take_byte_group_window_flag(spec.payload, &mut state.reader)?;
+            if flag != 0 {
+                return Err(ByteGroupReadError::UnobservedSelector2RawWindow);
+            }
+
+            let (bytes, stream_pos) = decode_selector2_zstd_window(
+                spec.payload,
+                state.stream_pos,
+                out_len,
+                &state.selector2_history,
+            )?;
+            state.stream_pos = stream_pos;
+            state.selector2_history.extend_from_slice(&bytes);
             Ok(ByteGroupRead { selector, bytes })
         }
         3 => {
@@ -6503,6 +6635,7 @@ mod tests {
             mode1_extra_readers: [zero_three_lane_reader(); 2],
             stream_pos,
             segment_state: RansStateBuffer::cold(),
+            selector2_history: Vec::new(),
         }
     }
 
@@ -6541,6 +6674,7 @@ mod tests {
             ],
             stream_pos: 394,
             segment_state: RansStateBuffer::cold(),
+            selector2_history: Vec::new(),
         };
 
         let read = byte_group_read(
@@ -6587,6 +6721,7 @@ mod tests {
                 ],
                 stream_pos: 394,
                 segment_state: RansStateBuffer::cold(),
+                selector2_history: Vec::new(),
             }
         );
     }
@@ -6637,6 +6772,7 @@ mod tests {
                 ],
                 flag: 15,
             },
+            selector2_history: Vec::new(),
         };
 
         let read = byte_group_read(
@@ -6685,6 +6821,7 @@ mod tests {
                     ],
                     flag: 15,
                 },
+                selector2_history: Vec::new(),
             }
         );
     }
@@ -6733,6 +6870,7 @@ mod tests {
                 states: [49227725862390, 14614913526, 1246709343325, 657827286397],
                 flag: 15,
             },
+            selector2_history: Vec::new(),
         };
 
         let read = byte_group_read(
@@ -6783,6 +6921,127 @@ mod tests {
                     ],
                     flag: 15,
                 },
+                selector2_history: Vec::new(),
+            }
+        );
+    }
+
+    /// Byte-group reader (`0x110d7f0`) selector-2 zstd window.
+    ///
+    /// Provenance: refreshed `capture_byte_group_reader.py`, Animal_Dragonfly
+    /// call 2: selector 2, `w2=0,w3=1,w4=560,w5=0`, zstd flag 0, empty
+    /// history, and forward stream cursor `157 -> 474`. This covers the
+    /// observed single-window `0x1110a60` zstd branch and appends the decoded
+    /// bytes to the selector-2 history buffer rooted at caller `[x0+8]`.
+    #[test]
+    fn byte_group_reader_dragonfly_selector2_zstd_window() {
+        let payload = sparse_payload(
+            4488,
+            &[
+                (
+                    157,
+                    "823b461c460a1038f806592d677b431a430042003f009d6905bd43a712d2f1406d50201390440703604bf92c775b47906a1b1435880dca8ec35a9e6298d51835bdb26d124da3adce72141ad464a6c0cb542a213397242d4946102e74d8488d793d4dddadadfe37588dc588960f255dcc0528e3dae68eb2cfff139b1d8cd3464db22a65f7d860c9ea08e9929d73af13bedc94561384e4922958e90289cfff07406de6e053184ad3a2b8f9785ec7f9fbb8d1ec5962961750ab7a9b21265e1ff509188c6aa65d67af974fbda6a91eb5bbb775c13fff022184fb160c89d92a92aa745097e0d77eccdeaaf822225114bcc6bd4060471e7b50effae7a216c5c2fc338d930365b16543f1f8f3dc2266a591e49ed01afd49cfc2c7a0be3144b4020c00962e820c256acef5729bced04a0631a4f05002a15c952e8eb20033317003",
+                ),
+                (
+                    4464,
+                    "f866efff43fe001000d08c502d459eff00a075fd4ef5fc2a",
+                ),
+            ],
+        );
+        let mut state = ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 4471,
+                acc: 11383669668276287488,
+                bitpos: 47,
+            },
+            mode1_extra_readers: [
+                RansThreeLaneReader {
+                    ptr: 4524,
+                    acc: 4679714676352931668,
+                    bitpos: 58,
+                },
+                RansThreeLaneReader {
+                    ptr: 4673,
+                    acc: 11559655046995041492,
+                    bitpos: 58,
+                },
+            ],
+            stream_pos: 157,
+            segment_state: RansStateBuffer {
+                states: [
+                    290362338331826,
+                    324891473402,
+                    3329202948120618,
+                    1082470406632,
+                ],
+                flag: 15,
+            },
+            selector2_history: Vec::new(),
+        };
+
+        let read = byte_group_read(
+            &mut state,
+            ByteGroupReadSpec {
+                payload: &payload,
+                element_shift: 0,
+                group_stride: 1,
+                count: 560,
+            },
+        )
+        .unwrap();
+        let expected = hex_bytes(
+            "000102020202020202020202020205030c01040202020d1002101204080d02020206030e0b10070502141113000c0301\
+             02041302111406030606030808060507021312070004050a040f0010050a0413100b0115041314080407080311120900\
+             0a140f0202020202090c0209030e0202020202020202020202130b000815020d1002140e04140a110c02141502110a0c\
+             020508020d0d13110c0c04021617021416151515080215020d0710080212001216150803100308020603061407000a14\
+             02040f181818180714020b181513041119020b0a151211030c0b1602130f1211001008001618181014031414140c0316\
+             110808130c0012070b111717171116041717171705181802181817110314041414140319181002031316101602161114\
+             020202020202020202020202020202020202020202020202141514061310060e090c020202020205030c180319180318\
+             020202020205030c02020202020503190601060601060601060601060601130414100410090408040601040704061904\
+             19180418060104070408060104070406020202020202020202180003180218001806181a1a0313050e0d021817151214\
+             0317091618181807080c110b190e001603171216170407030c18180b14130d16150c01130512080b041516071819181a\
+             0e120412110509180118000c02181802181802180217041a1a0319151618031816100e1419180115080d0a1615060408\
+             1a1a0f190f11181a101418120816140318180a05140b070c10030c1a1112080c",
+        );
+
+        assert_eq!(
+            read,
+            ByteGroupRead {
+                selector: 2,
+                bytes: expected.clone(),
+            }
+        );
+        assert_eq!(
+            state,
+            ByteGroupReadState {
+                reader: RansThreeLaneReader {
+                    ptr: 4469,
+                    acc: 17282381051372102738,
+                    bitpos: 60,
+                },
+                mode1_extra_readers: [
+                    RansThreeLaneReader {
+                        ptr: 4524,
+                        acc: 4679714676352931668,
+                        bitpos: 58,
+                    },
+                    RansThreeLaneReader {
+                        ptr: 4673,
+                        acc: 11559655046995041492,
+                        bitpos: 58,
+                    },
+                ],
+                stream_pos: 474,
+                segment_state: RansStateBuffer {
+                    states: [
+                        290362338331826,
+                        324891473402,
+                        3329202948120618,
+                        1082470406632,
+                    ],
+                    flag: 15,
+                },
+                selector2_history: expected,
             }
         );
     }
@@ -6834,6 +7093,7 @@ mod tests {
                 mode1_extra_readers: [zero_three_lane_reader(); 2],
                 stream_pos: 11,
                 segment_state: RansStateBuffer::cold(),
+                selector2_history: Vec::new(),
             }
         );
     }
@@ -6854,12 +7114,12 @@ mod tests {
                 &mut state,
                 ByteGroupReadSpec {
                     payload: &payload,
-                    element_shift: 0,
+                    element_shift: 2,
                     group_stride: 1,
                     count: 1,
                 },
             ),
-            Err(ByteGroupReadError::UnportedSelector(2))
+            Err(ByteGroupReadError::UnsupportedElementShift(2))
         );
 
         let payload = sparse_payload(8, &[(0, "0000000000000000")]);
@@ -6928,6 +7188,52 @@ mod tests {
             Err(ByteGroupReadError::UnobservedSelector1LargeWindow {
                 group_symbols: 0x80000,
             })
+        );
+
+        let payload = sparse_payload(8, &[(0, "0000000000000000")]);
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 0,
+                acc: 2 << 62,
+                bitpos: 59,
+            },
+            0,
+        );
+        assert_eq!(
+            byte_group_read(
+                &mut state,
+                ByteGroupReadSpec {
+                    payload: &payload,
+                    element_shift: 0,
+                    group_stride: 1,
+                    count: 0x20001,
+                },
+            ),
+            Err(ByteGroupReadError::UnobservedSelector2MultiWindow {
+                byte_count: 0x20001,
+            })
+        );
+
+        let payload = sparse_payload(8, &[(0, "0000000000000000")]);
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 0,
+                acc: 5 << 61,
+                bitpos: 59,
+            },
+            0,
+        );
+        assert_eq!(
+            byte_group_read(
+                &mut state,
+                ByteGroupReadSpec {
+                    payload: &payload,
+                    element_shift: 0,
+                    group_stride: 1,
+                    count: 1,
+                },
+            ),
+            Err(ByteGroupReadError::UnobservedSelector2RawWindow)
         );
 
         let mut state = byte_group_state(
