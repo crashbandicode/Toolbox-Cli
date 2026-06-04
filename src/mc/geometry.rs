@@ -4527,6 +4527,24 @@ pub struct TransformTailU16x2DeltaSpec<'a> {
     pub source1: &'a [u8],
 }
 
+/// Inputs for the three-byte i8/i8/sqrt transform tail (`0x110aac0`).
+pub struct TransformTailI8x2NormalSpec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Direct signed i8 x/y source stream at `[x4]`.
+    pub source0: &'a [u8],
+    /// Direct z adjustment stream at `[x4+8]`.
+    pub source1: &'a [u8],
+    /// Direct z sign-byte stream at `[x4+0x10]`.
+    pub source2: &'a [u8],
+}
+
 /// Source and table consumption from a delta-match transform tail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransformTailDeltaUsage {
@@ -4591,6 +4609,11 @@ fn sign_extend_10(value: u16) -> i64 {
     } else {
         lane
     }
+}
+
+#[inline]
+fn sign_extend_i8(value: u8) -> i64 {
+    i64::from(value as i8)
 }
 
 #[inline]
@@ -4887,6 +4910,121 @@ pub fn transform_tail_u16x2_delta_into(
         source1: source1_pos,
         source2: 0,
         match_entries: match_index,
+    })
+}
+
+/// Apply the observed three-byte i8/i8/sqrt transform tail (`0x110aac0`).
+///
+/// Direct literals copy two signed i8 components from source0, reconstruct the
+/// third byte as `round(sqrt(127^2 - x^2 - y^2))`, add source1, and apply the
+/// source2 sign byte (`0x110ab00..0x110ab4c`). Copy runs clone three bytes by
+/// the record back-distance in bytes (`0x110ab60..0x110ab8c`).
+pub fn transform_tail_i8x2_normal_into(
+    out: &mut [u8],
+    spec: TransformTailI8x2NormalSpec<'_>,
+) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
+    const MAX_COMPONENT_SQUARED: i64 = 0x3f01;
+
+    if spec.output_stride == 0 {
+        return Err(TransformTailDeltaError::ZeroStride);
+    }
+    let mut cursor = spec
+        .block_index
+        .checked_mul(spec.output_stride)
+        .and_then(|offset| offset.checked_add(spec.out_offset))
+        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut source0_pos = 0usize;
+    let mut source1_pos = 0usize;
+    let mut source2_pos = 0usize;
+    let mut written = 0usize;
+    let mut chunk = [0u8; 3];
+
+    for record in spec.records {
+        for _ in 0..record.literal_count {
+            let cursor_end = cursor
+                .checked_add(3)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let source0_end = source0_pos
+                .checked_add(2)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let source1_end = source1_pos
+                .checked_add(1)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let source2_end = source2_pos
+                .checked_add(1)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let xy = spec
+                .source0
+                .get(source0_pos..source0_end)
+                .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+            let z_delta = *spec
+                .source1
+                .get(source1_pos)
+                .filter(|_| source1_end <= spec.source1.len())
+                .ok_or(TransformTailDeltaError::Source1TooSmall)?;
+            let z_sign = *spec
+                .source2
+                .get(source2_pos)
+                .filter(|_| source2_end <= spec.source2.len())
+                .ok_or(TransformTailDeltaError::Source2TooSmall)?;
+            let x = sign_extend_i8(xy[0]);
+            let y = sign_extend_i8(xy[1]);
+            let remaining = MAX_COMPONENT_SQUARED
+                .checked_sub(x * x)
+                .and_then(|value| value.checked_sub(y * y))
+                .unwrap_or(-1)
+                .max(0);
+            let z = (remaining as f32).sqrt().round() as u32;
+            let z = z.wrapping_add(u32::from(z_delta));
+            let z = if z_sign == 1 { 0u32.wrapping_sub(z) } else { z } as u8;
+            let slot = out
+                .get_mut(cursor..cursor_end)
+                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+            slot[0] = xy[0];
+            slot[1] = xy[1];
+            slot[2] = z;
+            source0_pos = source0_end;
+            source1_pos = source1_end;
+            source2_pos = source2_end;
+            written += 1;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        }
+
+        for _ in 0..record.copy_count {
+            if record.back_distance == 0 {
+                return Err(TransformTailDeltaError::CopyBeforeOutput);
+            }
+            let source = cursor
+                .checked_sub(record.back_distance)
+                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
+            let source_end = source
+                .checked_add(3)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let cursor_end = cursor
+                .checked_add(3)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let value = out
+                .get(source..source_end)
+                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
+            chunk.copy_from_slice(value);
+            let slot = out
+                .get_mut(cursor..cursor_end)
+                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+            slot.copy_from_slice(&chunk);
+            written += 1;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        }
+    }
+
+    Ok(TransformTailDeltaUsage {
+        source0: source0_pos,
+        source1: source1_pos,
+        source2: source2_pos,
+        match_entries: written,
     })
 }
 
@@ -9838,6 +9976,60 @@ mod tests {
         }
     }
 
+    /// Transform tail `0x110aac0`: signed i8 x/y direct rows, sqrt-derived z
+    /// byte, source2 sign byte, and copy rows.
+    ///
+    /// Provenance: `capture_transform_tail_110aac0.py`, Animal_Bear
+    /// `0x110aac0` call, first real record `(7,2,16)`. This compact prefix
+    /// covers direct reconstruction, a negative z sign byte, and copy rows; the
+    /// replay script covers the full observed population 3/3.
+    #[test]
+    fn transform_tail_i8x2_normal_bear_first_record() {
+        let source0 = hex_bytes("bc1eb4f6c222e38de08def89ca94");
+        let source1 = hex_bytes("000001ff0101ff");
+        let source2 = hex_bytes("00000000000001");
+        let expected_lane = hex_bytes("bc1e67b4f665c2226ae38d2ce08d2cef892aca94daca94daca94da");
+        let records = [TransformTailRecord {
+            literal_count: 7,
+            copy_count: 2,
+            back_distance: 16,
+        }];
+        let mut out = vec![0xee; 144];
+
+        let usage = transform_tail_i8x2_normal_into(
+            &mut out,
+            TransformTailI8x2NormalSpec {
+                output_stride: 16,
+                block_index: 0,
+                out_offset: 0,
+                records: &records,
+                source0: &source0,
+                source1: &source1,
+                source2: &source2,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            usage,
+            TransformTailDeltaUsage {
+                source0: 14,
+                source1: 7,
+                source2: 7,
+                match_entries: 9,
+            }
+        );
+        for (unit_index, expected) in expected_lane.chunks_exact(3).enumerate() {
+            let base = unit_index * 16;
+            assert_eq!(&out[base..base + 3], expected, "unit {unit_index}");
+        }
+        for (index, &byte) in out.iter().enumerate() {
+            if index % 16 >= 3 {
+                assert_eq!(byte, 0xee, "non-lane byte {index} changed");
+            }
+        }
+    }
+
     /// Transform tail `0x110afb0`: packed 10-10-10 direct rows, sqrt-derived
     /// third component, signed matched deltas, and copy runs.
     ///
@@ -11307,6 +11499,114 @@ mod tests {
                     matches: &[0],
                     source0: &[],
                     source1: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::CopyBeforeOutput)
+        );
+    }
+
+    #[test]
+    fn transform_tail_i8x2_normal_rejects_malformed_inputs() {
+        let direct = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 0,
+            back_distance: 0,
+        }];
+        let mut out = [0u8; 3];
+        assert_eq!(
+            transform_tail_i8x2_normal_into(
+                &mut out,
+                TransformTailI8x2NormalSpec {
+                    output_stride: 0,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    source0: &[0; 2],
+                    source1: &[0],
+                    source2: &[0],
+                },
+            ),
+            Err(TransformTailDeltaError::ZeroStride)
+        );
+        assert_eq!(
+            transform_tail_i8x2_normal_into(
+                &mut out,
+                TransformTailI8x2NormalSpec {
+                    output_stride: 3,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    source0: &[0; 1],
+                    source1: &[0],
+                    source2: &[0],
+                },
+            ),
+            Err(TransformTailDeltaError::Source0TooSmall)
+        );
+        assert_eq!(
+            transform_tail_i8x2_normal_into(
+                &mut out,
+                TransformTailI8x2NormalSpec {
+                    output_stride: 3,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    source0: &[0; 2],
+                    source1: &[],
+                    source2: &[0],
+                },
+            ),
+            Err(TransformTailDeltaError::Source1TooSmall)
+        );
+        assert_eq!(
+            transform_tail_i8x2_normal_into(
+                &mut out,
+                TransformTailI8x2NormalSpec {
+                    output_stride: 3,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    source0: &[0; 2],
+                    source1: &[0],
+                    source2: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::Source2TooSmall)
+        );
+
+        let mut short_out = [0u8; 2];
+        assert_eq!(
+            transform_tail_i8x2_normal_into(
+                &mut short_out,
+                TransformTailI8x2NormalSpec {
+                    output_stride: 3,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    source0: &[0; 2],
+                    source1: &[0],
+                    source2: &[0],
+                },
+            ),
+            Err(TransformTailDeltaError::OutputTooSmall)
+        );
+
+        let copy_first = [TransformTailRecord {
+            literal_count: 0,
+            copy_count: 1,
+            back_distance: 1,
+        }];
+        assert_eq!(
+            transform_tail_i8x2_normal_into(
+                &mut out,
+                TransformTailI8x2NormalSpec {
+                    output_stride: 3,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &copy_first,
+                    source0: &[],
+                    source1: &[],
+                    source2: &[],
                 },
             ),
             Err(TransformTailDeltaError::CopyBeforeOutput)

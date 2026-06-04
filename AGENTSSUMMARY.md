@@ -643,8 +643,26 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec B2-CP4 chunk three-byte vector writer
+**Committed:** B2-CP4 three-byte vector writer chunk landed in the `0x110aac0`
+port commit, porting `0x110aac0` in `src/mc/geometry.rs` as
+`transform_tail_i8x2_normal_into`. Durable local evidence:
+`capture_transform_tail_110aac0.py` enumerated **3** observed calls
+(Bear/Bass/Dragonfly current 6), and `verify_transform_tail_110aac0.py`
+replayed **3/3**. Coverage totals are direct literals 4205, copy units 204,
+direct negative signs 2267, source0 8410 bytes, source1 4205 bytes, and source2
+4205 bytes. Discriminators: no-direct-sign fails 3/3 and sqrt-floor fails 3/3.
+Rust coverage: fixture-free Bear first-record golden plus malformed guards;
+`cargo test --lib transform_tail_i8x2_normal` passed 2 tests,
+`cargo test --lib transform_tail` passed 25 tests, and `cargo build` passed.
+Updated Dragonfly sparse bufB probe now matches **13598/13598** touched oracle
+bytes; full bufB first diff moved to byte 5248, which maps to Dragonfly current
+8 at `bufB+5248`, target `0x10fde00`. Next after commit: enumerate/replay
+`0x10fde00`. Per current user instruction, the ledger is folded into this port
+commit and no standalone ledger commit should be created.
+
 ### 2026-06-04 - MeshCodec B2-CP4 chunk two-u16 delta writer
-**Committed:** B2-CP4 two-u16 delta writer chunk landed in this commit, porting
+**Committed:** B2-CP4 two-u16 delta writer chunk landed in `5f032ec`, porting
 `0x1103ab0` in `src/mc/geometry.rs` as
 `transform_tail_u16x2_delta_into`. Durable local evidence:
 `capture_transform_tail_1103ab0.py` enumerated **4** observed calls
