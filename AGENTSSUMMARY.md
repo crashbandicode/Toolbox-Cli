@@ -656,11 +656,17 @@ golden plus malformed guards; `cargo test --lib transform_tail_delta4_direct`
 passed 2 tests, `cargo test --lib transform_tail` passed 27 tests,
 `cargo test --test mc_dragonfly_bufb_assembly -- --ignored --nocapture` passed
 1 ignored-local-oracle test, and `cargo test --test mc_dragonfly_bufb_assembly`
-compiled the ignored target. Updated Dragonfly sparse bufB probe now matches
-**15690/15690** touched oracle bytes and full sparse bufB equals the oracle
-(`first_diff=None`). The ignored Rust integration test assembles Dragonfly
-bufB from the ported writers and reports first-diff offset plus writer `0xADDR`
-on failure. All green: 224 lib unit (incl. 78 mc::geometry) + all integration;
+compiled the ignored target. The ignored Rust integration test reconstructs the
+**15,696-byte `bufb_after_hex` region** captured at the `0x10fde00` call from
+the nine ported transform-tail writers and matches it byte-exact
+(**15690/15696** writer-touched, all 15696 equal -> `first_diff=None`). SCOPE:
+this validates the transform-WRITER layer assembled from CAPTURED
+`records`/`source` inputs, with a wrapper->writer cross-check (`0x110d360`
+`out_after_hex` == each writer's `records_hex`). It is NOT the full
+93,600-byte Dragonfly bufB (stream A `[0..39928]` + stream B `[39928..93160]` +
+440-byte direct tail) and NOT an end-to-end decode from `.mc` payload bytes
+(payload -> segment loop -> rANS -> byte-group reader -> transform). Those are
+CP5. All green: 224 lib unit (incl. 78 mc::geometry) + all integration;
 clippy --all-targets clean; --no-default-features builds. Next after commit:
 move to the next user-approved batch; no standalone ledger commit should be
 created for this chunk.
