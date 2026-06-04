@@ -4487,12 +4487,44 @@ pub struct TransformTailU16x3DeltaSpec<'a> {
     pub source1: &'a [u8],
 }
 
+/// Inputs for the packed 10-10-10 direct/delta transform tail (`0x110afb0`).
+pub struct TransformTailPack10x3DeltaSpec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Match table at `[x0+0x10]`, indexed by emitted vertex.
+    pub matches: &'a [u32],
+    /// Direct source stream with two raw 10-bit components per row at `[x4]`.
+    pub source0: &'a [u8],
+    /// Direct third-component delta stream at `[x4+8]`.
+    pub source1: &'a [u8],
+    /// Direct third-component sign-byte stream at `[x4+0x10]`.
+    pub source2: &'a [u8],
+    /// Matched three-u16 packed-lane delta stream at `[x4+0x18]`.
+    pub source3: &'a [u8],
+}
+
 /// Source and table consumption from a delta-match transform tail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransformTailDeltaUsage {
     pub source0: usize,
     pub source1: usize,
     pub source2: usize,
+    pub match_entries: usize,
+}
+
+/// Source and table consumption from a packed 10-10-10 transform tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransformTailPack10Usage {
+    pub source0: usize,
+    pub source1: usize,
+    pub source2: usize,
+    pub source3: usize,
     pub match_entries: usize,
 }
 
@@ -4504,6 +4536,7 @@ pub enum TransformTailDeltaError {
     Source0TooSmall,
     Source1TooSmall,
     Source2TooSmall,
+    Source3TooSmall,
     MatchTableTooSmall,
     MatchBeforeOutput,
     CopyBeforeOutput,
@@ -4519,6 +4552,36 @@ fn read_transform_tail_u16(buf: &[u8], offset: usize) -> Option<u16> {
 #[inline]
 fn write_transform_tail_u16(buf: &mut [u8], offset: usize, value: u16) {
     buf[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+#[inline]
+fn read_transform_tail_u32(buf: &[u8], offset: usize) -> Option<u32> {
+    let bytes = buf.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+#[inline]
+fn write_transform_tail_u32(buf: &mut [u8], offset: usize, value: u32) {
+    buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+#[inline]
+fn sign_extend_10(value: u16) -> i64 {
+    let lane = i64::from(value & 0x03ff);
+    if lane & 0x0200 != 0 {
+        lane - 0x0400
+    } else {
+        lane
+    }
+}
+
+#[inline]
+fn pack10_matched_component(previous: u32, delta: u16, sign_bit: u32) -> u32 {
+    let sign_mask = if sign_bit != 0 { u32::MAX } else { 0 };
+    (previous ^ sign_mask)
+        .wrapping_add(u32::from(delta))
+        .wrapping_add(sign_bit)
+        & 0x03ff
 }
 
 /// Apply the observed two-byte direct/delta transform tail (`0x10fdc00`).
@@ -4641,6 +4704,181 @@ pub fn transform_tail_delta2_direct_into(
         source0: source0_pos,
         source1: source1_pos,
         source2: 0,
+        match_entries: match_index,
+    })
+}
+
+/// Apply the observed packed 10-10-10 direct/delta transform tail (`0x110afb0`).
+///
+/// Direct literals read two signed 10-bit components from source0, reconstruct
+/// the third as `round(sqrt(511^2 - x^2 - y^2))`, add source1, apply the source2
+/// sign byte, and pack the result (`0x110b004..0x110b058`). Matched literals use
+/// `(match >> 3) * stride` as a packed-row look-back, toggle each 10-bit lane
+/// from match bits 0..2, add three source3 u16 deltas, and repack
+/// (`0x110b068..0x110b0dc`). Copy runs clone four packed bytes by byte distance
+/// (`0x110b0f4..0x110b118`).
+pub fn transform_tail_pack10x3_delta_into(
+    out: &mut [u8],
+    spec: TransformTailPack10x3DeltaSpec<'_>,
+) -> Result<TransformTailPack10Usage, TransformTailDeltaError> {
+    const MAX_COMPONENT_SQUARED: i64 = 0x3fc01;
+
+    if spec.output_stride == 0 {
+        return Err(TransformTailDeltaError::ZeroStride);
+    }
+    let mut cursor = spec
+        .block_index
+        .checked_mul(spec.output_stride)
+        .and_then(|offset| offset.checked_add(spec.out_offset))
+        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let mut match_index = 0usize;
+    let mut source0_pos = 0usize;
+    let mut source1_pos = 0usize;
+    let mut source2_pos = 0usize;
+    let mut source3_pos = 0usize;
+    let mut chunk = [0u8; 4];
+
+    for record in spec.records {
+        for _ in 0..record.literal_count {
+            let match_entry = *spec
+                .matches
+                .get(match_index)
+                .ok_or(TransformTailDeltaError::MatchTableTooSmall)?;
+            let cursor_end = cursor
+                .checked_add(4)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            if match_entry == 0 {
+                let source0_end = source0_pos
+                    .checked_add(4)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let source1_end = source1_pos
+                    .checked_add(2)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let source2_end = source2_pos
+                    .checked_add(1)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let raw_components = spec
+                    .source0
+                    .get(source0_pos..source0_end)
+                    .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                let z_delta = read_transform_tail_u16(spec.source1, source1_pos)
+                    .filter(|_| source1_end <= spec.source1.len())
+                    .ok_or(TransformTailDeltaError::Source1TooSmall)?;
+                let z_sign = *spec
+                    .source2
+                    .get(source2_pos)
+                    .filter(|_| source2_end <= spec.source2.len())
+                    .ok_or(TransformTailDeltaError::Source2TooSmall)?;
+                let raw_x = u16::from_le_bytes([raw_components[0], raw_components[1]]);
+                let raw_y = u16::from_le_bytes([raw_components[2], raw_components[3]]);
+                let x = sign_extend_10(raw_x);
+                let y = sign_extend_10(raw_y);
+                let remaining = MAX_COMPONENT_SQUARED
+                    .checked_sub(x * x)
+                    .and_then(|value| value.checked_sub(y * y))
+                    .unwrap_or(-1)
+                    .max(0);
+                let z = (remaining as f32).sqrt().round() as u32;
+                let z = z.wrapping_add(u32::from(z_delta));
+                let z = if z_sign == 1 { 0u32.wrapping_sub(z) } else { z } & 0x03ff;
+                let packed = (z << 20) | (u32::from(raw_y) << 10) | u32::from(raw_x);
+                let slot = out
+                    .get_mut(cursor..cursor_end)
+                    .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                write_transform_tail_u32(slot, 0, packed);
+                source0_pos = source0_end;
+                source1_pos = source1_end;
+                source2_pos = source2_end;
+            } else {
+                let match_units = (match_entry >> 3) as usize;
+                let match_distance = match_units
+                    .checked_mul(spec.output_stride)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let source = cursor
+                    .checked_sub(match_distance)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let source_end = source
+                    .checked_add(4)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let previous = read_transform_tail_u32(out, source)
+                    .filter(|_| source_end <= out.len())
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let source3_end = source3_pos
+                    .checked_add(6)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let deltas = spec
+                    .source3
+                    .get(source3_pos..source3_end)
+                    .ok_or(TransformTailDeltaError::Source3TooSmall)?;
+                let lane0 = pack10_matched_component(
+                    previous & 0x03ff,
+                    read_transform_tail_u16(deltas, 0)
+                        .ok_or(TransformTailDeltaError::Source3TooSmall)?,
+                    match_entry & 1,
+                );
+                let lane1 = pack10_matched_component(
+                    (previous >> 10) & 0x03ff,
+                    read_transform_tail_u16(deltas, 2)
+                        .ok_or(TransformTailDeltaError::Source3TooSmall)?,
+                    (match_entry >> 1) & 1,
+                );
+                let lane2 = pack10_matched_component(
+                    (previous >> 20) & 0x03ff,
+                    read_transform_tail_u16(deltas, 4)
+                        .ok_or(TransformTailDeltaError::Source3TooSmall)?,
+                    (match_entry >> 2) & 1,
+                );
+                let slot = out
+                    .get_mut(cursor..cursor_end)
+                    .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                write_transform_tail_u32(slot, 0, lane0 | (lane1 << 10) | (lane2 << 20));
+                source3_pos = source3_end;
+            }
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            match_index += 1;
+        }
+
+        for _ in 0..record.copy_count {
+            if record.back_distance == 0 {
+                return Err(TransformTailDeltaError::CopyBeforeOutput);
+            }
+            let source = cursor
+                .checked_sub(record.back_distance)
+                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
+            let source_end = source
+                .checked_add(4)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let cursor_end = cursor
+                .checked_add(4)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let value = out
+                .get(source..source_end)
+                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
+            chunk.copy_from_slice(value);
+            let slot = out
+                .get_mut(cursor..cursor_end)
+                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+            slot.copy_from_slice(&chunk);
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        }
+
+        match_index = match_index
+            .checked_add(usize::from(record.copy_count))
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        if match_index > spec.matches.len() {
+            return Err(TransformTailDeltaError::MatchTableTooSmall);
+        }
+    }
+
+    Ok(TransformTailPack10Usage {
+        source0: source0_pos,
+        source1: source1_pos,
+        source2: source2_pos,
+        source3: source3_pos,
         match_entries: match_index,
     })
 }
@@ -9301,6 +9539,183 @@ mod tests {
         }
     }
 
+    /// Transform tail `0x110afb0`: packed 10-10-10 direct rows, sqrt-derived
+    /// third component, signed matched deltas, and copy runs.
+    ///
+    /// Provenance: `capture_transform_tail_110afb0.py`, Animal_Dragonfly
+    /// `0x110afb0` full call, entry `0x14000a13`, records `(103,1,300)` and
+    /// `(419,0,0)`. This is the next target named by the Dragonfly sparse bufB
+    /// oracle after `0x1100c90`; `verify_transform_tail_110afb0.py` replays the
+    /// full observed population 3/3.
+    #[test]
+    fn transform_tail_pack10x3_delta_dragonfly_column() {
+        let source0 = hex_bytes(concat!(
+            "0000020200000202c10142030000ec0200000601f9012200af01470300001002ba011f030000db030000d90152014401",
+            "8e013a011c010d010000ff010000fe01fb013700000007020000fe01000078010000e1000000ef011d01b50227019903",
+            "9601da0200006502000014007001ef0399018303ea00e20000009e01a1002001000021020000c9011a00b6017f013a00",
+            "a80190033200fa01a9017e03d40122009e009e0108014b022400e401000049010000200000000102b40267010000f501",
+            "b901fe02d501420302017502d5013803d90151033f01d002ab01c300a701ad005d010300a301da03a001cd0360013d03",
+            "f801fb03f201c4039e01fa0258016a01a801de00b7010601e0015603e3015b0352012a039001e7039c016d0056013d00",
+            "1800d5012500d501e50190003202cb003d00b2010500ba01d5017a003602df000b00ff010d00ff010d00ff01fe01e003",
+            "fb01f6030000f8010900fe010c00ff010000060200000102e003fe01e003fe01df03fe01df03fe01dc03fe012100fe01",
+            "2000fe012000fe012100fe012400fe01",
+        ));
+        let source1 = hex_bytes(concat!(
+            "0600fb0301000000000003000000ff030000000000000000ff03000011000500fc030300060000000000020001000000",
+            "ff03000000000000000000000000000001000000000001000000fb03000001000000fb03ff0300000000010001000000",
+            "f703fe0300000100ff0300000000ff030000000001000000010001000000ff030000040002000100000000000100ff03",
+            "00000200fe03ff0300000000ff030100080004000000060001000000f7030b0002000e000e0011000c000a0008000c00",
+            "11000e000a000800",
+        ));
+        let source2 = hex_bytes(concat!(
+            "000001010101000001000000010100010101010101010101000101000000010100000000000100010001010000010100",
+            "000001000001000000000000000000010001010101000000000000000000000001000001010101000100010101010001",
+            "01010100",
+        ));
+        let source3 = sparse_payload(2532, &[(1020, "ff03")]);
+        let matches = hex_u32_words(concat!(
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000001800000028000000",
+            "000000002000000000000000000000004000000000000000100000009800000090000000800000000000000000000000",
+            "00000000c000000000000000b80000000000000040000000500000000000000000000000b80000007800000088000000",
+            "08000000b0000000c0000000d800000010000000200000005000000000000000d80000005800000061010000b0000000",
+            "6801000061010000b80000006901000038010000390100001000000020000000b80000007000000059010000a0000000",
+            "0800000040000000400000002800000079010000c901000008000000a8000000b800000098000000a800000058010000",
+            "28000000f800000058010000980000005000000048000000100000009000000088000000a80000001000000020000000",
+            "b80100007000000000020000080000001800000098000000000000000000000000000000180000000000000000000000",
+            "280000002000000018000000000000000000000000000000000000000000000000000000000000006000000050000000",
+            "080000008800000028000000000000005800000000000000800000006800000060000000a80000002000000018000000",
+            "00000000a800000000000000a00000005800000000000000200000000000000040000000300000002800000060000000",
+            "200000003000000000000000b80000000000000068000000a8000000400000003000000060000000f800000030000000",
+            "0000000060000000a0000000580000000000000098000000080000001800000068000000f9010000f101000001020000",
+            "c1010000d1010000c901000060010000c1010000a0000000a0010000480000005800000008000000e001000028000000",
+            "d0000000c101000060000000000000001000000000000000880000006000000048000000480000003000000040000000",
+            "e1010000c800000020000000e00000000000000049010000100000000902000018000000100000005000000001020000",
+            "1000000000000000e101000018000000e1010000200000000800000018000000a1010000080000005001000028000000",
+            "b000000020010000380000006800000030000000d0000000880100003000000018010000c8000000c8000000c0000000",
+            "5000000030000000e9020000080000009800000028000000180000007800000020000000a80000002800000000010000",
+            "98000000b001000080000000c00500008006000058060000000000000805000018000000280500001800000028000000",
+            "6003000050030000c80300008000000070000000000200002003000028000000a8040000680000008805000078060000",
+            "e00500005805000028060000d8060000380000003000000030000000b0000000b0050000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "480000000000000050000000480000000000000050000000480000000000000050000000000000000000000000000000",
+            "00000000180000002800000000000000f00000000001000000000000f000000000010000000000000000000000000000",
+            "000000001800000028000000000000000000000000000000000000001800000028000000810100007901000089010000",
+            "810100007901000089010000810100007901000089010000810100007901000089010000810100007901000089010000",
+            "480000004000000089010000480000004000000089010000480000004000000089010000810100007901000089010000",
+            "81010000200000001800000081010000f8000000f000000081010000f8000000f0000000810100007901000089010000",
+            "810100002000000018000000810100007901000089010000810100002000000018000000000000000000000000000000",
+            "0000000000000000800a000008000000200400002100000000000000c00a0000080000004900000020000000d90a0000",
+            "28040000900300007804000098030000080a000030090000100000008009000078080000380400003004000078060000",
+            "20000000b8070000280000007805000088060000a0040000c80600001000000050000000100000005800000018000000",
+            "58000000e8070000b1060000080000007000000008050000890600000008000058000000100000004800000058080000",
+            "380800001800000070000000280800006808000040000000600000004008000040080000e007000060090000e8070000",
+            "28060000300800001006000028000000380000001800000030000000b0060000e8060000200000001807000028000000",
+            "4802000000000000680200006802000000000000e00a0000300c00000000000040020000100b00004802000008000000",
+            "280000000000000098020000180000001800000018000000a80200008802000088020000200000008002000090020000",
+            "a0020000000300001003000098000000c00b0000100000005800000030000000200300002800000098000000e8000000",
+            "5000000080000000b000000028000000c8060000880d0000780e0000e80c0000f0060000600c0000a80d0000f0060000",
+            "80000000c800000010070000a800000050070000180700005000000000010000b8020000900200006002000058020000",
+            "38080000f8090000d0070000d00700001800000058030000880800004803000010090000b8080000e808000040020000",
+            "280800006802000018090000800200000000000000000000000000000000000000000000d904000071020000f1040000",
+            "e9040000a10200000000000000000000000000000000000000000000",
+        ));
+        let expected_lane = hex_bytes(concat!(
+            "000868020008b801c1096d3600b02b2500189424f989703baf1dbd0c0040a807ba7d5c38006cef1f0040a807af1dbd0c",
+            "0064170c006cef1f5211d50c8ee9143cba7d5c381c35742bba7d5c3800086802c1096d36f989703b00fc170100f8b73d",
+            "fbdd403e0008b801001cf83a0018942400f8a73df989703bc1096d3600e0652a008453230040a80700086802ba7d5c38",
+            "ba7d5c388ee9143c5211d50c0064170c5211d50c8ee9143c0084532300bcf7371c35742b000868023f0a6d360008b801",
+            "00b02b25078a703b00189424511ebd0c006cef1fae12d50c006cef1f511ebd0c0040a80700bcf73772ea143c0064170c",
+            "0064170cae12d50c006cef1f72ea143ce436742b467e5c38467e5c383f0a6d360008680200189424078a703b00f8a73d",
+            "3f0a6d360084532300e0652a0040a807467e5c3800086802467e5c38ae12d50c72ea143c0064170c72ea143cae12d50c",
+            "f989703b00f8a73d00fc170100fc170100f8a73d078a703b1dd56a2f2765ce2696692b061dd56a2f0094092d00501020",
+            "2765ce261dd56a2f0050102070bd2f16990d8e11ea88a3180078462d00f8a73da180a4270084380b0094092d1dd56a2f",
+            "1dd56a2f96692b060084380b0024570eea88a3181ad86610005010200078462da180a4272765ce2600501020a180a427",
+            "7fe9e014990d8e11a8416e1000f8a73d1ad8661032e8273da8416e10a9f9cd0f7fe9e01400f8a73d32e8273da180a427",
+            "7fe9e014a9f9cd0fd4895033ea88a3189e78e60f1ad866102765ce26a180a427d489503300f8a73d0024570e1ad86610",
+            "082d093fa9f9cd0fa8416e109e78e60f2490173632e8273d32e8273d24901736a180a427e3d66a2f6a6a2b06d966ce26",
+            "670e8e1190be2f16168ba3180078462d5f83a42700f8a73d0084380b6a6a2b06e3d66a2fe3d66a2f0094092d0084380b",
+            "0024570ee6db6610168ba31800247518168ba3180080e01f90be2f166a6a2b060084380b0024570e168ba31800247518",
+            "81eae014670e8e11168ba318d966ce260004f83ff82e093f0004f83f58426e10f82e093f58426e1081eae01457facd0f",
+            "81eae014b49eb5362c8a503381eae014627be60fb49eb536b49eb536627be60fdc931736dc9317365f83a427b49eb536",
+            "168ba318e6db6610627be60f2c8a50335f83a427d966ce2600f8a73de6db66100024570ef82e093f58426e1057facd0f",
+            "627be60fe6db6610cdeb273dcdeb273ddc931736627be60fcdeb273d5f83a427dc931736168ba318627be60f81eae014",
+            "d966ce266a6a2b0658426e100008b801fbdd403ec1096d3600d4570600e0652ac1096d363f0a6d3600e0652a00d45706",
+            "7fe9e014ea88a318990d8e1181eae01458426e10670e8e11a8416e10990d8e1170bd2f16c1096d36008453231c35742b",
+            "e436742b72ea143c00bcf737ba7d5c38c1096d361c35742be436742b3f0a6d36467e5c38b9f90b00d5095d0402d5c933",
+            "d5e13c02d9451d053f41db2fab0da30ca7b5420e5d0d5017a3692f12a0355f1260f5bc13f8ed5f05f2113f069ee91b09",
+            "ab0da30c58a95539a7b5420ea3692f12a879330ba0355f12f8ed5f05b719c43ff2113f06e0593d3de36d6d3e52a92c2c",
+            "909ddf13e36d6d3ee0593d3d9cb5b111d5095d04b9f90b0056f56017d9451d05d5e13c021854970c2554970ce5416204",
+            "322ef3042554970c1854970c3dc8761005e80610d5e9110a367e930205e806103dc8761047fa0b00fed6c9332b0a5d04",
+            "2be23c02c142db2f27461d05550ea30ca30e501759b6420e5d6a2f12a0f6bc1360365f1208ee5f0562ea1b090e123f06",
+            "550ea30c59b6420ea8aa55395d6a2f1260365f12587a330b08ee5f050e123f06491ac43f205a3d3daeaa2c2c1d6e6d3e",
+            "709edf13205a3d3d1d6e6d3e64b6b11147fa0b002b0a5d04aaf660172be23c0227461d05e857970c1b426204db57970c",
+            "ce2df304e857970cdb57970cc3cb76102bea110afbeb0610ca7d9302c3cb7610fbeb06100bfc873f0dfc47000dfc0700",
+            "fe81af3ffbd90f3c001cf83a001cf83afbdd403e05da0f3c00e0c73a00f8b73d00f8b73d0282af3f00e0c73a05de403e",
+            "00d457063f0a6d360008b801467e5c38511ebd0cae12d50c511ebd0c0040a80796692b06a8416e1070bd2f160084380b",
+            "96692b062765ce26a8416e100024570e00247518ea88a3180080e01fea88a31870bd2f16ea88a3180084380b70bd2f16",
+            "2765ce26082d093f0004f83f0004f83fa8416e107fe9e0144c9db5369e78e60fea88a3189e78e60f082d093fd4895033",
+            "a9f9cd0f082d093f2765ce2632e8273d1ad866109e78e60f4c9db53624901736a180a427e3d66a2f005010200094092d",
+            "5f83a4270078462dd966ce2600501020e3d66a2fd966ce265f83a427f82e093f2c8a5033d966ce26b49eb5365f83a427",
+            "0dfc070009f8a73e0bfc873f0dfc47000cfcb700078a703b00b02b250018783b00f8b73d00fc17010282af3f0282af3f",
+            "0018783b0004e800001cf83a0018783b0004e800001cf83a05da0f3c00e0c73a05de403e001cf83a0008b8013f0a6d36",
+            "00d45706fbd90f3cfe81af3f00f8b73df989703b00f8b73d00e0c73afbd90f3cfbdd403ef989703b0018783b00b02b25",
+            "fe81af3f001cf83a0004e8000018783bba7d5c385211d50caf1dbd0c006cef1f00bcf7370064170c8ee9143c1c35742b",
+            "fbdd403e00d45706c1096d3600e0c73a00845323e436742b00bcf7373f0a6d367fe9e014d48950334c9db536a180a427",
+            "6a6a2b0690be2f1658426e10670e8e1190be2f160080e01f168ba3180084380b00f8a73dcdeb273de6db66105f83a427",
+            "81eae0142c8a503357facd0ff82e093fe0fb273fe0fbf73edffb473fdffb673fdcfb8700f3ff4700f4ffb700f5ff873f",
+            "f3ff0700f7fba73e21f8473f20f8f73e20f8273f21f8673f24f88700",
+        ));
+        let records = [
+            TransformTailRecord {
+                literal_count: 103,
+                copy_count: 1,
+                back_distance: 300,
+            },
+            TransformTailRecord {
+                literal_count: 419,
+                copy_count: 0,
+                back_distance: 0,
+            },
+        ];
+        let mut out = vec![0xee; 10460];
+
+        let usage = transform_tail_pack10x3_delta_into(
+            &mut out,
+            TransformTailPack10x3DeltaSpec {
+                output_stride: 20,
+                block_index: 0,
+                out_offset: 0,
+                records: &records,
+                matches: &matches,
+                source0: &source0,
+                source1: &source1,
+                source2: &source2,
+                source3: &source3,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            usage,
+            TransformTailPack10Usage {
+                source0: 400,
+                source1: 200,
+                source2: 100,
+                source3: 2532,
+                match_entries: 523,
+            }
+        );
+        for (unit_index, expected) in expected_lane.chunks_exact(4).enumerate() {
+            let base = unit_index * 20;
+            assert_eq!(&out[base..base + 4], expected);
+        }
+        for (index, &byte) in out.iter().enumerate() {
+            if index % 20 >= 4 {
+                assert_eq!(byte, 0xee, "non-lane byte {index} changed");
+            }
+        }
+    }
+
     /// Transform tail `0x10fbdc0`: three-byte direct and matched deltas.
     ///
     /// Provenance: `capture_transform_tails.py`, Animal_Bear `0x10fbdc0` call,
@@ -10262,6 +10677,185 @@ mod tests {
                     matches: &[0],
                     source0: &[],
                     source1: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::CopyBeforeOutput)
+        );
+    }
+
+    #[test]
+    fn transform_tail_pack10x3_delta_rejects_malformed_inputs() {
+        let direct = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 0,
+            back_distance: 0,
+        }];
+        let mut out = [0u8; 4];
+        assert_eq!(
+            transform_tail_pack10x3_delta_into(
+                &mut out,
+                TransformTailPack10x3DeltaSpec {
+                    output_stride: 0,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    matches: &[0],
+                    source0: &[0; 4],
+                    source1: &[0; 2],
+                    source2: &[0],
+                    source3: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::ZeroStride)
+        );
+        assert_eq!(
+            transform_tail_pack10x3_delta_into(
+                &mut out,
+                TransformTailPack10x3DeltaSpec {
+                    output_stride: 4,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    matches: &[],
+                    source0: &[0; 4],
+                    source1: &[0; 2],
+                    source2: &[0],
+                    source3: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::MatchTableTooSmall)
+        );
+        assert_eq!(
+            transform_tail_pack10x3_delta_into(
+                &mut out,
+                TransformTailPack10x3DeltaSpec {
+                    output_stride: 4,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    matches: &[0],
+                    source0: &[0; 3],
+                    source1: &[0; 2],
+                    source2: &[0],
+                    source3: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::Source0TooSmall)
+        );
+        assert_eq!(
+            transform_tail_pack10x3_delta_into(
+                &mut out,
+                TransformTailPack10x3DeltaSpec {
+                    output_stride: 4,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    matches: &[0],
+                    source0: &[0; 4],
+                    source1: &[0; 1],
+                    source2: &[0],
+                    source3: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::Source1TooSmall)
+        );
+        assert_eq!(
+            transform_tail_pack10x3_delta_into(
+                &mut out,
+                TransformTailPack10x3DeltaSpec {
+                    output_stride: 4,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    matches: &[0],
+                    source0: &[0; 4],
+                    source1: &[0; 2],
+                    source2: &[],
+                    source3: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::Source2TooSmall)
+        );
+
+        let matched = [TransformTailRecord {
+            literal_count: 1,
+            copy_count: 0,
+            back_distance: 0,
+        }];
+        assert_eq!(
+            transform_tail_pack10x3_delta_into(
+                &mut out,
+                TransformTailPack10x3DeltaSpec {
+                    output_stride: 4,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &matched,
+                    matches: &[8],
+                    source0: &[],
+                    source1: &[],
+                    source2: &[],
+                    source3: &[0; 6],
+                },
+            ),
+            Err(TransformTailDeltaError::MatchBeforeOutput)
+        );
+
+        let mut matched_out = [0u8; 24];
+        assert_eq!(
+            transform_tail_pack10x3_delta_into(
+                &mut matched_out,
+                TransformTailPack10x3DeltaSpec {
+                    output_stride: 20,
+                    block_index: 0,
+                    out_offset: 20,
+                    records: &matched,
+                    matches: &[8],
+                    source0: &[],
+                    source1: &[],
+                    source2: &[],
+                    source3: &[0; 5],
+                },
+            ),
+            Err(TransformTailDeltaError::Source3TooSmall)
+        );
+
+        let mut short_out = [0u8; 3];
+        assert_eq!(
+            transform_tail_pack10x3_delta_into(
+                &mut short_out,
+                TransformTailPack10x3DeltaSpec {
+                    output_stride: 4,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &direct,
+                    matches: &[0],
+                    source0: &[0; 4],
+                    source1: &[0; 2],
+                    source2: &[0],
+                    source3: &[],
+                },
+            ),
+            Err(TransformTailDeltaError::OutputTooSmall)
+        );
+
+        let copy_first = [TransformTailRecord {
+            literal_count: 0,
+            copy_count: 1,
+            back_distance: 1,
+        }];
+        assert_eq!(
+            transform_tail_pack10x3_delta_into(
+                &mut out,
+                TransformTailPack10x3DeltaSpec {
+                    output_stride: 4,
+                    block_index: 0,
+                    out_offset: 0,
+                    records: &copy_first,
+                    matches: &[0],
+                    source0: &[],
+                    source1: &[],
+                    source2: &[],
+                    source3: &[],
                 },
             ),
             Err(TransformTailDeltaError::CopyBeforeOutput)

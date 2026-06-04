@@ -643,6 +643,23 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec B2-CP4 chunk packed 10-bit writer
+**Ready to commit:** `0x110afb0` is ported in `src/mc/geometry.rs` as
+`transform_tail_pack10x3_delta_into`. Durable local evidence:
+`capture_transform_tail_110afb0.py` enumerated **3** observed calls
+(Bear/Bass/Dragonfly current 3), and `verify_transform_tail_110afb0.py`
+replayed **3/3**. Coverage totals are direct literals 1046, matched literals
+3051, copy units 312, sign flips 882, direct negative signs 375, match entries
+4409, source0 4184 bytes, source1 2092 bytes, source2 1046 bytes, and source3
+18306 bytes. Discriminators: no-match-sign fails 3/3, no-direct-sign fails 3/3,
+and sqrt-floor fails 3/3. Rust coverage: fixture-free Dragonfly full-call
+golden plus malformed guards; `cargo test --lib transform_tail_pack10x3_delta`
+passed 2 tests, `cargo test --lib transform_tail` passed 21 tests, and
+`cargo build` passed. Updated Dragonfly sparse bufB probe now matches
+**7845/7845** touched oracle bytes; full bufB first diff moved to byte 5236,
+which maps to Dragonfly current 4 at `bufB+5236`, target `0x1103ab0`. Next
+after commit: enumerate/replay `0x1103ab0`.
+
 ### 2026-06-04 - MeshCodec B2-CP4 chunk three-u16 signed-delta writer
 **Committed:** B2-CP4 three-u16 signed-delta writer chunk landed in `1d19d70`,
 porting `0x1100c90` in `src/mc/geometry.rs` as
