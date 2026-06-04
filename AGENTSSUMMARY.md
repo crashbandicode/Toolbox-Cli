@@ -643,6 +643,30 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-03 - MeshCodec B2-CP4 chunk byte segment dispatch
+**Committed:** B2-CP4 byte segment dispatch chunk landed in `5501c6f`, porting
+the observed mode-0 and mode-2 branches of `0x110dd80` as
+`geometry::rans_segment_dispatch_bytes_into`. Durable local evidence:
+`capture_segment_dispatch_byte.py` enumerated **68** calls across
+Bear/Bass/Dragonfly: mode 0 = 28, mode 1 = 30, and mode 2 = 10.
+`verify_segment_dispatch_byte.py` replayed mode 0 **28/28** for output bytes,
+rANS states, flags, stream consumption, and stream offsets, replayed mode 2
+**10/10**, and counted the 30 mode-1 calls as guarded for the separate
+`0x110eb50` byte three-lane decoder. Rust coverage: fixture-free Animal_Bass
+mode-0 tail golden (`count=30,count&3=2`), Animal_Dragonfly mode-2 fill golden
+(`value=1,count=3,stride=1`), plus rejection for mode 1, unknown modes, zero
+stride, undersized output, and counts too large for the `w2` byte-rANS argument.
+Per-chunk sample green: `python local-assets/re/verify_segment_dispatch_byte.py`
+(mode0 28/28, mode2 10/10, mode1 guarded 30),
+`cargo test --lib rans_segment_dispatch_bytes` (3 passed),
+`cargo test --lib rans_decode_bytes` (1 passed),
+`cargo test --lib rans_init_states` (4 passed), and `cargo build`. Last
+checkpoint baseline remains: All green: **195 lib unit** (incl. **49**
+`mc::geometry`) + all integration; clippy `--all-targets` clean;
+`--no-default-features` builds. Next: continue `0x110d7f0` selector 0 or 1
+byte/zstd segment paths, using the byte segment dispatcher for rANS/RLE branches
+while keeping `0x110eb50` guarded until replayed.
+
 ### 2026-06-03 - MeshCodec B2-CP4 chunk byte-output rANS
 **Committed:** B2-CP4 byte-output rANS chunk landed in `9525c5b`, porting the
 emitted-byte side of `0x110dfa0` as
