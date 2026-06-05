@@ -643,6 +643,25 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec CP5d state-4 control-bit handoff
+**Committed:** CP5d now ports the observed pre-state-4 control-bit/cursor
+handoff as `vertex_kernel_state4_entry`, covering `0x10f90d4..0x10f91d0`
+plus the `0x10fa980` leaf decisions that feed `0x11104d0`. Durable local
+evidence: `capture_kernel_state_machine.py` enumerated Bear/Bass/Dragonfly
+and `verify_kernel_state_machine.py` replayed **3/3** state-4 entry states
+from payload bytes: Bear `P+32805/0x431cdadaaf7db7ba/60/P+1306`, Bass
+`P+6664/0x073aaea0320638de/60/P+389`, Dragonfly
+`P+4482/0x431d6a5150e7aab4/58/P+95`. Fixture-free Rust coverage uses a
+sparse Bear golden for the `0,0,0,1,1,1` sequence, zstd/raw window flags,
+and continuation values `(1, 1, 1662, 2180)`, plus malformed guards for
+decision bit 1, truncated payload, bad continuation leaf, and unobserved
+submesh count. This is a validated state-4 input-contract slice, not the
+full kernel output transform. All green: 240 lib unit (incl. 94
+mc::geometry) + all integration; clippy --all-targets clean;
+--no-default-features builds. Next: port the remaining CP5d leaf
+output/fill-count path or proceed to zstd-history tail only after the
+state-4-to-writer path is closed from payload.
+
 ### 2026-06-04 - MeshCodec CP5c match-table builder
 **Committed:** CP5c advances the from-payload path by porting the state-4
 writer match-table builder `0x11106d0` as `vertex_match_table`, deriving the

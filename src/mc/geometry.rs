@@ -3310,6 +3310,306 @@ pub fn byte_group_read(
     }
 }
 
+/// One payload window located by the CP5d vertex/index kernel path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexKernelWindow {
+    /// Reverse-reader flag passed to `0x11109e0`: observed `0` = zstd block,
+    /// `1` = raw copy.
+    pub flag: u8,
+    /// Payload-relative start of the window bytes after the forward varint.
+    pub src_start: usize,
+    /// Window byte count from the forward varint.
+    pub src_size: usize,
+    /// Forward stream position after this window.
+    pub next_stream_pos: usize,
+}
+
+/// Continuation header parsed at `0x10f9838..0x10f9918` when the first kernel
+/// leaf did not finish the observed index sub-block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexKernelContinuation {
+    /// Low nibble of the continuation byte (`w27`).
+    pub mode: u8,
+    /// High nibble of the continuation byte (`w22`).
+    pub kind: u8,
+    /// First forward varint (`w20`).
+    pub repeat: u32,
+    /// Second forward varint (`w28`), the next leaf count.
+    pub count: u32,
+    /// Third forward varint (`w4`), the next leaf's current cursor.
+    pub current: u32,
+}
+
+/// Result of replaying the observed CP5d pre-state-4 kernel/control-bit path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VertexKernelState4Entry {
+    /// Expanded control bits consumed from the shared reverse reader.
+    pub bits: Vec<u8>,
+    /// Code stream window (`0x10fae60`, first call).
+    pub code_window: VertexKernelWindow,
+    /// Data stream window (`0x10fae60`, second call).
+    pub data_window: VertexKernelWindow,
+    /// Optional second-submesh continuation header.
+    pub continuation: Option<VertexKernelContinuation>,
+    /// Reader state at the `0x11104d0` state-4 setup entry.
+    pub reader: RansThreeLaneReader,
+    /// Forward stream position at the `0x11104d0` state-4 setup entry.
+    pub stream_pos: usize,
+}
+
+/// Errors from the observed CP5d kernel/control-bit transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VertexKernelStateError {
+    /// A reverse-reader load ran outside the payload.
+    PayloadTooSmall,
+    /// A forward varint or window body ran outside the payload.
+    StreamTooShort,
+    /// A forward varint exceeded the observed u32-shaped encoding.
+    VarintTooLong,
+    /// Pointer or size arithmetic overflowed.
+    ArithmeticOverflow,
+    /// The pre-kernel decision bit at `0x10f90d4` took the unobserved scratch path.
+    UnobservedDecisionBit(u8),
+    /// Current captures cover first-sub-block counts 1 and 2 only.
+    UnobservedSubmeshCount(usize),
+    /// The first kernel leaf must request the observed data-window unary code.
+    UnobservedFirstLeafUnary(u32),
+    /// The continuation leaf must take the observed no-new-window unary code.
+    UnobservedContinuationUnary(u32),
+    /// A window flag disagreed with the observed zstd/raw structure.
+    UnobservedWindowFlag { window: &'static str, flag: u8 },
+    /// The second-submesh continuation selected an unobserved leaf.
+    UnobservedContinuationModeKind { mode: u8, kind: u8 },
+}
+
+fn checked_vertex_kernel_u64_le(payload: &[u8], ptr: usize) -> Result<u64, VertexKernelStateError> {
+    let end = ptr
+        .checked_add(8)
+        .ok_or(VertexKernelStateError::PayloadTooSmall)?;
+    let bytes = payload
+        .get(ptr..end)
+        .ok_or(VertexKernelStateError::PayloadTooSmall)?;
+    Ok(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+fn take_vertex_kernel_decision_bit(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+    reverse_mode: u32,
+) -> Result<u8, VertexKernelStateError> {
+    let bitpos = reader.bitpos;
+    let step = ((bitpos >> 3) ^ 7) as usize;
+    let word = checked_vertex_kernel_u64_le(payload, reader.ptr)?;
+    let (word, ptr) = if reverse_mode == 1 {
+        (
+            word.swap_bytes(),
+            reader
+                .ptr
+                .checked_add(step)
+                .ok_or(VertexKernelStateError::PayloadTooSmall)?,
+        )
+    } else {
+        (
+            word,
+            reader
+                .ptr
+                .checked_sub(step)
+                .ok_or(VertexKernelStateError::PayloadTooSmall)?,
+        )
+    };
+    let bits = (word >> (bitpos & 63)) | reader.acc;
+    reader.ptr = ptr;
+    reader.acc = bits << 1;
+    reader.bitpos = (bitpos | 0x38).wrapping_sub(1);
+    Ok((bits >> 63) as u8)
+}
+
+fn take_vertex_kernel_bit(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+) -> Result<u8, VertexKernelStateError> {
+    let bitpos = reader.bitpos;
+    let step = ((bitpos >> 3) ^ 7) as usize;
+    let ptr = reader
+        .ptr
+        .checked_sub(step)
+        .ok_or(VertexKernelStateError::PayloadTooSmall)?;
+    let bits = (checked_vertex_kernel_u64_le(payload, reader.ptr)? >> (bitpos & 63)) | reader.acc;
+    reader.ptr = ptr;
+    reader.acc = bits << 1;
+    reader.bitpos = (bitpos | 0x38).wrapping_sub(1);
+    Ok((bits >> 63) as u8)
+}
+
+fn take_vertex_kernel_unary(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+) -> Result<u32, VertexKernelStateError> {
+    let bitpos = reader.bitpos;
+    let step = ((bitpos >> 3) ^ 7) as usize;
+    let ptr = reader
+        .ptr
+        .checked_sub(step)
+        .ok_or(VertexKernelStateError::PayloadTooSmall)?;
+    let bits = (checked_vertex_kernel_u64_le(payload, reader.ptr)? >> (bitpos & 63)) | reader.acc;
+    let leading_zeroes = bits.leading_zeros();
+    let consumed = leading_zeroes
+        .checked_add(1)
+        .ok_or(VertexKernelStateError::ArithmeticOverflow)?;
+    if consumed > 64 {
+        return Err(VertexKernelStateError::PayloadTooSmall);
+    }
+    reader.ptr = ptr;
+    reader.acc = if consumed == 64 { 0 } else { bits << consumed };
+    reader.bitpos = (bitpos | 0x38).wrapping_sub(consumed);
+    Ok(leading_zeroes)
+}
+
+fn read_vertex_kernel_varint(
+    payload: &[u8],
+    mut pos: usize,
+) -> Result<(u32, usize), VertexKernelStateError> {
+    let mut value = 0u32;
+    for _ in 0..5 {
+        let byte = payload
+            .get(pos)
+            .copied()
+            .ok_or(VertexKernelStateError::StreamTooShort)?;
+        pos += 1;
+        value = value
+            .checked_shl(7)
+            .and_then(|v| v.checked_add((byte & 0x7f) as u32))
+            .ok_or(VertexKernelStateError::VarintTooLong)?;
+        if byte & 0x80 == 0 {
+            return Ok((value, pos));
+        }
+    }
+    Err(VertexKernelStateError::VarintTooLong)
+}
+
+fn read_vertex_kernel_window(
+    payload: &[u8],
+    state: &mut ByteGroupReadState,
+    bits: &mut Vec<u8>,
+    name: &'static str,
+    expected_flag: u8,
+) -> Result<VertexKernelWindow, VertexKernelStateError> {
+    let flag = take_vertex_kernel_bit(payload, &mut state.reader)?;
+    bits.push(flag);
+    if flag != expected_flag {
+        return Err(VertexKernelStateError::UnobservedWindowFlag { window: name, flag });
+    }
+    let (src_size, src_start) = read_vertex_kernel_varint(payload, state.stream_pos)?;
+    let src_size = src_size as usize;
+    let next_stream_pos = src_start
+        .checked_add(src_size)
+        .ok_or(VertexKernelStateError::StreamTooShort)?;
+    payload
+        .get(src_start..next_stream_pos)
+        .ok_or(VertexKernelStateError::StreamTooShort)?;
+    state.stream_pos = next_stream_pos;
+    Ok(VertexKernelWindow {
+        flag,
+        src_start,
+        src_size,
+        next_stream_pos,
+    })
+}
+
+fn push_vertex_kernel_unary_bits(bits: &mut Vec<u8>, leading_zeroes: u32) {
+    bits.extend(std::iter::repeat_n(0, leading_zeroes as usize));
+    bits.push(1);
+}
+
+/// Replay the observed CP5d transition from the state-0 table reader into
+/// state 4's `0x11104d0` setup entry.
+///
+/// This is the cursor/state portion of `0x10f90d4..0x10f91d0` plus the
+/// `0x10fa980` leaf decisions needed before state 4. It deliberately stops at
+/// the input contract of the already-ported `vertex_match_table`; it does not
+/// claim to port the full leaf output transforms. Observed first sub-blocks
+/// have one (Dragonfly) or two (Bear/Bass) index submeshes: the first consumes a
+/// zstd code window, a unary `01` code, and a raw data window; the optional
+/// continuation consumes `mode=1,kind=0` plus three forward varints, then a
+/// unary `1` code.
+pub fn vertex_kernel_state4_entry(
+    payload: &[u8],
+    state: &mut ByteGroupReadState,
+    submesh_count: usize,
+    reverse_mode: u32,
+) -> Result<VertexKernelState4Entry, VertexKernelStateError> {
+    if !(1..=2).contains(&submesh_count) {
+        return Err(VertexKernelStateError::UnobservedSubmeshCount(
+            submesh_count,
+        ));
+    }
+
+    let mut bits = Vec::new();
+    let decision = take_vertex_kernel_decision_bit(payload, &mut state.reader, reverse_mode)?;
+    bits.push(decision);
+    if decision != 0 {
+        return Err(VertexKernelStateError::UnobservedDecisionBit(decision));
+    }
+
+    let code_window = read_vertex_kernel_window(payload, state, &mut bits, "code", 0)?;
+    let first_unary = take_vertex_kernel_unary(payload, &mut state.reader)?;
+    push_vertex_kernel_unary_bits(&mut bits, first_unary);
+    if first_unary != 1 {
+        return Err(VertexKernelStateError::UnobservedFirstLeafUnary(
+            first_unary,
+        ));
+    }
+    let data_window = read_vertex_kernel_window(payload, state, &mut bits, "data", 1)?;
+
+    let continuation = if submesh_count == 2 {
+        let header = payload
+            .get(state.stream_pos)
+            .copied()
+            .ok_or(VertexKernelStateError::StreamTooShort)?;
+        state.stream_pos += 1;
+        let mode = header & 0x0f;
+        let kind = header >> 4;
+        if mode != 1 || kind >= 2 {
+            return Err(VertexKernelStateError::UnobservedContinuationModeKind { mode, kind });
+        }
+        let (repeat, pos) = read_vertex_kernel_varint(payload, state.stream_pos)?;
+        state.stream_pos = pos;
+        let (count, pos) = read_vertex_kernel_varint(payload, state.stream_pos)?;
+        state.stream_pos = pos;
+        let (current, pos) = read_vertex_kernel_varint(payload, state.stream_pos)?;
+        state.stream_pos = pos;
+
+        let continuation_unary = take_vertex_kernel_unary(payload, &mut state.reader)?;
+        push_vertex_kernel_unary_bits(&mut bits, continuation_unary);
+        if continuation_unary != 0 {
+            return Err(VertexKernelStateError::UnobservedContinuationUnary(
+                continuation_unary,
+            ));
+        }
+
+        Some(VertexKernelContinuation {
+            mode,
+            kind,
+            repeat,
+            count,
+            current,
+        })
+    } else {
+        None
+    };
+
+    Ok(VertexKernelState4Entry {
+        bits,
+        code_window,
+        data_window,
+        continuation,
+        reader: state.reader,
+        stream_pos: state.stream_pos,
+    })
+}
+
 fn ceil_div_segment(value: usize, segment_mask: usize, segment_log: u32) -> Option<usize> {
     value.checked_add(segment_mask).map(|v| v >> segment_log)
 }
@@ -10921,6 +11221,157 @@ mod tests {
         assert_eq!(&out[4368..4370], &hex_bytes("7f80"));
         assert_eq!(&out[5148..5150], &hex_bytes("7f80"));
         assert_eq!(out[7], 0xee);
+    }
+
+    /// CP5d pre-state-4 kernel/control-bit transition.
+    ///
+    /// Provenance: `capture_kernel_state_machine.py`, Animal_Bear first
+    /// `0x10f90d4 -> 0x11104d0` path. `verify_kernel_state_machine.py` replays
+    /// Bear/Bass/Dragonfly 3/3 from payload bytes and proves Bear's control
+    /// sequence is `0,0,0,1,1,1`: decision bit, zstd-window flag, unary `01`,
+    /// raw-window flag, continuation unary `1`. This rules out the tempting
+    /// "skip six bits" shortcut because the forward cursor must also parse the
+    /// `0x10f983c/0x10f9870/0x10f98d8/0x10f9918` continuation values.
+    #[test]
+    fn vertex_kernel_state4_entry_bear_control_bits() {
+        let payload = sparse_payload(
+            32817,
+            &[
+                (15, "893a96"),
+                (1227, "48"),
+                (1300, "01018c7e9104"),
+                (32805, "5555f9abcff355b57bdbf7aa"),
+            ],
+        );
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 32807,
+                acc: 0x1d0c_736b_6abd_f000,
+                bitpos: 50,
+            },
+            15,
+        );
+
+        let entry = vertex_kernel_state4_entry(&payload, &mut state, 2, u32::MAX).unwrap();
+
+        assert_eq!(entry.bits, vec![0, 0, 0, 1, 1, 1]);
+        assert_eq!(
+            entry.code_window,
+            VertexKernelWindow {
+                flag: 0,
+                src_start: 17,
+                src_size: 1210,
+                next_stream_pos: 1227,
+            }
+        );
+        assert_eq!(
+            entry.data_window,
+            VertexKernelWindow {
+                flag: 1,
+                src_start: 1228,
+                src_size: 72,
+                next_stream_pos: 1300,
+            }
+        );
+        assert_eq!(
+            entry.continuation,
+            Some(VertexKernelContinuation {
+                mode: 1,
+                kind: 0,
+                repeat: 1,
+                count: 1662,
+                current: 2180,
+            })
+        );
+        assert_eq!(
+            (entry.reader, entry.stream_pos),
+            (
+                RansThreeLaneReader {
+                    ptr: 32805,
+                    acc: 0x431c_dada_af7d_b7ba,
+                    bitpos: 60,
+                },
+                1306,
+            )
+        );
+        assert_eq!(state.reader, entry.reader);
+        assert_eq!(state.stream_pos, entry.stream_pos);
+
+        let mut skip_only_state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 32807,
+                acc: 0x1d0c_736b_6abd_f000,
+                bitpos: 50,
+            },
+            1306,
+        );
+        assert_ne!(skip_only_state.reader, entry.reader);
+        skip_only_state.stream_pos = entry.stream_pos;
+        assert_ne!(skip_only_state.reader, entry.reader);
+    }
+
+    #[test]
+    fn vertex_kernel_state4_entry_rejects_malformed_inputs() {
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 0,
+                acc: 1 << 63,
+                bitpos: 63,
+            },
+            0,
+        );
+        assert_eq!(
+            vertex_kernel_state4_entry(&[0; 8], &mut state, 1, u32::MAX),
+            Err(VertexKernelStateError::UnobservedDecisionBit(1))
+        );
+
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 32807,
+                acc: 0x1d0c_736b_6abd_f000,
+                bitpos: 50,
+            },
+            15,
+        );
+        assert_eq!(
+            vertex_kernel_state4_entry(&[0; 8], &mut state, 1, u32::MAX),
+            Err(VertexKernelStateError::PayloadTooSmall)
+        );
+
+        let payload = sparse_payload(
+            32817,
+            &[
+                (15, "893a96"),
+                (1227, "48"),
+                (1300, "22018c7e9104"),
+                (32805, "5555f9abcff355b57bdbf7aa"),
+            ],
+        );
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 32807,
+                acc: 0x1d0c_736b_6abd_f000,
+                bitpos: 50,
+            },
+            15,
+        );
+        assert_eq!(
+            vertex_kernel_state4_entry(&payload, &mut state, 2, u32::MAX),
+            Err(VertexKernelStateError::UnobservedContinuationModeKind { mode: 2, kind: 2 })
+        );
+
+        let mut state = byte_group_state(
+            RansThreeLaneReader {
+                ptr: 32807,
+                acc: 0x1d0c_736b_6abd_f000,
+                bitpos: 50,
+            },
+            15,
+        );
+        assert_eq!(
+            vertex_kernel_state4_entry(&payload, &mut state, 3, u32::MAX),
+            Err(VertexKernelStateError::UnobservedSubmeshCount(3))
+        );
     }
 
     /// Vertex match-table builder (`0x11106d0`).
