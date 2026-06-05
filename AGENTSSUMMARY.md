@@ -643,6 +643,45 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec Phase 1 model-corpus sweep exposes unhandled branches
+**Blocked before Phase 2:** the revised Phase 1 corpus path was found at
+`C:\Games\Eden-Windows-MSVC-0.0.1-pre-alpha-amd64\eden-windows-msvc\user\dump\0100F2C0115B6000\romfs\Model`
+with **12,395** `.bfres.mc` inputs. Added an uncommitted ignored sweep harness
+at `tests/mc_vertex_decode_sweep.rs` and ran:
+`$env:MC_MODEL_CORPUS='...\romfs\Model'; cargo test --test mc_vertex_decode_sweep -- --ignored --nocapture`.
+Result: **12,395 seen; 278 no-FMSH/no mesh; 41 decoded clean; 12,076 failures**.
+Representative first failures: `UnobservedDispatch(35)` on
+`Animal_Bass.Bass_Boneless`, `UnobservedDecisionBit(1)`, `UnobservedFirstLeafUnary(0)`,
+`UnobservedWindowFlag { window: "data", flag: 0 }`, byte segment mode 2,
+u16 segment mode 1, and several unobserved writer dispatches
+(`9`, `29`, `35`, `46`, `77`). The three-fixture byte-exact gate was already
+green this turn, and the harness compiles with `cargo test --test
+mc_vertex_decode_sweep` (ignored by default). No Phase 2 work was started.
+Next: enumerate the first failing branch across the corpus with `emu.py`
+(starting with dispatch `35` / `Animal_Bass.Bass_Boneless.bfres.mc`), port one
+validated branch at a time, then re-sweep.
+
+Targeted capture now exists at
+`local-assets/re/phase1_first_failure_writer_loop.json` from
+`python local-assets\re\capture_phase1_first_failure.py`: emulator rows=6,
+`bufB_match=True`. Static table audit proves dispatch `35` indexes setup table
+`0x39ba1e8` to `0x10fc4e0` and writer table `0x39ba570` to `0x10fdfe0`
+(`x25 = bits >> 57` at `0x10f9300`, both tables use `[base, x25, lsl #3]`).
+That is Bass_Boneless current 2, entry `0x1000100a`, count 548, records 32,
+sources 2 with source reads `(w2,w3,w4,w5)=(0,4,197,8)` and `(0,4,188,8)`.
+Do not treat this as the current-1 packed-10 row: current 1 is dispatch `111`,
+setup `0x110aa40`, writer `0x110afb0`, already ported. Next: enumerate/replay
+the `0x10fdfe0` population and port that two-u16 direct/matched delta writer;
+Phase 2 remains blocked.
+
+No code port was committed: dispatch `35` cannot honestly be added without the
+`0x10fdfe0` population replay, fixture-free golden, discriminator, defensive
+tests, and Phase 1 re-sweep. Verification after the capture/docs update:
+`cargo test --test mc_vertex_decode_sweep` compiles the ignored harness;
+`cargo test --test mc_vertex_decode_oracle -- --ignored --nocapture` passed the
+three byte-exact fixtures; `All green: 242 lib unit (incl. 96 mc::geometry) +
+all integration; clippy --all-targets clean; --no-default-features builds.`
+
 ### 2026-06-05 - MeshCodec CP5-final-C assembled layout gate
 **Committed:** CP5-final-C promotes `tests/mc_vertex_decode_oracle.rs` from
 separate byte-group/tail checks to a full contiguous bufB assertion, then wires
