@@ -4268,6 +4268,211 @@ pub fn byte_group_transform(
     })
 }
 
+/// Mutable state for the vertex match-table builder (`0x11106d0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexMatchTableState {
+    /// Wrapped base value stored at `ctx+0x148`.
+    pub base: u32,
+    /// Current wrap limit stored at `ctx+0x14c`.
+    pub limit: u32,
+    /// History-ring mask stored at `ctx+0x150`.
+    pub mask: u32,
+}
+
+/// Inputs for the state-4 vertex match-table builder (`0x11106d0`).
+pub struct VertexMatchTableSpec<'a> {
+    /// Number of output match words (`w1`, current vertex block size).
+    pub count: usize,
+    /// Already-processed vertices added to emitted match distances (`w6`).
+    pub processed_vertices: u32,
+    /// Descriptor counts written by `0x11104d0`.
+    pub counts: [usize; 4],
+    /// Builder state at `ctx+0x148`, updated on success.
+    pub state: &'a mut VertexMatchTableState,
+    /// First setup stream (`x2[0]`), consumed only when the ring wraps.
+    pub stream0: &'a [u8],
+    /// Sparse output-position deltas (`x2[1]`).
+    pub stream1: &'a [u8],
+    /// Ring-position deltas (`x2[2]`).
+    pub stream2: &'a [u8],
+    /// Extended-byte bitstream (`x2[3]`).
+    pub stream3: &'a [u8],
+}
+
+/// Errors from the vertex match-table builder (`0x11106d0`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VertexMatchTableError {
+    /// A setup stream ended before the disassembly would read it.
+    StreamTooShort { stream: u8 },
+    /// The extended-byte bitstream could not supply an 8-byte reversed load.
+    BitstreamTooShort,
+    /// Byte expansion code was outside the observed 0x10..0x1f table.
+    ExpansionCodeTooLarge(u8),
+    /// The history mask would allocate an unreasonable or overflowing ring.
+    HistoryTooLarge(u32),
+    /// A sparse match-table index points outside the output block.
+    MatchIndexOutOfBounds { index: usize, count: usize },
+    /// Index arithmetic overflowed.
+    ArithmeticOverflow,
+}
+
+fn read_match_u8(
+    stream: &[u8],
+    pos: &mut usize,
+    stream_id: u8,
+) -> Result<u8, VertexMatchTableError> {
+    let byte = stream
+        .get(*pos)
+        .copied()
+        .ok_or(VertexMatchTableError::StreamTooShort { stream: stream_id })?;
+    *pos += 1;
+    Ok(byte)
+}
+
+fn checked_match_u64_le(buf: &[u8], ptr: usize) -> Result<u64, VertexMatchTableError> {
+    let end = ptr
+        .checked_add(8)
+        .ok_or(VertexMatchTableError::BitstreamTooShort)?;
+    let bytes = buf
+        .get(ptr..end)
+        .ok_or(VertexMatchTableError::BitstreamTooShort)?;
+    Ok(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+fn decode_match_table_byte(
+    bitstream: &[u8],
+    reader: &mut RansThreeLaneReader,
+    byte: u8,
+) -> Result<u32, VertexMatchTableError> {
+    if byte < 0x10 {
+        return Ok(byte as u32);
+    }
+    let (bits, base) = *WIDTH_EXPAND_TABLE
+        .get((byte - 0x10) as usize)
+        .ok_or(VertexMatchTableError::ExpansionCodeTooLarge(byte))?;
+    let word = checked_match_u64_le(bitstream, reader.ptr)?.swap_bytes();
+    let bitpos =
+        i32::try_from(reader.bitpos).map_err(|_| VertexMatchTableError::ArithmeticOverflow)?;
+    let step = (bitpos >> 3) ^ 7;
+    if step < 0 {
+        return Err(VertexMatchTableError::ArithmeticOverflow);
+    }
+    reader.ptr = reader
+        .ptr
+        .checked_add(step as usize)
+        .ok_or(VertexMatchTableError::BitstreamTooShort)?;
+    let acc = (word >> (reader.bitpos & 63)) | reader.acc;
+    let extra = if bits == 0 { 0 } else { acc >> (64 - bits) };
+    reader.acc = if bits == 64 { 0 } else { acc << bits };
+    reader.bitpos = (reader.bitpos | 0x38)
+        .checked_sub(bits)
+        .ok_or(VertexMatchTableError::ArithmeticOverflow)?;
+    Ok(base + extra as u32 + 0x10)
+}
+
+/// Build the writer match table produced by `0x11106d0`.
+///
+/// State 4 (`0x10f9158..0x10f9220`) first calls `0x11104d0` to materialize four
+/// byte-group streams. `0x11106d0` then walks streams 1/2 as sparse deltas,
+/// uses stream 3 as a reversed extended-byte bitstream, and emits one u32 match
+/// word per vertex at `ctx+0x228`. The history ring stores negative
+/// `(vertex_index << 3)` distances, so later occurrences become the writer
+/// match-table lookback values.
+pub fn vertex_match_table(
+    spec: VertexMatchTableSpec<'_>,
+) -> Result<Vec<u32>, VertexMatchTableError> {
+    let history_len = spec
+        .state
+        .mask
+        .checked_add(1)
+        .ok_or(VertexMatchTableError::HistoryTooLarge(spec.state.mask))?;
+    if history_len > 0x10000 {
+        return Err(VertexMatchTableError::HistoryTooLarge(spec.state.mask));
+    }
+    let mut history = vec![0u32; history_len as usize];
+    let mut out = vec![0u32; spec.count];
+    let table_count = spec.counts[2];
+    if table_count == 0 {
+        return Ok(out);
+    }
+
+    let mut pos0 = 0usize;
+    let mut pos1 = 0usize;
+    let mut pos2 = 0usize;
+    let mut last_index = -1i64;
+    let mut reader = RansThreeLaneReader {
+        ptr: 0,
+        acc: 0,
+        bitpos: 0,
+    };
+    let mut base = spec.state.base;
+    let mut limit = spec.state.limit;
+
+    for _ in 0..table_count {
+        let first_raw = read_match_u8(spec.stream1, &mut pos1, 1)?;
+        let first = decode_match_table_byte(spec.stream3, &mut reader, first_raw)?;
+        let second_raw = read_match_u8(spec.stream2, &mut pos2, 2)?;
+        let second = decode_match_table_byte(spec.stream3, &mut reader, second_raw)?;
+
+        last_index = last_index
+            .checked_add(i64::from(first))
+            .ok_or(VertexMatchTableError::ArithmeticOverflow)?;
+        if last_index < 0 {
+            return Err(VertexMatchTableError::ArithmeticOverflow);
+        }
+
+        let wrap_limit = limit.wrapping_add(1);
+        let sign_mask = if second & 1 == 0 { 0 } else { u32::MAX };
+        let signed_delta = sign_mask ^ (second >> 1);
+        let mut candidate = base.wrapping_add(signed_delta);
+        if (candidate as i32) < 0 {
+            candidate = candidate.wrapping_add(wrap_limit);
+        }
+        let wrapped = if (candidate as i32) > (limit as i32) {
+            wrap_limit
+        } else {
+            0
+        };
+        base = candidate.wrapping_sub(wrapped);
+
+        let output_index =
+            usize::try_from(last_index).map_err(|_| VertexMatchTableError::ArithmeticOverflow)?;
+        let absolute_index = (last_index as u32).wrapping_add(spec.processed_vertices);
+        let history_index = (base & spec.state.mask) as usize;
+        let history_slot = history
+            .get_mut(history_index)
+            .ok_or(VertexMatchTableError::HistoryTooLarge(spec.state.mask))?;
+
+        if base == limit {
+            let low_bits = read_match_u8(spec.stream0, &mut pos0, 0)?;
+            limit = wrap_limit;
+            let distance = absolute_index
+                .checked_shl(3)
+                .ok_or(VertexMatchTableError::ArithmeticOverflow)?;
+            *history_slot = 0u32.wrapping_sub(distance) | low_bits as u32;
+            continue;
+        }
+
+        if output_index >= spec.count {
+            return Err(VertexMatchTableError::MatchIndexOutOfBounds {
+                index: output_index,
+                count: spec.count,
+            });
+        }
+        let distance = absolute_index
+            .checked_shl(3)
+            .ok_or(VertexMatchTableError::ArithmeticOverflow)?;
+        out[output_index] = history_slot.wrapping_add(distance);
+        *history_slot = 0u32.wrapping_sub(distance);
+    }
+
+    spec.state.base = base;
+    spec.state.limit = limit;
+    Ok(out)
+}
+
 /// Mutable state for the observed vertex attribute driver loop (`0x10f924c`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VertexAttributeDriverState {
@@ -10716,6 +10921,209 @@ mod tests {
         assert_eq!(&out[4368..4370], &hex_bytes("7f80"));
         assert_eq!(&out[5148..5150], &hex_bytes("7f80"));
         assert_eq!(out[7], 0xee);
+    }
+
+    /// Vertex match-table builder (`0x11106d0`).
+    ///
+    /// Provenance: `capture_vertex_match_table.py`, Animal_Dragonfly. This is
+    /// the state-4 builder that materializes `ctx+0x228` before the state-5
+    /// writer loop; `verify_vertex_match_table.py` replays the whole observed
+    /// Bear/Bass/Dragonfly population 3/3. The golden covers sparse output
+    /// deltas, ring wraps that consume stream 0, extended-byte bit reads from
+    /// stream 3, and zero-filled gaps. It rules out a capture-seeded writer loop
+    /// that imports `match_hex` instead of deriving it from the four setup
+    /// streams.
+    #[test]
+    fn vertex_match_table_dragonfly_from_setup_streams() {
+        let stream0 = hex_bytes(concat!(
+            "0000000100000001000100000100000001000100010000000100000000000001000100010000000100010001000000010000",
+            "0001000100010001000100010001000100010000000100010000010001010001000101000100010100010001010001000101",
+            "0101010001000101010101000100010101000100010101000100010001000100010001010000",
+        ));
+        let stream1 = hex_bytes(concat!(
+            "0101010001010100010001010001010101010100010001010001010101010101000101010101010101010101010101010101",
+            "0101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010100",
+            "0100010001010101010101000100010001010100010101010101010101000101010101010100010100010101000101000101",
+            "0101010101000101000101010101010101000101010100010101010101010101010101010101010101010101010101010101",
+            "0101010101010101010001010101010101010100010101010101010101010101010101010101010101010101010101010101",
+            "0101010101010101010101010101010101010101010101010101010101010101010101010101000100010100010001010001",
+            "0001010001000101000100010101010101010101010100010001010101010101010101010001000101010101000100010101",
+            "0101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101",
+            "0001000100010001000101010101010101010101010101010101010101010101010101010101010101010101010101010101",
+            "0101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101",
+            "0101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101",
+            "01010101010601010101",
+        ));
+        let stream2 = hex_bytes(concat!(
+            "000102020202020202020202020205030c01040202020d1002101204080d02020206030e0b10070502141113000c03010204",
+            "1302111406030606030808060507021312070004050a040f0010050a0413100b01150413140804070803111209000a140f02",
+            "02020202090c0209030e0202020202020202020202130b000815020d1002140e04140a110c02141502110a0c020508020d0d",
+            "13110c0c04021617021416151515080215020d0710080212001216150803100308020603061407000a1402040f1818181807",
+            "14020b181513041119020b0a151211030c0b1602130f1211001008001618181014031414140c0316110808130c0012070b11",
+            "1717171116041717171705181802181817110314041414140319181002031316101602161114020202020202020202020202",
+            "020202020202020202020202141514061310060e090c020202020205030c180319180318020202020205030c020202020205",
+            "0319060106060106060106060106060113041410041009040804060104070406190419180418060104070408060104070406",
+            "020202020202020202180003180218001806181a1a0313050e0d0218171512140317091618181807080c110b190e00160317",
+            "1216170407030c18180b14130d16150c01130512080b041516071819181a0e120412110509180118000c0218180218180218",
+            "0217041a1a0319151618031816100e1419180115080d0a16150604081a1a0f190f11181a101418120816140318180a05140b",
+            "070c10030c1a1112080c",
+        ));
+        let stream3 = hex_bytes(concat!(
+            "624f1323c9685822e90852e271ae9e523c1a38f0a1a1097bb3a4e89e5f33f464104d3082a090006e636580af1e03a91dc26c",
+            "09676fcf3a40c3f1e650234c4184963c30d2650000502bf1a80000a4292bab112407",
+        ));
+        let mut state = VertexMatchTableState {
+            base: 0,
+            limit: 0,
+            mask: 0x3ff,
+        };
+
+        let matches = vertex_match_table(VertexMatchTableSpec {
+            count: 523,
+            processed_vertices: 0,
+            counts: [138, 560, 560, 68],
+            state: &mut state,
+            stream0: &stream0,
+            stream1: &stream1,
+            stream2: &stream2,
+            stream3: &stream3,
+        })
+        .unwrap();
+
+        assert_eq!(
+            matches,
+            hex_u32_words(concat!(
+                "0000000000000000000000000000000000000000000000000000000000000000000000000000000018000000280000000000",
+                "0000200000000000000000000000400000000000000010000000980000009000000080000000000000000000000000000000",
+                "c000000000000000b80000000000000040000000500000000000000000000000b8000000780000008800000008000000b000",
+                "0000c0000000d800000010000000200000005000000000000000d80000005800000061010000b00000006801000061010000",
+                "b80000006901000038010000390100001000000020000000b80000007000000059010000a000000008000000400000004000",
+                "00002800000079010000c901000008000000a8000000b800000098000000a80000005801000028000000f800000058010000",
+                "980000005000000048000000100000009000000088000000a80000001000000020000000b801000070000000000200000800",
+                "0000180000009800000000000000000000000000000018000000000000000000000028000000200000001800000000000000",
+                "0000000000000000000000000000000000000000000000006000000050000000080000008800000028000000000000005800",
+                "000000000000800000006800000060000000a8000000200000001800000000000000a800000000000000a000000058000000",
+                "00000000200000000000000040000000300000002800000060000000200000003000000000000000b8000000000000006800",
+                "0000a8000000400000003000000060000000f8000000300000000000000060000000a0000000580000000000000098000000",
+                "080000001800000068000000f9010000f101000001020000c1010000d1010000c901000060010000c1010000a0000000a001",
+                "0000480000005800000008000000e001000028000000d0000000c10100006000000000000000100000000000000088000000",
+                "6000000048000000480000003000000040000000e1010000c800000020000000e00000000000000049010000100000000902",
+                "0000180000001000000050000000010200001000000000000000e101000018000000e1010000200000000800000018000000",
+                "a1010000080000005001000028000000b000000020010000380000006800000030000000d000000088010000300000001801",
+                "0000c8000000c8000000c00000005000000030000000e9020000080000009800000028000000180000007800000020000000",
+                "a8000000280000000001000098000000b001000080000000c005000080060000580600000000000008050000180000002805",
+                "000018000000280000006003000050030000c80300008000000070000000000200002003000028000000a804000068000000",
+                "8805000078060000e00500005805000028060000d8060000380000003000000030000000b0000000b0050000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                "0000000048000000000000005000000048000000000000005000000048000000000000005000000000000000000000000000",
+                "000000000000180000002800000000000000f00000000001000000000000f000000000010000000000000000000000000000",
+                "0000000018000000280000000000000000000000000000000000000018000000280000008101000079010000890100008101",
+                "0000790100008901000081010000790100008901000081010000790100008901000081010000790100008901000048000000",
+                "4000000089010000480000004000000089010000480000004000000089010000810100007901000089010000810100002000",
+                "00001800000081010000f8000000f000000081010000f8000000f00000008101000079010000890100008101000020000000",
+                "180000008101000079010000890100008101000020000000180000000000000000000000000000000000000000000000800a",
+                "000008000000200400002100000000000000c00a0000080000004900000020000000d90a0000280400009003000078040000",
+                "98030000080a00003009000010000000800900007808000038040000300400007806000020000000b8070000280000007805",
+                "000088060000a0040000c8060000100000005000000010000000580000001800000058000000e8070000b106000008000000",
+                "7000000008050000890600000008000058000000100000004800000058080000380800001800000070000000280800006808",
+                "000040000000600000004008000040080000e007000060090000e80700002806000030080000100600002800000038000000",
+                "1800000030000000b0060000e80600002000000018070000280000004802000000000000680200006802000000000000e00a",
+                "0000300c00000000000040020000100b00004802000008000000280000000000000098020000180000001800000018000000",
+                "a80200008802000088020000200000008002000090020000a0020000000300001003000098000000c00b0000100000005800",
+                "000030000000200300002800000098000000e80000005000000080000000b000000028000000c8060000880d0000780e0000",
+                "e80c0000f0060000600c0000a80d0000f006000080000000c800000010070000a80000005007000018070000500000000001",
+                "0000b802000090020000600200005802000038080000f8090000d0070000d007000018000000580300008808000048030000",
+                "10090000b8080000e80800004002000028080000680200001809000080020000000000000000000000000000000000000000",
+                "0000d904000071020000f1040000e9040000a10200000000000000000000000000000000000000000000",
+            ))
+        );
+        assert_eq!(
+            state,
+            VertexMatchTableState {
+                base: 134,
+                limit: 138,
+                mask: 0x3ff,
+            }
+        );
+    }
+
+    #[test]
+    fn vertex_match_table_rejects_malformed_inputs() {
+        let mut state = VertexMatchTableState {
+            base: 0,
+            limit: 0,
+            mask: 0x3ff,
+        };
+        assert_eq!(
+            vertex_match_table(VertexMatchTableSpec {
+                count: 1,
+                processed_vertices: 0,
+                counts: [0, 1, 1, 0],
+                state: &mut state,
+                stream0: &[],
+                stream1: &[1],
+                stream2: &[0],
+                stream3: &[],
+            }),
+            Err(VertexMatchTableError::StreamTooShort { stream: 0 })
+        );
+
+        let mut state = VertexMatchTableState {
+            base: 0,
+            limit: 1,
+            mask: 0x3ff,
+        };
+        assert_eq!(
+            vertex_match_table(VertexMatchTableSpec {
+                count: 1,
+                processed_vertices: 0,
+                counts: [0, 1, 1, 0],
+                state: &mut state,
+                stream0: &[],
+                stream1: &[2],
+                stream2: &[0],
+                stream3: &[],
+            }),
+            Err(VertexMatchTableError::MatchIndexOutOfBounds { index: 1, count: 1 })
+        );
+
+        let mut state = VertexMatchTableState {
+            base: 0,
+            limit: 1,
+            mask: 0x3ff,
+        };
+        assert_eq!(
+            vertex_match_table(VertexMatchTableSpec {
+                count: 2,
+                processed_vertices: 0,
+                counts: [0, 1, 1, 0],
+                state: &mut state,
+                stream0: &[],
+                stream1: &[0x10],
+                stream2: &[0],
+                stream3: &[0; 7],
+            }),
+            Err(VertexMatchTableError::BitstreamTooShort)
+        );
+
+        let mut state = VertexMatchTableState {
+            base: 0,
+            limit: 0,
+            mask: u32::MAX,
+        };
+        assert_eq!(
+            vertex_match_table(VertexMatchTableSpec {
+                count: 1,
+                processed_vertices: 0,
+                counts: [0, 0, 0, 0],
+                state: &mut state,
+                stream0: &[],
+                stream1: &[],
+                stream2: &[],
+                stream3: &[],
+            }),
+            Err(VertexMatchTableError::HistoryTooLarge(u32::MAX))
+        );
     }
 
     #[test]

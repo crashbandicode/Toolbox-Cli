@@ -643,6 +643,25 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-04 - MeshCodec CP5c match-table builder
+**Committed:** CP5c advances the from-payload path by porting the state-4
+writer match-table builder `0x11106d0` as `vertex_match_table`, deriving the
+stable `ctx+0x228` match slice from the four setup streams produced by
+`0x11104d0` instead of importing captured `match_hex`. Durable local evidence:
+`capture_vertex_match_table.py` enumerated Bear, Bass, and Dragonfly calls with
+counts 3327/559/523, and `verify_vertex_match_table.py` replayed **3/3**.
+Fixture-free Rust coverage uses the full Dragonfly setup streams and 523-word
+match table inline, plus malformed-input rejection for stream-0 underflow,
+out-of-range sparse indices, truncated stream-3 reversed loads, and an
+oversized history mask. CP5c full bufB is still blocked honestly, not guessed:
+the Bear scratch from-payload test exposed an unported state-machine bit handoff
+into state 4 and a final 440-byte zstd tail that needs decoder history. See
+`local-assets/re/FINDINGS.md` UPDATE 40. All green: 238 lib unit (incl. 92
+mc::geometry) + all integration; clippy --all-targets clean;
+--no-default-features builds. Next: port/validate the state-machine transition
+bits before `0x11104d0`, then handle the history-backed final zstd tail before
+promoting `tests/mc_vertex_decode_oracle.rs`.
+
 ### 2026-06-04 - MeshCodec CP5b vertex writer loop
 **Committed:** CP5b wires the observed per-attribute writer loop
 `0x10f924c..0x10f93d8` end to end as `vertex_attribute_writer_loop_step` and
