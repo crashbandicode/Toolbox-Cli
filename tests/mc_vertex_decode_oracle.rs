@@ -21,14 +21,44 @@ use nx_layout_toolbox::mc::{
 };
 use serde_json::Value;
 
-const MODEL: &str = "Animal_Dragonfly.Dragonfly.bfres.mc";
-const FIXTURE: &str = "tests/fixtures/mc/Animal_Dragonfly.Dragonfly.bfres.mc";
+struct FixtureCase {
+    label: &'static str,
+    model: &'static str,
+    fixture: &'static str,
+}
+
+const FIXTURES: &[FixtureCase] = &[
+    FixtureCase {
+        label: "Bear",
+        model: "Animal_Bear.Bear.bfres.mc",
+        fixture: "tests/fixtures/mc/Animal_Bear.Bear.bfres.mc",
+    },
+    FixtureCase {
+        label: "Bass",
+        model: "Animal_Bass.Bass.bfres.mc",
+        fixture: "tests/fixtures/mc/Animal_Bass.Bass.bfres.mc",
+    },
+    FixtureCase {
+        label: "Dragonfly",
+        model: "Animal_Dragonfly.Dragonfly.bfres.mc",
+        fixture: "tests/fixtures/mc/Animal_Dragonfly.Dragonfly.bfres.mc",
+    },
+];
 
 #[test]
 #[ignore = "requires gitignored MeshCodec oracle captures in local-assets/re"]
-fn dragonfly_bufb_from_payload_reports_first_diff() {
-    let bytes = fs::read(FIXTURE).unwrap_or_else(|e| {
-        panic!("read {FIXTURE}: {e}; run ignored test only with local fixtures present")
+fn bufgroups_from_payload_report_first_diff_for_all_fixtures() {
+    for case in FIXTURES {
+        assert_byte_group_from_payload_matches(case);
+    }
+}
+
+fn assert_byte_group_from_payload_matches(case: &FixtureCase) {
+    let bytes = fs::read(case.fixture).unwrap_or_else(|e| {
+        panic!(
+            "read {}: {e}; run ignored test only with local fixtures present",
+            case.fixture
+        )
     });
     let mc = read_mc(&bytes).expect("parse .mc");
     let section = read_mesh_section(&mc)
@@ -40,23 +70,24 @@ fn dragonfly_bufb_from_payload_reports_first_diff() {
         .expect("FMSH payload offset");
 
     let writer_json = json_file("vertex_writer_loop_capture.json");
-    let writer_capture = model_row(&writer_json, MODEL);
+    let writer_capture = model_row(&writer_json, case.model);
     let oracle = hex_bytes(str_field(writer_capture, "bufB_hex"));
     assert_eq!(
         payload,
         hex_bytes(str_field(writer_capture, "payload_hex")).as_slice(),
-        "fixture payload must match the captured Dragonfly oracle"
+        "{} fixture payload must match the captured oracle",
+        case.label
     );
 
     let match_json = json_file("vertex_match_table_capture.json");
-    let match_capture = model_row(&match_json, MODEL);
+    let match_capture = model_row(&match_json, case.model);
     let match_row = &match_capture["rows"][0];
     let driver_json = json_file("vertex_driver_setup_capture.json");
-    let driver_capture = model_row(&driver_json, MODEL);
+    let driver_capture = model_row(&driver_json, case.model);
 
     let (header, table, mut byte_state) =
         state4_entry_from_payload(payload, section.first_chunk.sub_a_size as usize);
-    assert_eq!(header.count, 1, "Dragonfly first sub-block count");
+    assert!(header.count > 0, "{} first sub-block count", case.label);
     assert_table_matches_capture(&table, &driver_capture["table"]);
 
     let setup = state4_setup_streams(&mut byte_state, payload).expect("0x11104d0 setup streams");
@@ -151,17 +182,19 @@ fn dragonfly_bufb_from_payload_reports_first_diff() {
     if let Some(offset) = first {
         let addr = writers[offset].unwrap_or_else(|| fallback_writer_for_offset(offset, &steps));
         eprintln!(
-            "Dragonfly from-payload bufB first-diff offset {offset} (0x{offset:x}) \
+            "{} from-payload bufB first-diff offset {offset} (0x{offset:x}) \
              responsible {addr}: got 0x{:02x}, oracle 0x{:02x}",
-            out[offset], oracle[offset]
+            case.label, out[offset], oracle[offset]
         );
         panic!(
-            "Dragonfly from-payload bufB mismatch at offset {offset} (0x{offset:x}), responsible {addr}"
+            "{} from-payload bufB mismatch at offset {offset} (0x{offset:x}), responsible {addr}",
+            case.label
         );
     }
 
     eprintln!(
-        "Dragonfly from-payload bufB byte-group region matched oracle: {byte_group_len}/{} bytes",
+        "{} from-payload bufB byte-group region matched oracle: {byte_group_len}/{} bytes",
+        case.label,
         oracle.len()
     );
 }

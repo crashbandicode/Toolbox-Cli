@@ -643,6 +643,20 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec CP5-final-A Bear/Bass from-payload byte groups
+**Committed:** CP5-final-A promotes the ignored convergence gate
+`tests/mc_vertex_decode_oracle.rs` from Dragonfly-only to the full local
+Bear/Bass/Dragonfly population. The same from-payload chain now runs for all
+three fixtures and keeps first-diff reporting by bufB offset plus responsible
+state-5 writer address. Durable local evidence:
+`cargo test --test mc_vertex_decode_oracle -- --ignored --nocapture` passed:
+Bear byte-group **93160/93600**, Bass **14536/14960**, Dragonfly
+**15696/15696**. This closes byte-group promotion only; Bear/Bass still have
+direct tail bytes outside the byte-group region. Last full checkpoint gate is
+unchanged from CP5-int: All green: 240 lib unit (incl. 94 mc::geometry) + all
+integration; clippy --all-targets clean; --no-default-features builds. Next:
+CP5-final-B, enumerate and port the history-backed zstd tail path.
+
 ### 2026-06-05 - MeshCodec CP5-int Dragonfly from-payload bufB gate
 **Committed:** CP5-int adds the ignored integration convergence gate
 `tests/mc_vertex_decode_oracle.rs`. With the gitignored Dragonfly fixture and
