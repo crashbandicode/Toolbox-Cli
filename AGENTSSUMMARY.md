@@ -643,6 +643,32 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-1 sweep failure histogram
+**Committed:** P1-1 adds normalized failure-class bucketing to
+`tests/mc_vertex_decode_sweep.rs`. The ignored corpus sweep now prints a sorted
+`class -> count` table before its first-failure sample, and a non-ignored
+regression test pins grouping for the common Phase 1 classes and noisy numeric
+long-tail variants.
+
+Durable evidence: `cargo test --test mc_vertex_decode_sweep` passed
+1 non-ignored test with the corpus gate ignored; `cargo clippy --all-targets`
+is clean; `cargo build --no-default-features` builds. The ignored corpus sweep was
+re-run with `MC_MODEL_CORPUS` and still fails by design on the known coverage
+gaps, but now reports the work queue: **12,395 seen; 278 no-FMSH/no mesh; 41
+decoded clean; 12,076 failures**. Top classes are
+`UnobservedDecisionBit(1)` **3722**, `UnobservedWindowFlag { window: "data", flag: 0 }`
+**1716**, `UnobservedWindowFlag { window: "code", flag: 1 }` **1631**,
+`UnobservedFirstLeafUnary(0)` **1043**, `SegmentLoop(UnobservedMode1Segment)`
+**578**, `ByteSegmentLoop(UnobservedMode2Segment)` **572**, and
+`UnobservedDispatch(35)` **263**. Full table is recorded in
+`local-assets/re/FINDINGS.md` UPDATE 46.
+
+Last full checkpoint gate remains from P1-0:
+`All green: 242 lib unit (incl. 96 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+Next: P1-2 enumerate/replay the top `0x10f90d4`
+`UnobservedDecisionBit(1)` branch, starting with representative model
+`Animal_Bee.Bee.bfres.mc`.
+
 ### 2026-06-05 - MeshCodec P1-0 geometry submodule split
 **Committed:** P1-0 splits `src/mc/geometry.rs` into focused submodules under
 `src/mc/geometry/`: `transport`, `rans`, `byte_group`, `transform_tails`,

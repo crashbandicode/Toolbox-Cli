@@ -7,9 +7,10 @@
 //! `cargo test --test mc_vertex_decode_sweep -- --ignored --nocapture`
 
 use std::{
+    collections::BTreeMap,
     env, fs,
-    path::{Path, PathBuf},
     panic::{self, AssertUnwindSafe},
+    path::{Path, PathBuf},
 };
 
 use nx_layout_toolbox::{
@@ -18,12 +19,12 @@ use nx_layout_toolbox::{
         geometry::{
             byte_group_read, decode_raw_window, decode_zstd_window,
             decode_zstd_window_with_history, parse_sub_block_header, parse_super_block_trailer,
-            state0_table_builder, vertex_attribute_driver_setup,
-            vertex_attribute_writer_loop_step, vertex_kernel_state4_entry, vertex_match_table,
-            ByteGroupReadSpec, ByteGroupReadState, ByteGroupTransformState, ForwardReader,
-            RansStateBuffer, RansThreeLaneReader, TableBuild, VertexAttributeDriverError,
-            VertexAttributeDriverState, VertexAttributeWriterLoopError, VertexAttributeWriterTable,
-            VertexMatchTableSpec, VertexMatchTableState,
+            state0_table_builder, vertex_attribute_driver_setup, vertex_attribute_writer_loop_step,
+            vertex_kernel_state4_entry, vertex_match_table, ByteGroupReadSpec, ByteGroupReadState,
+            ByteGroupTransformState, ForwardReader, RansStateBuffer, RansThreeLaneReader,
+            TableBuild, VertexAttributeDriverError, VertexAttributeDriverState,
+            VertexAttributeWriterLoopError, VertexAttributeWriterTable, VertexMatchTableSpec,
+            VertexMatchTableState,
         },
         read_mc, read_mesh_section, MeshSection,
     },
@@ -47,6 +48,7 @@ fn model_corpus_decode_is_structurally_consistent() {
     let mut no_mesh = 0usize;
     let mut clean = 0usize;
     let mut failures = Vec::new();
+    let mut failure_classes = BTreeMap::<String, usize>::new();
 
     for entry in walkdir::WalkDir::new(&root).into_iter().flatten() {
         if !entry.file_type().is_file() {
@@ -65,8 +67,14 @@ fn model_corpus_decode_is_structurally_consistent() {
             Ok(Ok(OneResult::Decoded)) => {
                 clean += 1;
             }
-            Ok(Err(error)) => failures.push(format!("{}: {error}", path.display())),
-            Err(_) => failures.push(format!("{}: panic", path.display())),
+            Ok(Err(error)) => {
+                *failure_classes.entry(classify_failure(&error)).or_default() += 1;
+                failures.push(format!("{}: {error}", path.display()));
+            }
+            Err(_) => {
+                *failure_classes.entry("panic".to_string()).or_default() += 1;
+                failures.push(format!("{}: panic", path.display()));
+            }
         }
         if seen.is_multiple_of(1000) {
             eprintln!(
@@ -81,6 +89,10 @@ fn model_corpus_decode_is_structurally_consistent() {
         failures.len()
     );
     if !failures.is_empty() {
+        eprintln!("MeshCodec failure classes:");
+        for (class, count) in sorted_failure_classes(&failure_classes) {
+            eprintln!("  {class} -> {count}");
+        }
         for failure in failures.iter().take(40) {
             eprintln!("FAIL: {failure}");
         }
@@ -90,6 +102,238 @@ fn model_corpus_decode_is_structurally_consistent() {
             failures[0]
         );
     }
+}
+
+fn classify_failure(error: &str) -> String {
+    if error.starts_with("unexpected super-block trailer") {
+        return "unexpected super-block trailer".to_string();
+    }
+    if error.contains("FMSH sub-stream sizes") {
+        return "FMSH sub-stream size mismatch".to_string();
+    }
+    if error.contains("history-backed zstd tail at") {
+        return "history-backed zstd tail decode error".to_string();
+    }
+    for marker in [
+        "UnobservedDispatch",
+        "UnobservedDecisionBit",
+        "UnobservedFirstLeafUnary",
+        "UnobservedContinuationUnary",
+        "UnobservedSubmeshCount",
+    ] {
+        if let Some(class) = extract_balanced(error, marker, '(', ')') {
+            return class;
+        }
+    }
+    for marker in ["UnobservedWindowFlag", "UnobservedContinuationModeKind"] {
+        if let Some(class) = extract_balanced(error, marker, '{', '}') {
+            return class;
+        }
+    }
+    for marker in [
+        "UnobservedSelector2RawWindow",
+        "UnobservedSelector2MultiWindow",
+        "UnobservedSelector2HistoryWrap",
+        "UnobservedSelector1LargeWindow",
+        "UnobservedTailSelector",
+        "UnobservedTailOnlyCount",
+        "UnobservedShortActiveCount",
+        "UnobservedZeroTailBitstream",
+        "UnobservedZeroTableByteCount",
+        "UnobservedZeroTableGroupWidth",
+        "UnobservedZeroSetupCountBits",
+    ] {
+        if error.contains(marker) {
+            return marker.to_string();
+        }
+    }
+    if error.contains("ByteSegmentLoop(UnobservedMode2Segment)") {
+        return "ByteSegmentLoop(UnobservedMode2Segment)".to_string();
+    }
+    if error.contains("SegmentLoop(UnobservedMode1Segment)") {
+        return "SegmentLoop(UnobservedMode1Segment)".to_string();
+    }
+    if error.contains("FrequencyMassMismatch") {
+        return with_loop_context(error, "FrequencyMassMismatch");
+    }
+    if error.contains("TableCountExceedsMass") {
+        return with_loop_context(error, "TableCountExceedsMass");
+    }
+    if error.contains("RleValueTooLarge") {
+        return with_loop_context(error, "RleValueTooLarge");
+    }
+    if let Some(class) = extract_balanced(error, "UnsupportedLog", '(', ')') {
+        return with_loop_context(error, &class);
+    }
+    if error.contains("MalformedTable") {
+        return with_loop_context(error, "MalformedTable");
+    }
+    if error.contains("PayloadTooSmall") {
+        return with_loop_context(error, "PayloadTooSmall");
+    }
+    if let Some(_class) = extract_balanced(error, "ExpansionCodeTooLarge", '(', ')') {
+        return "ExpansionCodeTooLarge".to_string();
+    }
+    if error.contains("MatchIndexOutOfBounds") {
+        return "MatchIndexOutOfBounds".to_string();
+    }
+    if error.contains("SplitExceedsWrapperReturn") {
+        return "SplitExceedsWrapperReturn".to_string();
+    }
+    if error.contains("WidthCombinerUnusedInput") {
+        return "WidthCombinerUnusedInput".to_string();
+    }
+    for marker in [
+        "Selector2ZstdDecode",
+        "Selector2VarintTooLong",
+        "Selector2OutputSizeMismatch",
+        "StreamTooShort",
+        "OutputTooSmall",
+        "ArithmeticOverflow",
+        "HistoryOutOfBounds",
+        "VarintTooLong",
+        "Copy(UnobservedRecordShape)",
+        "Dispatch(Decode(ProdTooSmall))",
+    ] {
+        if error.contains(marker) {
+            return marker.to_string();
+        }
+    }
+    for marker in [
+        "ByteSegmentLoop",
+        "SegmentLoop",
+        "SegmentDispatchBytes",
+        "SegmentDispatch",
+        "ByteGroupRead",
+        "WidthCombiner",
+    ] {
+        if let Some(class) = extract_balanced(error, marker, '(', ')') {
+            return class;
+        }
+    }
+    if error.contains("tail fills through") {
+        return "state-2 zstd tail length mismatch".to_string();
+    }
+    if error.contains("index decode count") {
+        return if error.contains("must be a multiple of 3") {
+            "index decode count not multiple of three".to_string()
+        } else if error.contains("Truncated") {
+            "index decode truncated stream".to_string()
+        } else {
+            "index decode error".to_string()
+        };
+    }
+    error.to_string()
+}
+
+fn with_loop_context(error: &str, leaf: &str) -> String {
+    if error.contains("ByteSegmentLoop(") {
+        format!("ByteSegmentLoop({leaf})")
+    } else if error.contains("SegmentLoop(") {
+        format!("SegmentLoop({leaf})")
+    } else if error.contains("ByteGroupRead(") {
+        format!("ByteGroupRead({leaf})")
+    } else if error.contains("SegmentDescriptor(") {
+        format!("SegmentDescriptor({leaf})")
+    } else {
+        leaf.to_string()
+    }
+}
+
+fn extract_balanced(error: &str, marker: &str, open: char, close: char) -> Option<String> {
+    let marker_start = error.find(marker)?;
+    let after_marker = &error[marker_start + marker.len()..];
+    let open_relative = after_marker.find(open)?;
+    let open_index = marker_start + marker.len() + open_relative;
+    let mut depth = 0usize;
+    for (relative, ch) in error[open_index..].char_indices() {
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                let end = open_index + relative + ch.len_utf8();
+                return Some(error[marker_start..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn sorted_failure_classes(classes: &BTreeMap<String, usize>) -> Vec<(&str, usize)> {
+    let mut sorted = classes
+        .iter()
+        .map(|(class, count)| (class.as_str(), *count))
+        .collect::<Vec<_>>();
+    sorted.sort_by(|(left_class, left_count), (right_class, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_class.cmp(right_class))
+    });
+    sorted
+}
+
+#[test]
+fn failure_classification_groups_common_phase1_gaps() {
+    assert_eq!(
+        classify_failure(
+            "state-5 writer loop: Interstage { index: 2, error: UnobservedDispatch(35) }"
+        ),
+        "UnobservedDispatch(35)"
+    );
+    assert_eq!(
+        classify_failure(
+            "0x10f90d4 state-4 entry: UnobservedWindowFlag { window: \"data\", flag: 0 }"
+        ),
+        "UnobservedWindowFlag { window: \"data\", flag: 0 }"
+    );
+    assert_eq!(
+        classify_failure(
+            "state-5 writer loop: Interstage { index: 1, error: ByteGroupRead { index: 1, error: ByteSegmentLoop(UnobservedMode2Segment) } }"
+        ),
+        "ByteSegmentLoop(UnobservedMode2Segment)"
+    );
+    assert_eq!(
+        classify_failure(
+            "index decode count 68: Invalid(\"index_count 68 must be a multiple of 3\")"
+        ),
+        "index decode count not multiple of three"
+    );
+    assert_eq!(
+        classify_failure("unexpected super-block trailer (170097,64152)"),
+        "unexpected super-block trailer"
+    );
+    assert_eq!(
+        classify_failure("0x11104d0 stream 2: ByteSegmentLoop(Descriptor(Mode0(FrequencyMassMismatch { expected: 1024, actual: 525312 })))"),
+        "ByteSegmentLoop(FrequencyMassMismatch)"
+    );
+    assert_eq!(
+        classify_failure("0x11104d0 stream 0: SegmentDescriptor(Mode1(TableCountExceedsMass { count: 64, mass: 16 }))"),
+        "SegmentDescriptor(TableCountExceedsMass)"
+    );
+    assert_eq!(
+        classify_failure("0x11106d0 match table: ExpansionCodeTooLarge(108)"),
+        "ExpansionCodeTooLarge"
+    );
+    assert_eq!(
+        classify_failure(
+            "history-backed zstd tail at P+10018: Truncated { what: \"literals section\", needed: 83 }"
+        ),
+        "history-backed zstd tail decode error"
+    );
+    assert_eq!(
+        classify_failure("state-5 writer loop: Interstage { index: 2, error: SplitExceedsWrapperReturn { dispatch: 81, split: 9605, wrapper_ret: 112 } }"),
+        "SplitExceedsWrapperReturn"
+    );
+
+    let mut counts = BTreeMap::new();
+    counts.insert("z".to_string(), 1);
+    counts.insert("a".to_string(), 2);
+    counts.insert("b".to_string(), 2);
+    assert_eq!(
+        sorted_failure_classes(&counts),
+        vec![("a", 2), ("b", 2), ("z", 1)]
+    );
 }
 
 enum OneResult {
@@ -141,12 +385,8 @@ fn sweep_one(path: &Path) -> Result<OneResult, String> {
     }
 
     let mut index_state = decode_index_streams(&section, payload)?;
-    let _next_fwd = append_later_index_subblocks(
-        &section,
-        payload,
-        &decoded_b.after_vertex,
-        &mut index_state,
-    )?;
+    let _next_fwd =
+        append_later_index_subblocks(&section, payload, &decoded_b.after_vertex, &mut index_state)?;
     if index_state.buf_a.len() > section.buf_a_size as usize {
         return Err(format!(
             "decoded bufA {} exceeds FMSH buf_a_size {}",
@@ -154,7 +394,8 @@ fn sweep_one(path: &Path) -> Result<OneResult, String> {
             section.buf_a_size
         ));
     }
-    if index_state.code_off > index_state.code.len() || index_state.data_off > index_state.data.len()
+    if index_state.code_off > index_state.code.len()
+        || index_state.data_off > index_state.data.len()
     {
         return Err("index stream cursor exceeded decoded stream length".to_string());
     }
@@ -179,7 +420,10 @@ fn sweep_one(path: &Path) -> Result<OneResult, String> {
             mc.decompressed_size()
         ));
     }
-    if !mc.decompressed_size().is_multiple_of(1usize << mc.header.alignment_shift()) {
+    if !mc
+        .decompressed_size()
+        .is_multiple_of(1usize << mc.header.alignment_shift())
+    {
         return Err(format!(
             "MCPK decompressed size {} is not aligned to 1<<{}",
             mc.decompressed_size(),
@@ -199,9 +443,8 @@ fn decode_buf_b_from_payload(
     let mut match_state = VertexMatchTableState {
         base: 0,
         limit: 0,
-        mask: observed_match_history_mask(table.w8).ok_or_else(|| {
-            format!("vertex count {} cannot derive match history mask", table.w8)
-        })?,
+        mask: observed_match_history_mask(table.w8)
+            .ok_or_else(|| format!("vertex count {} cannot derive match history mask", table.w8))?,
     };
     let matches = vertex_match_table(VertexMatchTableSpec {
         count: table.w8 as usize,
