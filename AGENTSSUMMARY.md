@@ -643,6 +643,24 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec CP5-final-B zstd history tails
+**Committed:** CP5-final-B adds `decode_zstd_window_with_history`, preloading
+`zstd_pure::block::BlockState` with already-decoded bufB bytes for state-2
+direct tails. The existing stateless `decode_zstd_window` now routes through the
+same checked window-body parser with empty history. Fixture-free coverage uses a
+synthetic raw-dictionary zstd block body that fails stateless with
+`OffsetTooLarge` and succeeds with 16 bytes of preloaded history, plus a
+truncated-body rejection test. Durable local evidence:
+`local-assets/re/cp5_final_tail_trace.txt` enumerates Bear/Bass/Dragonfly tails:
+Bear state2 `P+28354 -> P+28657`, zstd body `P+28356` size 301, output 440;
+Bass state2 `P+5763 -> P+6102`, zstd body `P+5765` size 337, output 424;
+Dragonfly has no state2 tail. Samples green:
+`cargo test --lib zstd_window -- --nocapture` and
+`cargo test --test mc_vertex_decode_oracle -- --ignored --nocapture` passed,
+matching Bear tail **440/440** and Bass tail **424/424**. Last full checkpoint
+gate is unchanged from CP5-int: `All green: 240 lib unit (incl. 94 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+Next: CP5-final-C, assert full bufB and wire `[info][bufA][bufB]+pad`.
+
 ### 2026-06-05 - MeshCodec CP5-final-A Bear/Bass from-payload byte groups
 **Committed:** CP5-final-A promotes the ignored convergence gate
 `tests/mc_vertex_decode_oracle.rs` from Dragonfly-only to the full local

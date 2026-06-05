@@ -335,20 +335,80 @@ pub fn decode_zstd_window(
     payload: &[u8],
     fwd_pos: usize,
 ) -> Result<(Vec<u8>, usize), zstd_pure::ZstdError> {
-    let mut f = ForwardReader::new(payload, fwd_pos);
-    let srcsize = f.varint() as usize;
-    let src_start = f.pos;
-    let end = (src_start + srcsize).min(payload.len());
+    decode_zstd_window_with_history(payload, fwd_pos, &[])
+}
+
+/// Decode a zstd window whose block may refer backward into already-decoded
+/// bytes. This is the state-2 direct-tail case: `0x11109e0` still calls the
+/// same `0x5ffb30` block decoder, but its DCtx history already contains the
+/// byte-group bufB prefix, so sequence offsets may reach before the window's own
+/// first literal.
+pub fn decode_zstd_window_with_history(
+    payload: &[u8],
+    fwd_pos: usize,
+    history: &[u8],
+) -> Result<(Vec<u8>, usize), zstd_pure::ZstdError> {
+    let (src_start, body) = zstd_window_body(payload, fwd_pos)?;
+    let history_len = history.len();
     let mut state = zstd_pure::block::BlockState {
-        out: Vec::new(),
-        dict_len: 0,
+        out: history.to_vec(),
+        dict_len: history_len,
         max_output: 0x20000,
         huff: None,
         seq: zstd_pure::sequences::SeqTables::default(),
         rep: [1, 4, 8],
     };
-    state.decode_compressed(&payload[src_start..end])?;
-    Ok((state.out, src_start + srcsize))
+    state.decode_compressed(body)?;
+    let mut out = state.out;
+    out.drain(..history_len);
+    if out.len() > 0x20000 {
+        return Err(zstd_pure::ZstdError::OutputTooLarge { limit: 0x20000 });
+    }
+    Ok((out, src_start + body.len()))
+}
+
+fn zstd_window_body(
+    payload: &[u8],
+    fwd_pos: usize,
+) -> Result<(usize, &[u8]), zstd_pure::ZstdError> {
+    let mut pos = fwd_pos;
+    let mut srcsize = 0usize;
+    for _ in 0..5 {
+        let byte = payload
+            .get(pos)
+            .copied()
+            .ok_or(zstd_pure::ZstdError::Truncated {
+                what: "zstd window srcsize",
+                needed: 1,
+            })?;
+        pos += 1;
+        srcsize = srcsize
+            .checked_shl(7)
+            .and_then(|value| value.checked_add((byte & 0x7f) as usize))
+            .ok_or_else(|| zstd_pure::ZstdError::Invalid {
+                what: "zstd window srcsize",
+                detail: "overflow".into(),
+            })?;
+        if byte & 0x80 == 0 {
+            let end = pos
+                .checked_add(srcsize)
+                .ok_or_else(|| zstd_pure::ZstdError::Invalid {
+                    what: "zstd window body",
+                    detail: "offset overflow".into(),
+                })?;
+            let body = payload
+                .get(pos..end)
+                .ok_or(zstd_pure::ZstdError::Truncated {
+                    what: "zstd window body",
+                    needed: end.saturating_sub(payload.len()),
+                })?;
+            return Ok((pos, body));
+        }
+    }
+    Err(zstd_pure::ZstdError::Invalid {
+        what: "zstd window srcsize",
+        detail: "oversized MSB varint".into(),
+    })
 }
 
 /// Decode `count` symbols with the vertex coder's **rANS** decoder (`0x110e270`).
@@ -15628,5 +15688,34 @@ mod tests {
         let (out, pos) = decode_raw_window(&payload, 0);
         assert_eq!(out, [0xaa, 0xbb, 0xcc, 0xdd]);
         assert_eq!(pos, 5);
+    }
+
+    /// Provenance: synthetic zstd block generated with libzstd 1.5.7 using a
+    /// raw-content dictionary `abcdefghijklmnop`, then stripped to one block
+    /// body. The sequence emits no literals and copies 16 bytes from history,
+    /// matching the MeshCodec state-2 tail contract at `0x11109e0`/`0x5ffb30`.
+    #[test]
+    fn zstd_window_can_copy_from_preloaded_history() {
+        const HISTORY: &[u8] = b"abcdefghijklmnop";
+        const PAYLOAD: [u8; 7] = [0x06, 0x00, 0x01, 0x00, 0x83, 0x4c, 0x20];
+        let (out, pos) = decode_zstd_window_with_history(&PAYLOAD, 0, HISTORY).unwrap();
+        assert_eq!(out, HISTORY);
+        assert_eq!(pos, PAYLOAD.len());
+        assert!(matches!(
+            decode_zstd_window(&PAYLOAD, 0),
+            Err(zstd_pure::ZstdError::OffsetTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn zstd_window_rejects_truncated_body() {
+        let payload = [0x06u8, 0x00, 0x01];
+        match decode_zstd_window(&payload, 0) {
+            Err(zstd_pure::ZstdError::Truncated {
+                what: "zstd window body",
+                needed: 4,
+            }) => {}
+            other => panic!("expected truncated zstd window body, got {other:?}"),
+        }
     }
 }

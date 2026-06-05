@@ -9,13 +9,14 @@ use std::{fs, path::Path};
 
 use nx_layout_toolbox::mc::{
     geometry::{
-        byte_group_read, parse_sub_block_header, parse_super_block_trailer, state0_table_builder,
-        vertex_attribute_driver_setup, vertex_attribute_writer_loop_step,
-        vertex_kernel_state4_entry, vertex_match_table, ByteGroupReadSpec, ByteGroupReadState,
-        ByteGroupTransformState, ForwardReader, RansStateBuffer, RansThreeLaneReader, TableBuild,
-        VertexAttributeDriverError, VertexAttributeDriverState, VertexAttributeWriterLoopError,
-        VertexAttributeWriterLoopStep, VertexAttributeWriterTable, VertexAttributeWriterTarget,
-        VertexMatchTableSpec, VertexMatchTableState,
+        byte_group_read, decode_zstd_window_with_history, parse_sub_block_header,
+        parse_super_block_trailer, state0_table_builder, vertex_attribute_driver_setup,
+        vertex_attribute_writer_loop_step, vertex_kernel_state4_entry, vertex_match_table,
+        ByteGroupReadSpec, ByteGroupReadState, ByteGroupTransformState, ForwardReader,
+        RansStateBuffer, RansThreeLaneReader, TableBuild, VertexAttributeDriverError,
+        VertexAttributeDriverState, VertexAttributeWriterLoopError, VertexAttributeWriterLoopStep,
+        VertexAttributeWriterTable, VertexAttributeWriterTarget, VertexMatchTableSpec,
+        VertexMatchTableState,
     },
     read_mc, read_mesh_section,
 };
@@ -25,6 +26,13 @@ struct FixtureCase {
     label: &'static str,
     model: &'static str,
     fixture: &'static str,
+    tail: Option<TailWindow>,
+}
+
+#[derive(Clone, Copy)]
+struct TailWindow {
+    fwd_pos: usize,
+    next_pos: usize,
 }
 
 const FIXTURES: &[FixtureCase] = &[
@@ -32,16 +40,25 @@ const FIXTURES: &[FixtureCase] = &[
         label: "Bear",
         model: "Animal_Bear.Bear.bfres.mc",
         fixture: "tests/fixtures/mc/Animal_Bear.Bear.bfres.mc",
+        tail: Some(TailWindow {
+            fwd_pos: 28354,
+            next_pos: 28657,
+        }),
     },
     FixtureCase {
         label: "Bass",
         model: "Animal_Bass.Bass.bfres.mc",
         fixture: "tests/fixtures/mc/Animal_Bass.Bass.bfres.mc",
+        tail: Some(TailWindow {
+            fwd_pos: 5763,
+            next_pos: 6102,
+        }),
     },
     FixtureCase {
         label: "Dragonfly",
         model: "Animal_Dragonfly.Dragonfly.bfres.mc",
         fixture: "tests/fixtures/mc/Animal_Dragonfly.Dragonfly.bfres.mc",
+        tail: None,
     },
 ];
 
@@ -197,6 +214,37 @@ fn assert_byte_group_from_payload_matches(case: &FixtureCase) {
         case.label,
         oracle.len()
     );
+
+    if let Some(tail) = case.tail {
+        let expected_tail = &oracle[byte_group_len..];
+        let (decoded_tail, next_pos) =
+            decode_zstd_window_with_history(payload, tail.fwd_pos, &out[..byte_group_len])
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{} history-backed zstd tail at P+{} failed: {error:?}",
+                        case.label, tail.fwd_pos
+                    )
+                });
+        assert_eq!(next_pos, tail.next_pos, "{} zstd tail cursor", case.label);
+        assert_eq!(
+            decoded_tail, expected_tail,
+            "{} zstd tail bytes",
+            case.label
+        );
+        eprintln!(
+            "{} from-payload bufB zstd tail matched oracle: {}/{} bytes",
+            case.label,
+            decoded_tail.len(),
+            expected_tail.len()
+        );
+    } else {
+        assert_eq!(
+            byte_group_len,
+            oracle.len(),
+            "{} should not have a direct zstd tail",
+            case.label
+        );
+    }
 }
 
 #[derive(Debug)]
