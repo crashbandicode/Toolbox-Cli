@@ -577,6 +577,8 @@ pub enum VertexAttributeWriterTarget {
     U16x3Delta,
     /// `0x10fdfe0`.
     U16x2DirectDelta,
+    /// `0x1101850`.
+    U16x2PreviousDelta,
     /// `0x11033e0`.
     U8x2Delta,
     /// `0x1103ab0`.
@@ -1115,6 +1117,18 @@ fn vertex_attribute_source_descriptors(
                 ],
             ))
         }
+        // `0x11010b0`: one descriptor with element shift `rounded-1`
+        // (`0x11010b0..0x11010cc`).
+        67 => Ok((
+            VertexAttributeWriterTarget::U16x2PreviousDelta,
+            vec![vertex_source_descriptor(
+                dispatch,
+                0,
+                rounded_minus_one as u32,
+                group_width,
+                ret,
+            )?],
+        )),
         // `0x11010e0`: two descriptors with element shift `rounded-1`
         // (`0x1101108..0x1101134`).
         76 | 81 => {
@@ -1510,6 +1524,21 @@ pub fn vertex_attribute_apply_writer(
                     matches: spec.matches,
                     source0,
                     source1,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::U16x2PreviousDelta => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            transform_tail_u16x2_previous_delta_into(
+                out,
+                TransformTailU16x2PreviousDeltaSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    source0,
                 },
             )
             .map(vertex_delta_usage)

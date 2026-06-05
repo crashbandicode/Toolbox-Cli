@@ -643,6 +643,39 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-7 dispatch 67 writer `0x1101850`
+**Committed:** P1-7 ports dispatch 67's writer target `0x1101850` as a
+two-u16 previous-row delta transform tail. Static table slot 67 uses setup
+`0x11010b0`; the port maps that dispatch through the one-source
+`(rounded_minus_one, group_width, ret)` setup and wires the writer-table call to
+`transform_tail_u16x2_previous_delta_into`.
+
+Durable evidence: gitignored
+`local-assets/re/capture_phase1_dispatch_67_interstage.py` captured
+Animal_Boar.Boar current 4 with dispatch 67, setup `0x11010b0`, writer
+`0x1101850`, and descriptor `(1,2,322)`.
+`local-assets/re/capture_phase1_transform_tail_1101850.py` captured one writer
+call; `verify_transform_tail_1101850.py` replays **1/1** with 1 seed literal,
+321 previous-row delta literals, 41 copy units, 363 emitted rows, and 1288
+source0 bytes. Discriminators no-previous-delta, no-copy, and byte-delta all
+fail 1/1. FINDINGS UPDATE 52 records the capture, replay, and
+disassembly-citation details.
+
+Verification: `cargo test --lib u16x2_previous_delta` passed 4/4;
+`cargo test --lib vertex_attribute` passed 13/13; `cargo test --lib
+transform_tail` passed 35/35; `cargo test --lib mc::geometry` passed 110/110;
+`cargo test` passed the full suite; `cargo clippy --all-targets` is clean;
+`cargo build --no-default-features` builds. Current full gate:
+`All green: 256 lib unit (incl. 110 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2 for Bear/Bass/Dragonfly.
+
+Phase 1 re-sweep with `MC_MODEL_CORPUS` still fails by design but moved the
+coverage curve again: **12,395 seen; 278 no-FMSH/no mesh; 189 decoded clean;
+11,928 failures**. `UnobservedDispatch(67)` is gone. Next independent
+dispatch-family ports are `UnobservedDispatch(77)` at 170 and
+`UnobservedDispatch(61)` at 140; the larger kernel decision/window branches
+from FINDINGS UPDATE 47 still dominate and remain a separate state-machine task.
+
 ### 2026-06-05 - MeshCodec P1-6 dispatch 110 writer `0x110ae30`
 **Committed:** P1-6 ports dispatch 110's writer target `0x110ae30` as an
 i8x3 normal-delta transform tail. Static table slot 110 uses setup
