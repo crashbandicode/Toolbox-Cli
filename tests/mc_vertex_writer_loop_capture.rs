@@ -416,6 +416,7 @@ fn target_addr(target: VertexAttributeWriterTarget) -> &'static str {
         VertexAttributeWriterTarget::Delta3Direct => "0x10fdcf0",
         VertexAttributeWriterTarget::Delta4Direct => "0x10fde00",
         VertexAttributeWriterTarget::U16x3Delta => "0x1100c90",
+        VertexAttributeWriterTarget::U16x2DirectDelta => "0x10fdfe0",
         VertexAttributeWriterTarget::U8x2Delta => "0x11033e0",
         VertexAttributeWriterTarget::U16x2Delta => "0x1103ab0",
         VertexAttributeWriterTarget::I8x2Normal => "0x110aac0",

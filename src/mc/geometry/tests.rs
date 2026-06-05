@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn forward(bytes: &[u8]) -> ForwardReader<'_> {
@@ -3368,6 +3367,82 @@ fn vertex_attribute_interstage_dragonfly_copy2_source() {
     );
 }
 
+/// Interstage source setup/materialization for dispatch 35.
+///
+/// Provenance: `capture_transform_tail_10fdfe0.py`, Animal_Bass_Boneless
+/// current 2: dispatch 35 selects setup `0x10fc4e0`, reads one split varint,
+/// and maps to writer `0x10fdfe0` with two same-width source descriptors.
+#[test]
+fn vertex_attribute_interstage_dispatch35_u16x2_direct_delta_sources() {
+    let mut payload = vec![0u8; 18];
+    payload[9] = 1;
+    payload[10..14].copy_from_slice(&[1, 2, 3, 4]);
+    payload[14..18].copy_from_slice(&[5, 6, 7, 8]);
+    let mut state = ByteGroupReadState {
+        reader: RansThreeLaneReader {
+            ptr: 1,
+            acc: (35u64 << 57) | (3u64 << 55) | (3u64 << 53),
+            bitpos: 57,
+        },
+        mode1_extra_readers: [zero_three_lane_reader(); 2],
+        stream_pos: 9,
+        segment_state: RansStateBuffer::cold(),
+        selector2_history: Vec::new(),
+    };
+
+    let interstage = vertex_attribute_interstage_sources(
+        &mut state,
+        &payload,
+        ByteGroupTransformTableEntry { raw: 0x1000_100a },
+        2,
+    )
+    .unwrap();
+
+    assert_eq!(
+        interstage,
+        VertexAttributeInterstage {
+            dispatch: 35,
+            writer: VertexAttributeWriterTarget::U16x2DirectDelta,
+            descriptors: vec![
+                VertexAttributeSourceDescriptor {
+                    element_shift: 0,
+                    group_stride: 4,
+                    count: 1,
+                },
+                VertexAttributeSourceDescriptor {
+                    element_shift: 0,
+                    group_stride: 4,
+                    count: 1,
+                },
+            ],
+            sources: vec![
+                VertexAttributeSource {
+                    selector: 3,
+                    bytes: hex_bytes("01020304"),
+                },
+                VertexAttributeSource {
+                    selector: 3,
+                    bytes: hex_bytes("05060708"),
+                },
+            ],
+        }
+    );
+    assert_eq!(
+        state,
+        ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 0,
+                acc: 0,
+                bitpos: 54,
+            },
+            mode1_extra_readers: [zero_three_lane_reader(); 2],
+            stream_pos: 18,
+            segment_state: RansStateBuffer::cold(),
+            selector2_history: Vec::new(),
+        }
+    );
+}
+
 /// Writer-table dispatch (`0x10f93d8`) into the already-ported `0x10fc680`.
 ///
 /// Provenance: `capture_vertex_interstage.py` plus
@@ -3423,6 +3498,63 @@ fn vertex_attribute_writer_dispatch_dragonfly_copy2() {
     assert_eq!(&out[4368..4370], &hex_bytes("7f80"));
     assert_eq!(&out[5148..5150], &hex_bytes("7f80"));
     assert_eq!(out[7], 0xee, "out_offset is byte-based, not contiguous");
+}
+
+/// Writer-table dispatch (`0x10f93d8`) into `0x10fdfe0`.
+///
+/// This wires the dispatch-level `VertexAttributeWriterCall` to the
+/// two-u16 direct/delta tail, covering direct, matched, and copy rows with the
+/// table metadata shape selected by dispatch 35.
+#[test]
+fn vertex_attribute_writer_dispatch_u16x2_direct_delta() {
+    let transform = VertexAttributeTransform {
+        index: 0,
+        table_entry: ByteGroupTransformTableEntry { raw: 0x1000_100a },
+        out_offset: 0,
+        column: 0,
+        limit: 3,
+        ret: 2,
+        records: vec![[0x0001_0002, 16]],
+    };
+    let interstage = VertexAttributeInterstage {
+        dispatch: 35,
+        writer: VertexAttributeWriterTarget::U16x2DirectDelta,
+        descriptors: Vec::new(),
+        sources: vec![
+            VertexAttributeSource {
+                selector: 3,
+                bytes: hex_bytes("01000200"),
+            },
+            VertexAttributeSource {
+                selector: 3,
+                bytes: hex_bytes("01000200"),
+            },
+        ],
+    };
+    let mut out = vec![0xee; 36];
+
+    let usage = vertex_attribute_apply_writer(
+        &mut out,
+        VertexAttributeWriterCall {
+            transform: &transform,
+            interstage: &interstage,
+            matches: &[0, 8, 0],
+            block_index: 0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        usage,
+        VertexAttributeWriterUsage {
+            sources: [4, 4, 0, 0],
+            match_entries: 3,
+        }
+    );
+    assert_eq!(&out[0..4], &hex_bytes("01000200"));
+    assert_eq!(&out[16..20], &hex_bytes("02000400"));
+    assert_eq!(&out[32..36], &hex_bytes("02000400"));
+    assert_eq!(out[4], 0xee, "writer must keep the table stride");
 }
 
 /// Composed per-attribute writer-loop step (`0x10f924c..0x10f93d8`).
@@ -5497,6 +5629,83 @@ fn transform_tail_delta4_direct_dragonfly_column() {
     }
 }
 
+/// Transform tail `0x10fdfe0`: four-byte direct literals, matched two-u16
+/// deltas, and copy runs.
+///
+/// Provenance: `capture_transform_tail_10fdfe0.py`, Animal_Bass_Boneless
+/// current 2 `0x10fdfe0` call, first record `(52,2,416)`. This compact
+/// prefix covers the direct literal branch, non-zero match-table routing as
+/// little-endian u16 deltas, and a copy run; the replay script covers the
+/// captured call 1/1 and rejects byte-wise deltas plus `0x1103ab0`'s
+/// previous-row zero-match behavior.
+#[test]
+fn transform_tail_u16x2_direct_delta_bass_boneless_first_record() {
+    let source0 = hex_bytes(concat!(
+        "be271260a0328d5fdd1c96605bb3a00c86aeda0578ccda05dceada0587ea28147afcda0550f8620c32af8bd448a9a6ec",
+        "e39503d23094caf50d7e93dbea76c9f62c6ed7e1f217ebafd8148ba09538fea450378e8ce85d6b9ffd5f1492b0bb0cc6",
+        "5cc234b59fd128da95d9d9b45ff887ec68ec80b4a7f9c7769ad3378c22bc68a45cc234b5",
+    ));
+    let source1 = hex_bytes(concat!(
+        "0000000000000000000000005ca515b49eae80b500000000000000000000000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000",
+    ));
+    let matches = hex_u32_words(concat!(
+        "0000000000000000000000001a0000001200000022000000000000000000000030000000000000005000000000000000",
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000",
+        "2800000000000000480000000000000042000000420000005a0000006a00000000000000880000003800000018000000",
+        "5a00000038000000820000005000000000000000d2000000",
+    ));
+    let expected_lane = hex_bytes(concat!(
+        "be271260a0328d5fdd1c9660be271260dd1c9660a0328d5f5bb3a00c86aeda0539c2ab1478ccda055cd69215dceada05",
+        "87ea28147afcda0550f8620c32af8bd448a9a6ece39503d23094caf50d7e93dbea76c9f62c6ed7e1f217ebafd8148ba0",
+        "9538fea450378e8ce85d6b9ffd5f1492b0bb0cc65cc234b59fd128da95d9d9b45ff887ec68ec80b4a7f9c77668ec80b4",
+        "95d9d9b49ad3378c5cc234b522bc68a45ff887ec68ec80b495d9d9b49fd128da5cc234b5b0bb0cc622bc68a45cc234b5",
+        "9ad3378c95d9d9b4a7f9c77668ec80b4e85d6b9ffd5f1492",
+    ));
+    let records = [TransformTailRecord {
+        literal_count: 52,
+        copy_count: 2,
+        back_distance: 416,
+    }];
+    let mut out = vec![0xee; 4168];
+
+    let usage = transform_tail_u16x2_direct_delta_into(
+        &mut out,
+        TransformTailU16x2DirectDeltaSpec {
+            output_stride: 16,
+            block_index: 0,
+            out_offset: 3300,
+            records: &records,
+            matches: &matches,
+            source0: &source0,
+            source1: &source1,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        usage,
+        TransformTailDeltaUsage {
+            source0: 132,
+            source1: 76,
+            source2: 0,
+            match_entries: 54,
+        }
+    );
+    assert_eq!(expected_lane.len(), 54 * 4);
+    for (unit_index, expected) in expected_lane.chunks_exact(4).enumerate() {
+        let base = 3300 + unit_index * 16;
+        assert_eq!(&out[base..base + 4], expected, "unit {unit_index}");
+    }
+    for (index, &byte) in out.iter().enumerate() {
+        let is_lane = (3300..3300 + 54 * 16).contains(&index) && (index - 3300) % 16 < 4;
+        if !is_lane {
+            assert_eq!(byte, 0xee, "non-lane byte {index} changed");
+        }
+    }
+}
+
 /// Transform tail `0x1100c90`: direct three-u16 rows, signed matched
 /// deltas, and copy runs.
 ///
@@ -7320,6 +7529,137 @@ fn transform_tail_pack10x3_delta_rejects_malformed_inputs() {
                 source1: &[],
                 source2: &[],
                 source3: &[],
+            },
+        ),
+        Err(TransformTailDeltaError::CopyBeforeOutput)
+    );
+}
+
+#[test]
+fn transform_tail_u16x2_direct_delta_rejects_malformed_inputs() {
+    let direct = [TransformTailRecord {
+        literal_count: 1,
+        copy_count: 0,
+        back_distance: 0,
+    }];
+    let mut out = [0u8; 4];
+    assert_eq!(
+        transform_tail_u16x2_direct_delta_into(
+            &mut out,
+            TransformTailU16x2DirectDeltaSpec {
+                output_stride: 0,
+                block_index: 0,
+                out_offset: 0,
+                records: &direct,
+                matches: &[0],
+                source0: &[0; 4],
+                source1: &[],
+            },
+        ),
+        Err(TransformTailDeltaError::ZeroStride)
+    );
+    assert_eq!(
+        transform_tail_u16x2_direct_delta_into(
+            &mut out,
+            TransformTailU16x2DirectDeltaSpec {
+                output_stride: 4,
+                block_index: 0,
+                out_offset: 0,
+                records: &direct,
+                matches: &[],
+                source0: &[0; 4],
+                source1: &[],
+            },
+        ),
+        Err(TransformTailDeltaError::MatchTableTooSmall)
+    );
+    assert_eq!(
+        transform_tail_u16x2_direct_delta_into(
+            &mut out,
+            TransformTailU16x2DirectDeltaSpec {
+                output_stride: 4,
+                block_index: 0,
+                out_offset: 0,
+                records: &direct,
+                matches: &[0],
+                source0: &[0; 3],
+                source1: &[],
+            },
+        ),
+        Err(TransformTailDeltaError::Source0TooSmall)
+    );
+
+    let matched = [TransformTailRecord {
+        literal_count: 1,
+        copy_count: 0,
+        back_distance: 0,
+    }];
+    assert_eq!(
+        transform_tail_u16x2_direct_delta_into(
+            &mut out,
+            TransformTailU16x2DirectDeltaSpec {
+                output_stride: 4,
+                block_index: 0,
+                out_offset: 0,
+                records: &matched,
+                matches: &[8],
+                source0: &[],
+                source1: &[0; 4],
+            },
+        ),
+        Err(TransformTailDeltaError::MatchBeforeOutput)
+    );
+
+    let mut matched_out = [0u8; 24];
+    assert_eq!(
+        transform_tail_u16x2_direct_delta_into(
+            &mut matched_out,
+            TransformTailU16x2DirectDeltaSpec {
+                output_stride: 20,
+                block_index: 0,
+                out_offset: 20,
+                records: &matched,
+                matches: &[8],
+                source0: &[],
+                source1: &[0; 3],
+            },
+        ),
+        Err(TransformTailDeltaError::Source1TooSmall)
+    );
+
+    let mut short_out = [0u8; 3];
+    assert_eq!(
+        transform_tail_u16x2_direct_delta_into(
+            &mut short_out,
+            TransformTailU16x2DirectDeltaSpec {
+                output_stride: 4,
+                block_index: 0,
+                out_offset: 0,
+                records: &direct,
+                matches: &[0],
+                source0: &[0; 4],
+                source1: &[],
+            },
+        ),
+        Err(TransformTailDeltaError::OutputTooSmall)
+    );
+
+    let copy_first = [TransformTailRecord {
+        literal_count: 0,
+        copy_count: 1,
+        back_distance: 1,
+    }];
+    assert_eq!(
+        transform_tail_u16x2_direct_delta_into(
+            &mut out,
+            TransformTailU16x2DirectDeltaSpec {
+                output_stride: 4,
+                block_index: 0,
+                out_offset: 0,
+                records: &copy_first,
+                matches: &[0],
+                source0: &[],
+                source1: &[],
             },
         ),
         Err(TransformTailDeltaError::CopyBeforeOutput)

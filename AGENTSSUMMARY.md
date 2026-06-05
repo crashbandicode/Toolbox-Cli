@@ -643,6 +643,39 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-3 dispatch 35 writer `0x10fdfe0`
+**Committed:** P1-3 ports dispatch 35's writer target `0x10fdfe0` as a
+two-u16 direct/matched delta tail. Static table slot 35 uses setup
+`0x10fc4e0`; the port adds `U16x2DirectDelta`, maps dispatch 35 through that
+split/remainder setup, and wires the writer-table call to
+`transform_tail_u16x2_direct_delta_into`.
+
+Durable evidence: gitignored
+`local-assets/re/capture_transform_tail_10fdfe0.py` captured the
+Animal_Bass_Boneless corpus hit, and
+`local-assets/re/verify_transform_tail_10fdfe0.py` replays **1/1** captured
+call byte-exact: 197 direct zero-match literals, 188 matched u16-delta
+literals, 163 copy units, 548 match entries. The fixture-free unit tests cover
+the captured first record `(52,2,416)`, malformed-input rejection, synthetic
+dispatch 35 source materialization, and writer-table dispatch. FINDINGS UPDATE
+48 records the disassembly citations and replay details.
+
+Verification: `cargo test --lib mc::geometry` passed 100/100;
+`cargo test --test mc_vertex_decode_sweep` passed its non-ignored regression
+with the corpus gate ignored; `cargo test` passed the full suite; `cargo
+clippy --all-targets` is clean; `cargo build --no-default-features` builds.
+Current full gate:
+`All green: 246 lib unit (incl. 100 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2 for Bear/Bass/Dragonfly.
+
+Phase 1 re-sweep with `MC_MODEL_CORPUS` still fails by design but moved the
+coverage curve: **12,395 seen; 278 no-FMSH/no mesh; 58 decoded clean; 12,059
+failures**. `UnobservedDispatch(35)` is gone. Two models now reach
+`U16x2DirectDelta` and reject safely as `Source0TooSmall`; follow-up capture is
+needed before broadening the claim. Next independent branch after the blocked
+decision-bit path is byte segment mode 2 or segment mode 1 from the updated
+histogram.
+
 ### 2026-06-05 - MeshCodec P1-1 sweep failure histogram
 **Committed:** P1-1 adds normalized failure-class bucketing to
 `tests/mc_vertex_decode_sweep.rs`. The ignored corpus sweep now prints a sorted
