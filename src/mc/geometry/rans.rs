@@ -2671,7 +2671,27 @@ pub fn rans_segment_loop_bytes_into(
                     context.reader = freq_reader_from_three(readers[0]);
                     context.mode1_extra_readers = [readers[1], readers[2]];
                 }
-                2 => return Err(RansByteSegmentLoopError::UnobservedMode2Segment),
+                2 => {
+                    let mut cursor = RansStreamCursor::default();
+                    rans_segment_dispatch_bytes_into(
+                        out_window,
+                        RansSegmentDispatchBytesSpec {
+                            mode: descriptor.mode,
+                            log: descriptor.log,
+                            value: descriptor.value as u32,
+                            count,
+                            stride: spec.lanes,
+                            state: &mut context.state,
+                            step: &descriptor.step,
+                            sym: &descriptor.sym,
+                            stream: &[],
+                            payload: spec.payload,
+                            cursor: &mut cursor,
+                            three_lane_readers: None,
+                        },
+                    )
+                    .map_err(RansByteSegmentLoopError::Dispatch)?;
+                }
                 mode => {
                     return Err(RansByteSegmentLoopError::Dispatch(
                         RansSegmentDispatchBytesError::UnknownMode(mode),

@@ -643,6 +643,36 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-4 byte segment-loop mode 2
+**Committed:** P1-4 ports the byte segment loop's mode-2 branch in
+`rans_segment_loop_bytes_into` (`0x110dae0`). The branch now delegates to the
+already-validated byte RLE dispatch path (`0x110dd80` / `0x110f800`) instead of
+guarding `UnobservedMode2Segment`; mode 2 does not advance the forward stream
+or mutate the rANS state.
+
+Durable evidence: gitignored
+`local-assets/re/capture_phase1_byte_segment_mode2.py` captured
+Animal_Boar.Boar with 6 byte-loop calls and dispatch mode coverage mode 0 = 11,
+mode 1 = 8, mode 2 = 6. `verify_byte_segment_loop.py` replays the Boar capture
+**6/6** against output bytes, reader/context, mode-1 extra readers, rANS state,
+forward cursor, and normalized dispatch schedule; no-output replay fails 6/6.
+FINDINGS UPDATE 49 records the capture and replay details.
+
+Verification: `cargo test --lib mc::geometry` passed 101/101;
+`cargo test --test mc_vertex_decode_sweep` passed its non-ignored regression
+with the corpus gate ignored; `cargo test` passed the full suite; `cargo
+clippy --all-targets` is clean; `cargo build --no-default-features` builds.
+Current full gate:
+`All green: 247 lib unit (incl. 101 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2 for Bear/Bass/Dragonfly.
+
+Phase 1 re-sweep with `MC_MODEL_CORPUS` still fails by design but moved the
+coverage curve again: **12,395 seen; 278 no-FMSH/no mesh; 83 decoded clean;
+12,034 failures**. `ByteSegmentLoop(UnobservedMode2Segment)` is gone. Next
+independent high-frequency branch is `SegmentLoop(UnobservedMode1Segment)` at
+788, while the kernel decision/window branches remain the larger blocked
+state-machine task from FINDINGS UPDATE 47.
+
 ### 2026-06-05 - MeshCodec P1-3 dispatch 35 writer `0x10fdfe0`
 **Committed:** P1-3 ports dispatch 35's writer target `0x10fdfe0` as a
 two-u16 direct/matched delta tail. Static table slot 35 uses setup

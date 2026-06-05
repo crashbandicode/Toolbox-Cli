@@ -2012,6 +2012,58 @@ fn rans_segment_loop_bass_mode0_then_rle_lanes() {
     assert_eq!(out.iter().map(|&v| v as u32).sum::<u32>(), 7180);
 }
 
+/// Byte segment loop (`0x110dae0`) mode-2 RLE descriptor.
+///
+/// Provenance: `capture_phase1_byte_segment_mode2.py`,
+/// Animal_Boar.Boar.bfres.mc reaches byte-loop mode 2 in 6 dispatches across
+/// 4 loop calls; `verify_byte_segment_loop.py` replays the Boar capture 6/6.
+/// This compact golden uses the observed mode-2 value header from
+/// `capture_segment_dispatch.py` and verifies the loop dispatches it through
+/// byte RLE without advancing the forward stream or rANS state.
+#[test]
+fn rans_segment_loop_bytes_mode2_rle_fills_lane() {
+    let payload = sparse_payload(10, &[(2, "f1a106940000623a")]);
+    let mut out = vec![0xee; 5];
+    let mut context = RansSegmentLoopContext {
+        reader: RansFreqReader {
+            ptr: 2,
+            acc: 0x03fbfd0221c04704,
+            bitpos: 59,
+        },
+        mode1_extra_readers: [zero_three_lane_reader(); 2],
+        stream_pos: 123,
+        state: RansStateBuffer::warm([1, 2, 3, 4]),
+    };
+
+    let dispatches = rans_segment_loop_bytes_into(
+        &mut out,
+        &mut context,
+        RansByteSegmentLoopSpec {
+            byte_count: 5,
+            lanes: 1,
+            segment_log: 1,
+            payload: &payload,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(dispatches, 1);
+    assert_eq!(out, vec![0x7f; 5]);
+    assert_eq!(
+        context,
+        RansSegmentLoopContext {
+            reader: RansFreqReader {
+                ptr: 0,
+                acc: 0xfd02_21c0_4707_4c40,
+                bitpos: 59,
+            },
+            mode1_extra_readers: [zero_three_lane_reader(); 2],
+            stream_pos: 123,
+            state: RansStateBuffer::warm([1, 2, 3, 4]),
+        }
+    );
+}
+
 #[test]
 fn rans_segment_loop_rejects_unobserved_mode1_and_bad_bounds() {
     let mode1_payload = sparse_payload(10, &[(0, "5b22b1399b96d244781d")]);
