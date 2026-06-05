@@ -643,6 +643,38 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-5 u16 segment-loop mode 1
+**Committed:** P1-5 ports the u16 segment loop's mode-1 branch in
+`rans_segment_loop_into` (`0x110dc30`). The branch now threads the main reverse
+reader plus the two saved extra readers through the already-validated
+`0x110de00` / `0x110ef70` three-lane dispatch path instead of guarding
+`UnobservedMode1Segment`; mode 1 does not advance the forward stream or mutate
+the warm rANS state.
+
+Durable evidence: gitignored `local-assets/re/find_phase1_segment_loop_mode1.py`
+found Animal_Bull.Bull as the first corpus representative with one u16
+segment-loop call and three mode-1 dispatches. The targeted capture is
+`local-assets/re/phase1_segment_loop_mode1_capture.json`; `verify_segment_loop.py`
+replays it **1/1** against output slots, reader/context, mode-1 extra readers,
+rANS state, forward cursor, and dispatch schedule. FINDINGS UPDATE 50 records
+the capture and replay details.
+
+Verification: `cargo test --lib rans_segment_loop` passed 4/4;
+`cargo test --lib mc::geometry` passed 102/102; `cargo test --test
+mc_vertex_decode_sweep` passed its non-ignored regression with the corpus gate
+ignored; `cargo test` passed the full suite; `cargo clippy --all-targets` is
+clean; `cargo build --no-default-features` builds. Current full gate:
+`All green: 248 lib unit (incl. 102 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2 for Bear/Bass/Dragonfly.
+
+Phase 1 re-sweep with `MC_MODEL_CORPUS` still fails by design but moved the
+coverage curve again: **12,395 seen; 278 no-FMSH/no mesh; 121 decoded clean;
+11,996 failures**. `SegmentLoop(UnobservedMode1Segment)` is gone. Next
+independent high-count branches are dispatch-family ports such as
+`UnobservedDispatch(110)` at 346, `UnobservedDispatch(67)` at 218, and
+`UnobservedDispatch(77)` at 163; the larger kernel decision/window branches
+from FINDINGS UPDATE 47 still dominate and remain a separate state-machine task.
+
 ### 2026-06-05 - MeshCodec P1-4 byte segment-loop mode 2
 **Committed:** P1-4 ports the byte segment loop's mode-2 branch in
 `rans_segment_loop_bytes_into` (`0x110dae0`). The branch now delegates to the

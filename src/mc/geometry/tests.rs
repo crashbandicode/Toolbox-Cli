@@ -2012,6 +2012,189 @@ fn rans_segment_loop_bass_mode0_then_rle_lanes() {
     assert_eq!(out.iter().map(|&v| v as u32).sum::<u32>(), 7180);
 }
 
+/// U16 segment loop (`0x110dc30`) mode-1 three-lane dispatches.
+///
+/// Provenance: `find_phase1_segment_loop_mode1.py` found
+/// Animal_Bull.Bull.bfres.mc; `verify_segment_loop.py` replays that targeted
+/// capture 1/1 with three mode-1 dispatches. The zero-filled output is enough
+/// because the observed schedule writes every logical slot and only leaves the
+/// padded slot untouched.
+#[test]
+fn rans_segment_loop_bull_mode1_three_lane_dispatches() {
+    let payload = sparse_payload(
+        31614,
+        &[
+            (
+                24763,
+                concat!(
+                    "48aca2a13a880f03b9d60390b6e3811fe711b4a057ff5b74f5130e5fdfb0eac2fd73a0944c0ca1703dba7ac07ab5440d",
+                    "33105ad04f2e15b1afbb03bac2dff662daca899ad5ba57b3c0c509791aeffc97d032522e5d3e98c379b7c7e1c182dbb6",
+                    "8047237afa4b0d3ec0a3395e8afd1c249c515931923931622917293afa6bbc2f278f43771f4fc19a12971e07061809a0",
+                    "1510b413e5d379e5a5094ddbdade9ffab108d9d2678bf8b1c2a8ec8d1d411708118547cf4f32b0484e46882968ca1205",
+                    "dd5337b33c888b6bcecebef498c235a672a24c2f05e6ee3905d2dc2ab70b3e356680b36940ab55c58016eac38463188f",
+                    "205f1940be779714011a4c0400c15aa74a8e1b00180240b6d1da553d9106b8b00000beb4b52595d6bfb88110ffa8cdc4",
+                    "28cb55965d5252ffbfa6a52db55fea6ecf114b27ebb4e47491d192bc49f1a79bc8e2d6132242e2446b4445e2b412dd8c",
+                    "ca27daaf692a4b3ca9f49d9ea84cd2ebdd7d5737557e8e2c2f6e6b3a79d5924a6b9dea3df127c492dcf41259b5aaf189",
+                    "2b19cd3fe5dbbbed9abfaaaf4444974ae4f3a5a3d292ffae4a5a967295933f917a89d17242eae9ad499abaaab67e9296",
+                    "bf4a1bcd6c958013f9033c000400802c8fcbd9c99494091561ae6ef0710178a7b8a5f1e7d1450505b27100c00f50a75e",
+                    "1d6fabd681645486fefcc499de90a76408208b253fcdf230c429c70ac1ecfe3846e56dcf0549c27143b22c61d2fb3831",
+                    "27a48d51b928207d4aeb74eafabe31445574c6a8d0e8e42169e3be93521d7a47b6e9a2bb2722448f883619b37dfbaa99",
+                    "59325aec133cc384650ed5565475228977138a13b44c88be4e722d0b2c1622dda80b42895d3d8a6892483f8280a332d4",
+                    "016e0800018666de",
+                ),
+            ),
+            (
+                28818,
+                concat!(
+                    "7ca2b9e18af2fc5b3262698acf180414bf478a29cd9b6bc23cfca8a751d0d77cc2fd371469acfdf1ea0178c1379b8000",
+                    "07401f2dab924f8f7c2d0d1fe123496f12691d7925f359bc66f6e12390984bfe93603e61adb14fd0a00fd7b9b0db2c29",
+                    "8fba44980ca000ec0c804b37805a80f077b45ab3ad59b91ec871bfe1a60cb0ec5a9779800002a261e40781bc2ef7543b",
+                    "811ed2f88168d4055600be95e7009e0178f90552ac3859f592708b3b2be5f2ef3dfa4a8c15944754038cc1bf8fb04db3",
+                    "bf71f89c5d920e70761f624fd6e9479ec9423c03907e23eea00d15de4642115932fff02e1b205be41020cfb723a58533",
+                    "d3447b562b4e5cfff37be58649b13a99b4d6787e60c6eb3e27369ad9b1187b0964aa17a58eaa75c5a23609bf078d2224",
+                    "2627e59ebb549a9346fd1cb767d82c7c0dbb79bf2aba1728a1c4580dd6e3c925bd59d705ac6c05cd599b0610f0afdec8",
+                    "46d781b72eb8169b122e382089ff83c5781d1c1407fe0075007f",
+                ),
+            ),
+            (
+                29729,
+                concat!(
+                    "e8039803c07f49a0a180ff7ff01c90467f7cf60deecc8f41be38c21b93b76127cabe04a9f7bb48de7b553b2b21c687f9",
+                    "1abd3b69916a5e1e98431da29ffd32e3b183d10beec83827699f1f07c9f9788c98c8731e2a31c2e478932038c724daeb",
+                    "6fc273e8eb1dd2cf57fddc3a9114d2a8e4befd2b7f7bdf4987d812978def7abb4e2e8c444c9d868b20a96060bd8f3fbc",
+                    "f589050d5a31a9ab976dc253957d49a0810cddb468e4ca41a84a131f034d8dbc30a29d212ab07a23a0748a47a81275ad",
+                    "ac310a98831e6ee9f68aeab2d6c2c594db8bf21ca985ac0efcb4d5d8cd6b6702662207285107bcf8866e19301ea083d9",
+                    "e1a78403b32c07aeceec467094a7339af47d48a740c21e00dcdab30e359476b16a940070b806ccb00b4928d7af0b1721",
+                    "f9f1c73e0c04b676b204ba8898783a42162e633323237517691d05064bc1bc09ea704d6c5d0d9e8ebc4e65d5be8eea5d",
+                    "897da1398f7aefb089f27fbd0ef0e7121342f14acd4d4469df66b7df4deb5e",
+                ),
+            ),
+        ],
+    );
+    let mut out = vec![0u16; 999];
+    let mut context = RansSegmentLoopContext {
+        reader: RansFreqReader {
+            ptr: 25379,
+            acc: 0xcd0c_0200_10dc_03a8,
+            bitpos: 55,
+        },
+        mode1_extra_readers: [
+            RansThreeLaneReader {
+                ptr: 28826,
+                acc: 0xa2b9_e18a_f2fc_5b00,
+                bitpos: 56,
+            },
+            RansThreeLaneReader {
+                ptr: 30080,
+                acc: 0xeeb4_ddfb_766d_f694,
+                bitpos: 60,
+            },
+        ],
+        stream_pos: 3717,
+        state: RansStateBuffer {
+            states: [
+                0x2d810dc4c,
+                0xd9e836ca330e3,
+                0x15e7563e602c,
+                0x4f35d818d38a1,
+            ],
+            flag: 0xf,
+        },
+    };
+
+    let dispatches = rans_segment_loop_into(
+        &mut out,
+        &mut context,
+        RansSegmentLoopSpec {
+            byte_count: 1996,
+            lanes: 2,
+            segment_log: 6,
+            payload: &payload,
+        },
+    )
+    .unwrap();
+
+    let expected = hex_u16s(concat!(
+        "02014702a701e20213036d03a502c000f301e503df018a00ec004101a002a0028602c8026401ce021b01680255033102",
+        "000001022703aa02ab000e03b4032e0256030a035d005002ba004903a1034a02400340037a007e028001af027101a002",
+        "f0018d03fc004302e501a0002a01a0028501f1007300370198006400fc03c5000600c2025e0374008b033001f8027702",
+        "7202da002103350210027c00e7003802db0032020000020200000202d901d303e201ce03c7012f03ae01f102fc004602",
+        "990019024d0322027d01170189013301af01f200ca015b00e201a200f0012a00fd01d7030b014c02f00172006d01f702",
+        "7401ce009d004200b7001a010500ca0001004e026b0338004b031a017c02bd00b302ba02090257001c0337020000fe01",
+        "0000fc013a018f0186014701da015303ca01220300000502000009027301a702ad003b020000060200003f02fa010400",
+        "d3017c03ba014d03e601e403fd0360022302f1033702a8002d022a00bf024f0004002901ad024f002c002100e3031600",
+        "56011800fb013200d801a90355027d03f3032d03f001a7035a01b803fc01100019035c0320027c030c029d03d7026703",
+        "bd021800a10277036d01b603330322032f01f003d00024032c016c0341016100c401a7002302f6034002ee032c021a00",
+        "240281038e02d6028c01ef020000c70200006202b5002c0200006d023f03490200007302f502960200002202cc029602",
+        "d7026a02000002029502c302800233030902cc035c02e9021302b003110240006302d702f8024a02000001020f026500",
+        "5a021a010c02a10364022e01f102b1012a03cf010000ff010000fb0197007602a600de010000fc010000ff010000f501",
+        "d20078010000f701e901be030000fb0100009003f901cd030000fe0100000302fe01f3030000ff0100000202ff01f103",
+        "00000102a400ef00eb0094025a014a0000002f0300003400510093000000990000002301dc000001c700fb03aa015600",
+        "d9017003ee010200cc013200bf012500ce010f00d3013a00f601a603eb015200f801bb03af018f039401c902c1011203",
+        "d3005802000011020000170200000a024403da0115020200510212010102070031026d008202ef024102de036702dc02",
+        "2d02a50346022a032e02db038802f20263036503fe00eb020000f8000000e501480187010000f6015001770134019701",
+        "0000fd01ac010e0192013b01f2017300f1015d00e9015800470312031801c10213016702560113034101150321019503",
+        "c5014203e6016803a301de037e015b00d5019300ff01f403e5018400e901ff036b015201a40122010902ae03ec018303",
+        "2c014c03b902cb03d7018503eb016000dc018b00d3017600b401c000b2006a0100007b012002dc033602b30002022500",
+        "02001f01fe021301f70259000902a6030d010d010703be03d301a700c102bf020802b103d400cc03d5009702e4016d03",
+        "fa004e00ee01a003e401e803fd010c00dc01d203d501d6030200350297010400670211005201b903fe038d03a702bf03",
+        "43015c03bf025203d1005903e300a7001e0121000c0351031202cc03c702b700c7022000af018f008901b200f601fc03",
+        "a5008b0150017501f503c5010000de010000f0012300f3017403e1010000ed01000065013f00ec0101005901f503bb00",
+        "0000cf0032003701e003da001b00b6010000290183010f013b00bb007b0133008b011f033601ab036f0003018b000901",
+        "b1014e002901c4002001f20070004401c6032101d30001016b0343016003410162031200ad01fc008701ba02ff009f01",
+        "cf00310200000602000015023e0196020000fb016c0161010000d501e7019a0300006501000047020000010200000e02",
+        "c5011c0300000502c103be001a00cc008403eb003700dc00a0029602a803120200000e02a801160323019f0003014a02",
+        "1300da017303d0018e016203cd0148035601b402000044020e01ea020000a1023a011b03a60099020000860200000902",
+        "1401b202ec003e02b801ff021b015b02e0016900b601d403dd01a903d6013e007a0100038d017e03f601b7037f01ae02",
+        "3a0216033202340346021b0392028103ca03c4036e033d030000fb03e503dc03b800c403aa038a0000002c00f900ed03",
+        "8c00d700a300c9016601e900dc01c903ca013d0098011801e4017603fb01c703d50140031501ac02ba014903eb014900",
+        "ec017600e701d1039a00e7024003d10294012f0134038602c100d1019c00e6014300fa010000fc01d70329022e002402",
+        "cf0353022e0058020701b6010000ff010000f001c101f4006e015e01620153010000ca01a0011a012a018d010000ed01",
+        "8f013a012e018c010000fe013300c3010000c0012700e4010000d8017c01fe0065003801ab01bd0376019303cc00c102",
+        "62006003000038010000a202000074036f019f02b801e2039a0123007e012e00b90060000d01e700e30363010200df02",
+        "d80165004601f602c801ca03a6002b029c01d202220165028201d9003e012d01b201640042025203a8004903fb01c403",
+        "6301c8030000ff01c501ec009d0295006e0217003502770315012d01c8019f03ee018303dc01b9009e01f1028d002302",
+        "8f02a402fc01dc03ad00b900e60010009700e301000002027d026f0039027f038b02a303c0006e03f5019c03d601d003",
+        "31035e022c028303500135004e01f202630195002d02e803d102bd03cc0291014c03c8003802b6036c0239010000ff01",
+        "94013901c20178034802f00381011900ef025a000000c901b1024c030000",
+    ));
+    assert_eq!(dispatches, 3);
+    assert_eq!(out, expected);
+    assert_eq!(
+        context,
+        RansSegmentLoopContext {
+            reader: RansFreqReader {
+                ptr: 24767,
+                acc: 0x7e07_8eda_4000_0000,
+                bitpos: 30,
+            },
+            mode1_extra_readers: [
+                RansThreeLaneReader {
+                    ptr: 29169,
+                    acc: 0xc704_113f_f078_0000,
+                    bitpos: 43,
+                },
+                RansThreeLaneReader {
+                    ptr: 29733,
+                    acc: 0xfe8d_2039_e0fc_0000,
+                    bitpos: 39,
+                },
+            ],
+            stream_pos: 3717,
+            state: RansStateBuffer {
+                states: [
+                    0x2d810dc4c,
+                    0xd9e836ca330e3,
+                    0x15e7563e602c,
+                    0x4f35d818d38a1,
+                ],
+                flag: 0xf,
+            },
+        }
+    );
+    assert_eq!(out.iter().map(|&v| v as u32).sum::<u32>(), 460720);
+}
+
 /// Byte segment loop (`0x110dae0`) mode-2 RLE descriptor.
 ///
 /// Provenance: `capture_phase1_byte_segment_mode2.py`,
@@ -2065,44 +2248,7 @@ fn rans_segment_loop_bytes_mode2_rle_fills_lane() {
 }
 
 #[test]
-fn rans_segment_loop_rejects_unobserved_mode1_and_bad_bounds() {
-    let mode1_payload = sparse_payload(10, &[(0, "5b22b1399b96d244781d")]);
-    let mut context = RansSegmentLoopContext {
-        reader: RansFreqReader {
-            ptr: 2,
-            acc: 0x0c64faf64078a80c,
-            bitpos: 57,
-        },
-        mode1_extra_readers: [
-            RansThreeLaneReader {
-                ptr: 0,
-                acc: 0,
-                bitpos: 0,
-            },
-            RansThreeLaneReader {
-                ptr: 0,
-                acc: 0,
-                bitpos: 0,
-            },
-        ],
-        stream_pos: 0,
-        state: RansStateBuffer::warm([0; 4]),
-    };
-    let mut out = [0u16; 1];
-    assert_eq!(
-        rans_segment_loop_into(
-            &mut out,
-            &mut context,
-            RansSegmentLoopSpec {
-                byte_count: 2,
-                lanes: 1,
-                segment_log: 0,
-                payload: &mode1_payload,
-            },
-        ),
-        Err(RansSegmentLoopError::UnobservedMode1Segment)
-    );
-
+fn rans_segment_loop_rejects_bad_bounds() {
     let mut context = RansSegmentLoopContext {
         reader: RansFreqReader {
             ptr: 0,
@@ -2124,6 +2270,7 @@ fn rans_segment_loop_rejects_unobserved_mode1_and_bad_bounds() {
         stream_pos: 0,
         state: RansStateBuffer::warm([0; 4]),
     };
+    let mut out = [0u16; 1];
     assert_eq!(
         rans_segment_loop_into(
             &mut out,

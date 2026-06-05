@@ -2390,9 +2390,9 @@ fn ceil_div_segment(value: usize, segment_mask: usize, segment_log: u32) -> Opti
 /// current descriptor into the next slice. Dispatch itself is delegated to the
 /// already-validated `0x110de00` wrapper.
 ///
-/// The observed enumerate-all population is one Bass call with mode 0 + mode 2
-/// descriptors. Mode 1 is guarded here because its extra-reader threading inside
-/// this loop has not been observed, even though `0x110de00` mode 1 is ported.
+/// The observed enumerate-all population includes Bass mode 0 + mode 2
+/// descriptors and Bull mode 1 descriptors. Mode 1 threads the same three
+/// reverse readers as the standalone `0x110de00` dispatch wrapper.
 pub fn rans_segment_loop_into(
     out: &mut [u16],
     context: &mut RansSegmentLoopContext,
@@ -2436,10 +2436,6 @@ pub fn rans_segment_loop_into(
             .map_err(RansSegmentLoopError::Descriptor)?;
         context.reader = descriptor.reader;
         let mut run_segments = read_segment_loop_run_code(spec.payload, &mut context.reader)?;
-
-        if descriptor.mode == 1 {
-            return Err(RansSegmentLoopError::UnobservedMode1Segment);
-        }
 
         loop {
             let remaining = symbols_per_lane
@@ -2516,6 +2512,32 @@ pub fn rans_segment_loop_into(
                         },
                     )
                     .map_err(RansSegmentLoopError::Dispatch)?;
+                }
+                1 => {
+                    let mut readers = [
+                        three_reader_from_freq(context.reader),
+                        context.mode1_extra_readers[0],
+                        context.mode1_extra_readers[1],
+                    ];
+                    rans_segment_dispatch_into(
+                        out_window,
+                        RansSegmentDispatchSpec {
+                            mode: descriptor.mode,
+                            log: descriptor.log,
+                            value: descriptor.value,
+                            count,
+                            stride: spec.lanes,
+                            states: &mut context.state.states,
+                            step: &descriptor.step,
+                            sym: &descriptor.sym,
+                            stream: &[],
+                            payload: spec.payload,
+                            three_lane_readers: Some(&mut readers),
+                        },
+                    )
+                    .map_err(RansSegmentLoopError::Dispatch)?;
+                    context.reader = freq_reader_from_three(readers[0]);
+                    context.mode1_extra_readers = [readers[1], readers[2]];
                 }
                 mode => {
                     return Err(RansSegmentLoopError::Dispatch(
