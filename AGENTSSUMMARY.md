@@ -643,6 +643,42 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-6 dispatch 110 writer `0x110ae30`
+**Committed:** P1-6 ports dispatch 110's writer target `0x110ae30` as an
+i8x3 normal-delta transform tail. Static table slot 110 uses setup
+`0x110aa40`; the port maps that dispatch through the four-source split/remainder
+setup and wires the writer-table call to `transform_tail_i8x3_normal_delta_into`.
+
+Durable evidence: gitignored
+`local-assets/re/capture_phase1_dispatch_110_interstage.py` captured
+Animal_Fish_Cave.Fish_Cave with two dispatch-110 rows:
+`(0,2,358), (0,1,358), (0,1,358), (0,3,512)` and
+`(0,2,63), (0,1,63), (0,1,63), (0,3,29)`.
+`local-assets/re/capture_phase1_transform_tail_110ae30.py` captured two
+writer calls; `verify_transform_tail_110ae30.py` replays **2/2** with 421
+direct literals, 541 matched literals, 74 copy units, 138 matched sign flips,
+369 negative direct sign bytes, 1036 match entries, and source usage
+842/421/421/1623 bytes. Discriminators no-match-sign, no-direct-sign, and
+sqrt-floor all fail 2/2. FINDINGS UPDATE 51 records the capture, replay, and
+disassembly-citation details.
+
+Verification: `cargo test --lib i8x3_normal_delta` passed 4/4;
+`cargo test --lib vertex_attribute` passed 11/11; `cargo test --lib
+transform_tail` passed 33/33; `cargo test --lib mc::geometry` passed 106/106;
+`cargo test` passed the full suite; `cargo clippy --all-targets` is clean;
+`cargo build --no-default-features` builds. Current full gate:
+`All green: 252 lib unit (incl. 106 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2 for Bear/Bass/Dragonfly.
+
+Recorded Phase 1 re-sweep after the port with `MC_MODEL_CORPUS`: **12,395
+seen; 278 no-FMSH/no mesh; 170 decoded clean; 11,947 failures**.
+`UnobservedDispatch(110)` is gone. A rerun in the current shell skipped because
+`MC_MODEL_CORPUS` was unset; keep the recorded P1-6 sweep counts as the corpus
+evidence for this chunk. Next independent dispatch-family ports are
+`UnobservedDispatch(67)` at 218 and `UnobservedDispatch(77)` at 163; the larger
+kernel decision/window branches from FINDINGS UPDATE 47 still dominate and
+remain a separate state-machine task.
+
 ### 2026-06-05 - MeshCodec P1-5 u16 segment-loop mode 1
 **Committed:** P1-5 ports the u16 segment loop's mode-1 branch in
 `rans_segment_loop_into` (`0x110dc30`). The branch now threads the main reverse

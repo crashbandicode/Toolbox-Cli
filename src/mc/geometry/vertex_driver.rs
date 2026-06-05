@@ -583,6 +583,8 @@ pub enum VertexAttributeWriterTarget {
     U16x2Delta,
     /// `0x110aac0`.
     I8x2Normal,
+    /// `0x110ae30`.
+    I8x3NormalDelta,
     /// `0x110afb0`.
     Pack10x3Delta,
 }
@@ -636,6 +638,8 @@ pub enum VertexAttributeInterstageError {
         split: usize,
         wrapper_ret: u32,
     },
+    /// Dispatch 110 has only been validated for byte-sized source components.
+    UnobservedNormalElementShift { dispatch: u8, element_shift: u32 },
     /// Nested `0x110d7f0` source read rejected its stream.
     ByteGroupRead {
         index: usize,
@@ -1151,13 +1155,26 @@ fn vertex_attribute_source_descriptors(
                 vertex_source_descriptor(dispatch, 2, 0, 1, ret)?,
             ],
         )),
-        // `0x110aa40`: packed 10-bit setup, split once and derive four sources
+        // `0x110aa40`: normal-vector delta setup, split once and derive four sources
         // (`0x110aa68..0x110aab0`).
-        111 => {
+        110 | 111 => {
             let split = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
             let remainder = vertex_split_remainder(dispatch, wrapper_ret, split)?;
+            let writer = if dispatch == 110 {
+                if rounded_minus_one != 0 {
+                    return Err(
+                        VertexAttributeInterstageError::UnobservedNormalElementShift {
+                            dispatch,
+                            element_shift: rounded_minus_one as u32,
+                        },
+                    );
+                }
+                VertexAttributeWriterTarget::I8x3NormalDelta
+            } else {
+                VertexAttributeWriterTarget::Pack10x3Delta
+            };
             Ok((
-                VertexAttributeWriterTarget::Pack10x3Delta,
+                writer,
                 vec![
                     vertex_source_descriptor(dispatch, 0, rounded_minus_one as u32, 2, split)?,
                     vertex_source_descriptor(dispatch, 1, rounded_minus_one as u32, 1, split)?,
@@ -1257,6 +1274,15 @@ fn vertex_delta_usage(usage: TransformTailDeltaUsage) -> VertexAttributeWriterUs
 }
 
 fn vertex_pack10_usage(usage: TransformTailPack10Usage) -> VertexAttributeWriterUsage {
+    VertexAttributeWriterUsage {
+        sources: [usage.source0, usage.source1, usage.source2, usage.source3],
+        match_entries: usage.match_entries,
+    }
+}
+
+fn vertex_i8x3_normal_delta_usage(
+    usage: TransformTailI8x3NormalDeltaUsage,
+) -> VertexAttributeWriterUsage {
     VertexAttributeWriterUsage {
         sources: [usage.source0, usage.source1, usage.source2, usage.source3],
         match_entries: usage.match_entries,
@@ -1506,6 +1532,28 @@ pub fn vertex_attribute_apply_writer(
                 },
             )
             .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::I8x3NormalDelta => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            let source2 = vertex_writer_source(spec.interstage, 2)?;
+            let source3 = vertex_writer_source(spec.interstage, 3)?;
+            transform_tail_i8x3_normal_delta_into(
+                out,
+                TransformTailI8x3NormalDeltaSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                    source2,
+                    source3,
+                },
+            )
+            .map(vertex_i8x3_normal_delta_usage)
             .map_err(VertexAttributeWriterError::Delta)
         }
         VertexAttributeWriterTarget::Pack10x3Delta => {

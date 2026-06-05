@@ -354,6 +354,28 @@ pub struct TransformTailI8x2NormalSpec<'a> {
     pub source2: &'a [u8],
 }
 
+/// Inputs for the three-byte i8/i8/sqrt direct/matched delta tail (`0x110ae30`).
+pub struct TransformTailI8x3NormalDeltaSpec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Match table at `[x0+0x10]`, indexed by emitted vertex.
+    pub matches: &'a [u32],
+    /// Direct signed i8 x/y source stream at `[x4]`.
+    pub source0: &'a [u8],
+    /// Direct z adjustment stream at `[x4+8]`.
+    pub source1: &'a [u8],
+    /// Direct z sign-byte stream at `[x4+0x10]`.
+    pub source2: &'a [u8],
+    /// Matched three-byte delta stream at `[x4+0x18]`.
+    pub source3: &'a [u8],
+}
+
 /// Source and table consumption from a delta-match transform tail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransformTailDeltaUsage {
@@ -366,6 +388,16 @@ pub struct TransformTailDeltaUsage {
 /// Source and table consumption from a packed 10-10-10 transform tail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransformTailPack10Usage {
+    pub source0: usize,
+    pub source1: usize,
+    pub source2: usize,
+    pub source3: usize,
+    pub match_entries: usize,
+}
+
+/// Source and table consumption from the three-byte normal delta tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransformTailI8x3NormalDeltaUsage {
     pub source0: usize,
     pub source1: usize,
     pub source2: usize,
@@ -731,6 +763,14 @@ pub fn transform_tail_u16x2_delta_into(
     })
 }
 
+#[inline]
+fn byte_matched_component(previous: u8, delta: u8, sign_bit: u32) -> u8 {
+    let sign_mask = if sign_bit != 0 { u8::MAX } else { 0 };
+    (previous ^ sign_mask)
+        .wrapping_add(delta)
+        .wrapping_add(sign_bit as u8)
+}
+
 /// Apply the observed two-u16 direct/matched delta tail (`0x10fdfe0`).
 ///
 /// Zero-match literals copy four source0 bytes directly
@@ -934,6 +974,146 @@ pub fn transform_tail_i8x2_normal_into(
         source1: source1_pos,
         source2: source2_pos,
         match_entries: written,
+    })
+}
+
+/// Apply the observed three-byte i8/i8/sqrt direct/matched delta tail (`0x110ae30`).
+///
+/// Direct literals match the `0x110aac0` normal reconstruction: two signed i8
+/// components from source0, `round(sqrt(127^2 - x^2 - y^2))`, source1 z
+/// adjustment, and source2 sign byte (`0x110aed0..0x110af2c`). Matched literals
+/// use `(match >> 3) * stride` as a three-byte look-back, toggle each previous
+/// byte from match bits 0..2, add source3 byte deltas, and write three bytes
+/// (`0x110af34..0x110afa0`). Copy runs clone three bytes by record byte
+/// distance (`0x110ae84..0x110aeb4`).
+pub fn transform_tail_i8x3_normal_delta_into(
+    out: &mut [u8],
+    spec: TransformTailI8x3NormalDeltaSpec<'_>,
+) -> Result<TransformTailI8x3NormalDeltaUsage, TransformTailDeltaError> {
+    const MAX_COMPONENT_SQUARED: i64 = 0x3f01;
+
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
+    let mut match_index = 0usize;
+    let mut source0_pos = 0usize;
+    let mut source1_pos = 0usize;
+    let mut source2_pos = 0usize;
+    let mut source3_pos = 0usize;
+
+    for record in spec.records {
+        for _ in 0..record.literal_count {
+            let match_entry = *spec
+                .matches
+                .get(match_index)
+                .ok_or(TransformTailDeltaError::MatchTableTooSmall)?;
+            let cursor_end = cursor
+                .checked_add(3)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            if match_entry == 0 {
+                let source0_end = source0_pos
+                    .checked_add(2)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let source1_end = source1_pos
+                    .checked_add(1)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let source2_end = source2_pos
+                    .checked_add(1)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let xy = spec
+                    .source0
+                    .get(source0_pos..source0_end)
+                    .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                let z_delta = *spec
+                    .source1
+                    .get(source1_pos)
+                    .filter(|_| source1_end <= spec.source1.len())
+                    .ok_or(TransformTailDeltaError::Source1TooSmall)?;
+                let z_sign = *spec
+                    .source2
+                    .get(source2_pos)
+                    .filter(|_| source2_end <= spec.source2.len())
+                    .ok_or(TransformTailDeltaError::Source2TooSmall)?;
+                let x = sign_extend_i8(xy[0]);
+                let y = sign_extend_i8(xy[1]);
+                let remaining = MAX_COMPONENT_SQUARED
+                    .checked_sub(x * x)
+                    .and_then(|value| value.checked_sub(y * y))
+                    .unwrap_or(-1)
+                    .max(0);
+                // Game code uses single-precision `fsqrt s0` + `frinti s0` at 0x110af04..0x110af08.
+                let z = (remaining as f32).sqrt().round() as u32;
+                let z = z.wrapping_add(u32::from(z_delta));
+                let z = if z_sign == 1 { 0u32.wrapping_sub(z) } else { z } as u8;
+                let slot = out
+                    .get_mut(cursor..cursor_end)
+                    .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                slot[0] = xy[0];
+                slot[1] = xy[1];
+                slot[2] = z;
+                source0_pos = source0_end;
+                source1_pos = source1_end;
+                source2_pos = source2_end;
+            } else {
+                let match_units = (match_entry >> 3) as usize;
+                let match_distance = match_units
+                    .checked_mul(spec.output_stride)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let source = cursor
+                    .checked_sub(match_distance)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let source_end = source
+                    .checked_add(3)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let previous = {
+                    let bytes = out
+                        .get(source..source_end)
+                        .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                    [bytes[0], bytes[1], bytes[2]]
+                };
+                let source3_end = source3_pos
+                    .checked_add(3)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let deltas = spec
+                    .source3
+                    .get(source3_pos..source3_end)
+                    .ok_or(TransformTailDeltaError::Source3TooSmall)?;
+                let slot = out
+                    .get_mut(cursor..cursor_end)
+                    .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                slot[0] = byte_matched_component(previous[0], deltas[0], match_entry & 1);
+                slot[1] = byte_matched_component(previous[1], deltas[1], (match_entry >> 1) & 1);
+                slot[2] = byte_matched_component(previous[2], deltas[2], (match_entry >> 2) & 1);
+                source3_pos = source3_end;
+            }
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            match_index += 1;
+        }
+
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            3,
+            record.back_distance,
+            record.copy_count,
+        )?;
+
+        match_index = match_index
+            .checked_add(usize::from(record.copy_count))
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        if match_index > spec.matches.len() {
+            return Err(TransformTailDeltaError::MatchTableTooSmall);
+        }
+    }
+
+    Ok(TransformTailI8x3NormalDeltaUsage {
+        source0: source0_pos,
+        source1: source1_pos,
+        source2: source2_pos,
+        source3: source3_pos,
+        match_entries: match_index,
     })
 }
 
