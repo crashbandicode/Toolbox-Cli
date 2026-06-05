@@ -643,6 +643,29 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-0 geometry submodule split
+**Committed:** P1-0 splits `src/mc/geometry.rs` into focused submodules under
+`src/mc/geometry/`: `transport`, `rans`, `byte_group`, `transform_tails`,
+`vertex_driver`, plus the existing unit tests in `tests`. The parent module is
+now a re-export shim, so existing `mc::geometry::*` imports continue to compile.
+This is behavior-neutral only; no Phase 1 branch coverage was ported.
+
+Durable evidence: `cargo test --lib mc::geometry` passed 96/96, and the full
+checkpoint gate passed:
+`All green: 242 lib unit (incl. 96 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2:
+Bear full bufB **93600/93600** and assembled **131072** bytes, Bass full bufB
+**14960/14960** and assembled **32768** bytes, Dragonfly full bufB
+**15696/15696** and assembled **28672** bytes.
+
+The ignored model-corpus sweep was re-run with `MC_MODEL_CORPUS` pointing at the
+TotK `romfs/Model` dump and reproduced the known Phase 1 baseline, failing by
+design on unported coverage gaps: **12,395 seen; 278 no-FMSH/no mesh; 41 decoded
+clean; 12,076 failures**, first failure
+`Animal_Bass.Bass_Boneless.bfres.mc: UnobservedDispatch(35)`.
+Next: P1-1 histogram the sweep failures by class and record the sorted work
+queue in FINDINGS.
+
 ### 2026-06-05 - MeshCodec Phase 1 model-corpus sweep exposes unhandled branches
 **Blocked before Phase 2:** the revised Phase 1 corpus path was found at
 `C:\Games\Eden-Windows-MSVC-0.0.1-pre-alpha-amd64\eden-windows-msvc\user\dump\0100F2C0115B6000\romfs\Model`
