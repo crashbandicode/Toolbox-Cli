@@ -643,6 +643,25 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec CP5-int Dragonfly from-payload bufB gate
+**Committed:** CP5-int adds the ignored integration convergence gate
+`tests/mc_vertex_decode_oracle.rs`. With the gitignored Dragonfly fixture and
+RE captures present, it parses the `.mc` payload and wires
+`state0_table_builder -> vertex_kernel_state4_entry -> 0x11104d0 setup streams
+-> vertex_match_table -> vertex_attribute_driver_setup
+-> vertex_attribute_writer_loop_step`. Durable local evidence:
+`cargo test --test mc_vertex_decode_oracle -- --ignored --nocapture` passed and
+matched Dragonfly's byte-group bufB region **15696/15696** from payload bytes.
+The derived mode-1 extra-reader seed rule is recorded in
+`local-assets/re/FINDINGS.md` UPDATE 41: first-call `0x110d7f0` extra readers
+are `sub_a_size` and `payload.len() - 8` with zero accumulator/bitpos
+(Bear 32833/37919, Bass 6692/7159, Dragonfly 4511/4686). If the oracle ever
+diverges, the ignored test reports first-diff offset plus responsible state-5
+writer address. Full gate at checkpoint: All green: 240 lib unit (incl. 94
+mc::geometry) + all integration; clippy --all-targets clean;
+--no-default-features builds. Next: promote Bear/Bass from-payload coverage and
+close Bear's final history-backed zstd tail.
+
 ### 2026-06-05 - MeshCodec CP5d state-4 control-bit handoff
 **Committed:** CP5d now ports the observed pre-state-4 control-bit/cursor
 handoff as `vertex_kernel_state4_entry`, covering `0x10f90d4..0x10f91d0`
