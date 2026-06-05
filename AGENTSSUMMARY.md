@@ -643,6 +643,27 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec CP5-final-C assembled layout gate
+**Committed:** CP5-final-C promotes `tests/mc_vertex_decode_oracle.rs` from
+separate byte-group/tail checks to a full contiguous bufB assertion, then wires
+the local ignored assembly gate for `[info][bufA][bufB]+pad`. The test-local
+index replay decodes the first subblock from the zstd code/raw data streams,
+continues from the post-vertex state-0 cursor for later index subblocks, and
+asserts the forward cursor reaches the observed state-2 tail positions:
+Bear later index count 1 reaches `P+28354`, Bass count 2 reaches `P+5763`,
+and Dragonfly has no later index subblock. The assembly uses `extract(&mc)` for
+the BFRES prefix, derives the 288-byte mesh info header as
+`[u32 bfres_len+0x120][u32 decompressed_size]` plus zeros, and writes decoded
+bufA and full bufB at the FMSH-aligned offsets.
+
+Durable local evidence:
+`cargo test --test mc_vertex_decode_oracle -- --ignored --nocapture` passed:
+Bear full bufB **93600/93600** and assembled **131072** bytes, Bass full bufB
+**14960/14960** and assembled **32768** bytes, Dragonfly full bufB
+**15696/15696** and assembled **28672** bytes. Checkpoint gate:
+`All green: 242 lib unit (incl. 96 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+Next: Batch 4 encode handoff from a clean CP5-final checkpoint.
+
 ### 2026-06-05 - MeshCodec CP5-final-B zstd history tails
 **Committed:** CP5-final-B adds `decode_zstd_window_with_history`, preloading
 `zstd_pure::block::BlockState` with already-decoded bufB bytes for state-2

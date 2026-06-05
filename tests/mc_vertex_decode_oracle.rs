@@ -8,19 +8,23 @@
 use std::{fs, path::Path};
 
 use nx_layout_toolbox::mc::{
+    extract,
     geometry::{
-        byte_group_read, decode_zstd_window_with_history, parse_sub_block_header,
-        parse_super_block_trailer, state0_table_builder, vertex_attribute_driver_setup,
-        vertex_attribute_writer_loop_step, vertex_kernel_state4_entry, vertex_match_table,
-        ByteGroupReadSpec, ByteGroupReadState, ByteGroupTransformState, ForwardReader,
-        RansStateBuffer, RansThreeLaneReader, TableBuild, VertexAttributeDriverError,
-        VertexAttributeDriverState, VertexAttributeWriterLoopError, VertexAttributeWriterLoopStep,
-        VertexAttributeWriterTable, VertexAttributeWriterTarget, VertexMatchTableSpec,
-        VertexMatchTableState,
+        byte_group_read, decode_raw_window, decode_zstd_window, decode_zstd_window_with_history,
+        parse_sub_block_header, parse_super_block_trailer, state0_table_builder,
+        vertex_attribute_driver_setup, vertex_attribute_writer_loop_step,
+        vertex_kernel_state4_entry, vertex_match_table, ByteGroupReadSpec, ByteGroupReadState,
+        ByteGroupTransformState, ForwardReader, RansStateBuffer, RansThreeLaneReader, TableBuild,
+        VertexAttributeDriverError, VertexAttributeDriverState, VertexAttributeWriterLoopError,
+        VertexAttributeWriterLoopStep, VertexAttributeWriterTable, VertexAttributeWriterTarget,
+        VertexMatchTableSpec, VertexMatchTableState,
     },
-    read_mc, read_mesh_section,
+    read_mc, read_mesh_section, MeshSection,
 };
+use nx_layout_toolbox::meshopt;
 use serde_json::Value;
+
+const MESH_INFO_LEN: usize = 0x120;
 
 struct FixtureCase {
     label: &'static str,
@@ -70,7 +74,256 @@ fn bufgroups_from_payload_report_first_diff_for_all_fixtures() {
     }
 }
 
+#[test]
+#[ignore = "requires gitignored MeshCodec oracle captures in local-assets/re"]
+fn assembled_mesh_layout_from_payload_matches_oracle_for_all_fixtures() {
+    for case in FIXTURES {
+        assert_assembled_mesh_layout_matches(case);
+    }
+}
+
+struct CaseInput {
+    mc: nx_layout_toolbox::mc::McFile,
+    section: MeshSection,
+    payload: Vec<u8>,
+    oracle_buf_b: Vec<u8>,
+}
+
+struct VertexBufBDecode {
+    bytes: Vec<u8>,
+    byte_group_len: usize,
+    after_vertex: ByteGroupReadState,
+}
+
+struct IndexDecodeState {
+    buf_a: Vec<u8>,
+    code: Vec<u8>,
+    data: Vec<u8>,
+    code_off: usize,
+    data_off: usize,
+}
+
 fn assert_byte_group_from_payload_matches(case: &FixtureCase) {
+    let input = load_case_input(case);
+    let decoded =
+        decode_buf_b_from_payload(case, &input.section, &input.payload, &input.oracle_buf_b);
+    eprintln!(
+        "{} from-payload full bufB matched oracle: {} byte-group + {} tail = {}/{} bytes",
+        case.label,
+        decoded.byte_group_len,
+        decoded.bytes.len() - decoded.byte_group_len,
+        decoded.bytes.len(),
+        input.oracle_buf_b.len()
+    );
+}
+
+fn assert_assembled_mesh_layout_matches(case: &FixtureCase) {
+    let input = load_case_input(case);
+    let decoded_b =
+        decode_buf_b_from_payload(case, &input.section, &input.payload, &input.oracle_buf_b);
+    let mut index_state = decode_index_streams(&input.section, &input.payload)
+        .unwrap_or_else(|error| panic!("{} index stream decode failed: {error}", case.label));
+    let next_fwd = append_later_index_subblocks(
+        case,
+        &input.section,
+        &input.payload,
+        &decoded_b.after_vertex,
+        &mut index_state,
+    )
+    .unwrap_or_else(|error| panic!("{} later index decode failed: {error}", case.label));
+
+    if let Some(tail) = case.tail {
+        assert_eq!(next_fwd, tail.fwd_pos, "{} state-2 tail cursor", case.label);
+    }
+
+    let buf_a_size = input.section.buf_a_size as usize;
+    assert!(
+        index_state.buf_a.len() <= buf_a_size,
+        "{} decoded bufA {} exceeds section size {buf_a_size}",
+        case.label,
+        index_state.buf_a.len()
+    );
+    index_state.buf_a.resize(buf_a_size, 0);
+
+    let oracle_path = Path::new("local-assets")
+        .join("mesh-codec-output")
+        .join(case.model.strip_suffix(".mc").expect("oracle model suffix"));
+    let oracle =
+        fs::read(&oracle_path).unwrap_or_else(|e| panic!("read {}: {e}", oracle_path.display()));
+    let bfres = extract(&input.mc).expect("extract leading BFRES");
+    let real_size = bfres.len();
+    assert_eq!(
+        &oracle[..real_size],
+        bfres.as_slice(),
+        "{} leading BFRES prefix",
+        case.label
+    );
+
+    let mesh_info = mesh_info_header(real_size, input.mc.decompressed_size());
+    let info_start = real_size;
+    let info_end = info_start + MESH_INFO_LEN;
+    assert_eq!(
+        &oracle[info_start..info_end],
+        mesh_info.as_slice(),
+        "{} mesh info header",
+        case.label
+    );
+
+    let buf_a_start = info_end;
+    let buf_b_start = align_up(buf_a_start + buf_a_size, input.section.align_b as usize);
+    let mut assembled = Vec::with_capacity(input.mc.decompressed_size());
+    assembled.extend_from_slice(&bfres);
+    assembled.extend_from_slice(&mesh_info);
+    assembled.extend_from_slice(&index_state.buf_a);
+    assembled.resize(buf_b_start, 0);
+    assembled.extend_from_slice(&decoded_b.bytes);
+    assembled.resize(input.mc.decompressed_size(), 0);
+
+    let first = first_diff(&assembled, &oracle);
+    if let Some(offset) = first {
+        eprintln!(
+            "{} assembled layout first-diff offset {offset} (0x{offset:x}): got 0x{:02x}, oracle 0x{:02x}",
+            case.label, assembled[offset], oracle[offset]
+        );
+        panic!(
+            "{} assembled [info][bufA][bufB]+pad mismatch at offset {offset} (0x{offset:x})",
+            case.label
+        );
+    }
+
+    eprintln!(
+        "{} from-payload assembled layout matched oracle: {} bytes",
+        case.label,
+        assembled.len()
+    );
+}
+
+fn decode_index_streams(section: &MeshSection, payload: &[u8]) -> Result<IndexDecodeState, String> {
+    let sub_a = section.first_chunk.sub_a_size as usize;
+    let (trailer0, trailer1, pos) = parse_super_block_trailer(payload);
+    if (trailer0, trailer1) != (0, 0) {
+        return Err(format!(
+            "unexpected super-block trailer ({trailer0},{trailer1})"
+        ));
+    }
+
+    let mut fwd = ForwardReader::new(payload, pos);
+    let _sub_block_count = fwd.varint();
+    let header =
+        parse_sub_block_header(&mut fwd).ok_or_else(|| "empty first sub-block".to_string())?;
+    let table = state0_table_builder(payload, fwd.pos, sub_a.wrapping_sub(8), 0, 0, 0);
+    let (code, after_code) = decode_zstd_window(payload, table.fwd)
+        .map_err(|error| format!("index code zstd window: {error:?}"))?;
+    let (data, after_data) = decode_raw_window(payload, after_code);
+    fwd.pos = after_data;
+
+    let mut state = IndexDecodeState {
+        buf_a: Vec::new(),
+        code,
+        data,
+        code_off: 0,
+        data_off: 0,
+    };
+    append_index_subblock_body(section.align_a, &header, &mut fwd, &mut state)?;
+    Ok(state)
+}
+
+fn append_later_index_subblocks(
+    case: &FixtureCase,
+    section: &MeshSection,
+    payload: &[u8],
+    after_vertex: &ByteGroupReadState,
+    state: &mut IndexDecodeState,
+) -> Result<usize, String> {
+    let mut fwd = ForwardReader::new(payload, after_vertex.stream_pos);
+    let Some(header) = parse_sub_block_header(&mut fwd) else {
+        return Ok(fwd.pos);
+    };
+
+    let table = state0_table_builder(
+        payload,
+        fwd.pos,
+        after_vertex.reader.ptr,
+        after_vertex.reader.acc,
+        after_vertex.reader.bitpos,
+        0,
+    );
+    let mut body_fwd = ForwardReader::new(payload, table.fwd);
+    append_index_subblock_body(section.align_a, &header, &mut body_fwd, state)?;
+
+    eprintln!(
+        "{} later index sub-block matched local decode: count={} cursor P+{}",
+        case.label, header.count, body_fwd.pos
+    );
+    Ok(body_fwd.pos)
+}
+
+fn append_index_subblock_body(
+    align_a: u8,
+    header: &nx_layout_toolbox::mc::geometry::SubBlockHeader,
+    fwd: &mut ForwardReader,
+    state: &mut IndexDecodeState,
+) -> Result<(), String> {
+    for index in 0..header.count {
+        let count = if index == 0 {
+            header.f
+        } else {
+            let _nibble = fwd
+                .byte()
+                .ok_or_else(|| "truncated transform-loop nibble".to_string())?;
+            let _v20 = fwd.varint();
+            let v28 = fwd.varint();
+            let _v4 = fwd.varint();
+            v28
+        } as usize;
+        append_index_submesh(align_a, count, state)?;
+    }
+    Ok(())
+}
+
+fn append_index_submesh(
+    align_a: u8,
+    count: usize,
+    state: &mut IndexDecodeState,
+) -> Result<(), String> {
+    let align_a = (align_a as usize).max(1);
+    while !state.buf_a.len().is_multiple_of(align_a) {
+        state.buf_a.push(0);
+    }
+
+    let (out, code_used, data_used) = meshopt::decode_index_buffer_split_used(
+        count,
+        2,
+        &state.code[state.code_off..],
+        &state.data[state.data_off..],
+        0,
+    )
+    .map_err(|error| format!("index decode count {count}: {error:?}"))?;
+    state.code_off += code_used;
+    state.data_off += data_used;
+    state.buf_a.extend_from_slice(&out);
+    Ok(())
+}
+
+fn mesh_info_header(real_size: usize, decompressed_size: usize) -> [u8; MESH_INFO_LEN] {
+    let mut info = [0u8; MESH_INFO_LEN];
+    let buf_a_offset = real_size + MESH_INFO_LEN;
+    info[0..4].copy_from_slice(&(buf_a_offset as u32).to_le_bytes());
+    info[4..8].copy_from_slice(&(decompressed_size as u32).to_le_bytes());
+    info
+}
+
+fn align_up(value: usize, align: usize) -> usize {
+    let align = align.max(1);
+    let rem = value % align;
+    if rem == 0 {
+        value
+    } else {
+        value + align - rem
+    }
+}
+
+fn load_case_input(case: &FixtureCase) -> CaseInput {
     let bytes = fs::read(case.fixture).unwrap_or_else(|e| {
         panic!(
             "read {}: {e}; run ignored test only with local fixtures present",
@@ -89,6 +342,30 @@ fn assert_byte_group_from_payload_matches(case: &FixtureCase) {
     let writer_json = json_file("vertex_writer_loop_capture.json");
     let writer_capture = model_row(&writer_json, case.model);
     let oracle = hex_bytes(str_field(writer_capture, "bufB_hex"));
+    assert_eq!(
+        payload,
+        hex_bytes(str_field(writer_capture, "payload_hex")).as_slice(),
+        "{} fixture payload must match the captured oracle",
+        case.label
+    );
+    let payload = payload.to_vec();
+
+    CaseInput {
+        mc,
+        section,
+        payload,
+        oracle_buf_b: oracle,
+    }
+}
+
+fn decode_buf_b_from_payload(
+    case: &FixtureCase,
+    section: &MeshSection,
+    payload: &[u8],
+    oracle: &[u8],
+) -> VertexBufBDecode {
+    let writer_json = json_file("vertex_writer_loop_capture.json");
+    let writer_capture = model_row(&writer_json, case.model);
     assert_eq!(
         payload,
         hex_bytes(str_field(writer_capture, "payload_hex")).as_slice(),
@@ -231,6 +508,7 @@ fn assert_byte_group_from_payload_matches(case: &FixtureCase) {
             "{} zstd tail bytes",
             case.label
         );
+        out[byte_group_len..byte_group_len + decoded_tail.len()].copy_from_slice(&decoded_tail);
         eprintln!(
             "{} from-payload bufB zstd tail matched oracle: {}/{} bytes",
             case.label,
@@ -244,6 +522,26 @@ fn assert_byte_group_from_payload_matches(case: &FixtureCase) {
             "{} should not have a direct zstd tail",
             case.label
         );
+    }
+
+    let first = first_diff(&out, oracle);
+    if let Some(offset) = first {
+        let addr = writers[offset].unwrap_or_else(|| fallback_writer_for_offset(offset, &steps));
+        eprintln!(
+            "{} from-payload full bufB first-diff offset {offset} (0x{offset:x}) \
+             responsible {addr}: got 0x{:02x}, oracle 0x{:02x}",
+            case.label, out[offset], oracle[offset]
+        );
+        panic!(
+            "{} from-payload full bufB mismatch at offset {offset} (0x{offset:x}), responsible {addr}",
+            case.label
+        );
+    }
+
+    VertexBufBDecode {
+        bytes: out,
+        byte_group_len,
+        after_vertex: driver.byte_state,
     }
 }
 
