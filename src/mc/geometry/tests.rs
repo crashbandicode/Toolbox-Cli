@@ -3779,6 +3779,68 @@ fn vertex_attribute_interstage_dispatch17_copy3_source() {
     );
 }
 
+/// Interstage source setup/materialization for dispatch 19.
+///
+/// Provenance: `phase1_direction_zero_writer_loop_capture.json` from
+/// `capture_vertex_writer_loop.py`, Animal_Shell_B.Shell_B row 0: dispatch 19
+/// selects setup `0x10fc4b0`, descriptor `(w2=0,w3=6,w4=25)`, and writer
+/// `0x10fc870`. This is the DirectionZero-only six-byte fixed-copy target.
+#[test]
+fn vertex_attribute_interstage_dispatch19_copy6_source() {
+    let mut payload = vec![0u8; 21];
+    payload[9..21].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    let mut state = ByteGroupReadState {
+        reader: RansThreeLaneReader {
+            ptr: 1,
+            acc: (19u64 << 57) | (3u64 << 55),
+            bitpos: 57,
+        },
+        mode1_extra_readers: [zero_three_lane_reader(); 2],
+        stream_pos: 9,
+        segment_state: RansStateBuffer::cold(),
+        selector2_history: Vec::new(),
+    };
+
+    let interstage = vertex_attribute_interstage_sources(
+        &mut state,
+        &payload,
+        ByteGroupTransformTableEntry { raw: 0x0600_100b },
+        2,
+    )
+    .unwrap();
+
+    assert_eq!(
+        interstage,
+        VertexAttributeInterstage {
+            dispatch: 19,
+            writer: VertexAttributeWriterTarget::Copy6,
+            descriptors: vec![VertexAttributeSourceDescriptor {
+                element_shift: 0,
+                group_stride: 6,
+                count: 2,
+            }],
+            sources: vec![VertexAttributeSource {
+                selector: 3,
+                bytes: hex_bytes("0102030405060708090a0b0c"),
+            }],
+        }
+    );
+    assert_eq!(
+        state,
+        ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 0,
+                acc: 0,
+                bitpos: 56,
+            },
+            mode1_extra_readers: [zero_three_lane_reader(); 2],
+            stream_pos: 21,
+            segment_state: RansStateBuffer::cold(),
+            selector2_history: Vec::new(),
+        }
+    );
+}
+
 /// Interstage source setup/materialization for dispatch 29.
 ///
 /// Provenance: `capture_phase1_dispatch_29_interstage.py`,
@@ -5402,6 +5464,73 @@ fn vertex_attribute_writer_dispatch_copy3() {
     assert_eq!(&out[24..27], &hex_bytes("070809"));
     assert_eq!(&out[36..39], &hex_bytes("070809"));
     assert_eq!(out[3], 0xee, "writer must keep the table stride");
+}
+
+/// Writer-table dispatch (`0x10f93d8`) into `0x10fc870`.
+///
+/// Provenance: `phase1_direction_zero_writer_loop_capture.json` from
+/// `capture_vertex_writer_loop.py`, Animal_Shell_B.Shell_B row 0. Dispatch 19
+/// maps through setup `0x10fc4b0` to the DirectionZero-only six-byte fixed-copy
+/// writer. The compact golden keeps the first three records, including the
+/// zero-literal `(0,1,144)` record; `verify_transform_tail_10fc870.py` replays
+/// the full observed population 1/1.
+#[test]
+fn vertex_attribute_writer_dispatch_shell_copy6() {
+    let transform = VertexAttributeTransform {
+        index: 0,
+        table_entry: ByteGroupTransformTableEntry { raw: 0x0600_100b },
+        out_offset: 0,
+        column: 0,
+        limit: 150,
+        ret: 25,
+        records: hex_width_records("120001001e000000040001007e0000000000010090000000"),
+    };
+    let interstage = VertexAttributeInterstage {
+        dispatch: 19,
+        writer: VertexAttributeWriterTarget::Copy6,
+        descriptors: vec![VertexAttributeSourceDescriptor {
+            element_shift: 0,
+            group_stride: 6,
+            count: 25,
+        }],
+        sources: vec![VertexAttributeSource {
+            selector: 3,
+            bytes: hex_bytes(concat!(
+                "efa5af290923eda90029462b33ab872889a47daeb5245c27ccb0b221f52f78ac43264c3046b0228bb93342ab6223ed32",
+                "68a465241e34f6aa361cfc34722ac51fbd354f2a8427a6349fa06633a4b2bd25a43449b4f829323377b242a57e31cdb0",
+                "e328c230a1b058a8a32ea4adea2b1334cbb15b28022dafae692bca3126b1efa451236ba6",
+            )),
+        }],
+    };
+    let mut out = vec![0; 150];
+
+    let usage = vertex_attribute_apply_writer(
+        &mut out,
+        VertexAttributeWriterCall {
+            transform: &transform,
+            interstage: &interstage,
+            matches: &[],
+            block_index: 0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        usage,
+        VertexAttributeWriterUsage {
+            sources: [132, 0, 0, 0],
+            match_entries: 0,
+        }
+    );
+    assert_eq!(
+        out,
+        hex_bytes(concat!(
+            "efa5af290923eda90029462b33ab872889a47daeb5245c27ccb0b221f52f78ac43264c3046b0228bb93342ab6223ed32",
+            "68a465241e34f6aa361cfc34722ac51fbd354f2a8427a6349fa06633a4b2bd25a43449b4f829323377b242a57e31cdb0",
+            "e328c230a1b058a8a32ea4adbd25a43449b4ea2b1334cbb15b28022dafae692bca3126b1efa451236ba633ab872889a4",
+            "efa5af290923",
+        ))
+    );
 }
 
 /// CP5d pre-state-4 kernel/control-bit transition.
@@ -8098,6 +8227,71 @@ fn transform_tail_copy4_allows_observed_zero_literal_and_zero_copy() {
     }
 }
 
+/// Transform tail `0x10fc870`: six-byte literals plus copy-back.
+///
+/// Provenance: `phase1_direction_zero_writer_loop_capture.json` from
+/// `capture_vertex_writer_loop.py`, Animal_Shell_B.Shell_B row 0, first three
+/// records for writer `0x10fc870`: `(18,1,30)`, `(4,1,126)`, `(0,1,144)`.
+/// The zero-literal third record is observed in DirectionZero; zero-copy is not.
+/// `verify_transform_tail_10fc870.py` replays the full observed population 1/1.
+#[test]
+fn transform_tail_copy6_shell_direction_zero_writer() {
+    let source = hex_bytes(concat!(
+        "efa5af290923eda90029462b33ab872889a47daeb5245c27ccb0b221f52f78ac43264c3046b0228bb93342ab6223ed32",
+        "68a465241e34f6aa361cfc34722ac51fbd354f2a8427a6349fa06633a4b2bd25a43449b4f829323377b242a57e31cdb0",
+        "e328c230a1b058a8a32ea4adea2b1334cbb15b28022dafae692bca3126b1efa451236ba6",
+    ));
+    let records = [
+        TransformTailRecord {
+            literal_count: 18,
+            copy_count: 1,
+            back_distance: 30,
+        },
+        TransformTailRecord {
+            literal_count: 4,
+            copy_count: 1,
+            back_distance: 126,
+        },
+        TransformTailRecord {
+            literal_count: 0,
+            copy_count: 1,
+            back_distance: 144,
+        },
+    ];
+    let expected = hex_bytes(concat!(
+        "efa5af290923eda90029462b33ab872889a47daeb5245c27ccb0b221f52f78ac43264c3046b0228bb93342ab6223ed32",
+        "68a465241e34f6aa361cfc34722ac51fbd354f2a8427a6349fa06633a4b2bd25a43449b4f829323377b242a57e31cdb0",
+        "e328c230a1b058a8a32ea4adbd25a43449b4ea2b1334cbb15b28022dafae692bca3126b1efa451236ba633ab872889a4",
+        "efa5af290923",
+    ));
+    let mut out = vec![0; expected.len()];
+
+    let consumed = transform_tail_copy6_into(
+        &mut out,
+        TransformTailCopy6Spec {
+            output_stride: 6,
+            block_index: 0,
+            out_offset: 0,
+            records: &records,
+            source: &source,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(consumed, 132);
+    assert_eq!(out, expected);
+    assert_eq!(
+        &out[108..114],
+        &out[78..84],
+        "first copy uses byte distance"
+    );
+    assert_eq!(
+        &out[144..150],
+        &out[0..6],
+        "zero-literal copy remains active"
+    );
+}
+
 /// Transform tail `0x10fc920`: eight-byte literals plus copy-back.
 ///
 /// Provenance: `capture_phase1_transform_tail_10fc920.py`,
@@ -10067,6 +10261,95 @@ fn transform_tail_copy4_rejects_malformed_inputs() {
             },
         ),
         Err(TransformTailCopyError::CopyBeforeOutput)
+    );
+}
+
+#[test]
+fn transform_tail_copy6_rejects_unobserved_and_malformed_inputs() {
+    let records = [TransformTailRecord {
+        literal_count: 1,
+        copy_count: 1,
+        back_distance: 6,
+    }];
+    let mut out = [0u8; 12];
+    assert_eq!(
+        transform_tail_copy6_into(
+            &mut out,
+            TransformTailCopy6Spec {
+                output_stride: 0,
+                block_index: 0,
+                out_offset: 0,
+                records: &records,
+                source: &[1, 2, 3, 4, 5, 6],
+            },
+        ),
+        Err(TransformTailCopyError::ZeroStride)
+    );
+    assert_eq!(
+        transform_tail_copy6_into(
+            &mut out,
+            TransformTailCopy6Spec {
+                output_stride: 6,
+                block_index: 0,
+                out_offset: 0,
+                records: &records,
+                source: &[1, 2, 3, 4, 5],
+            },
+        ),
+        Err(TransformTailCopyError::SourceTooSmall)
+    );
+
+    let mut short_out = [0u8; 5];
+    assert_eq!(
+        transform_tail_copy6_into(
+            &mut short_out,
+            TransformTailCopy6Spec {
+                output_stride: 6,
+                block_index: 0,
+                out_offset: 0,
+                records: &records,
+                source: &[1, 2, 3, 4, 5, 6],
+            },
+        ),
+        Err(TransformTailCopyError::OutputTooSmall)
+    );
+
+    let copy_before = [TransformTailRecord {
+        literal_count: 1,
+        copy_count: 1,
+        back_distance: 12,
+    }];
+    assert_eq!(
+        transform_tail_copy6_into(
+            &mut out,
+            TransformTailCopy6Spec {
+                output_stride: 6,
+                block_index: 0,
+                out_offset: 0,
+                records: &copy_before,
+                source: &[1, 2, 3, 4, 5, 6],
+            },
+        ),
+        Err(TransformTailCopyError::CopyBeforeOutput)
+    );
+
+    let zero_copy = [TransformTailRecord {
+        literal_count: 1,
+        copy_count: 0,
+        back_distance: 0,
+    }];
+    assert_eq!(
+        transform_tail_copy6_into(
+            &mut out,
+            TransformTailCopy6Spec {
+                output_stride: 6,
+                block_index: 0,
+                out_offset: 0,
+                records: &zero_copy,
+                source: &[1, 2, 3, 4, 5, 6],
+            },
+        ),
+        Err(TransformTailCopyError::UnobservedRecordShape)
     );
 }
 

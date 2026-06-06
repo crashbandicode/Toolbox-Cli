@@ -643,6 +643,47 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec DirectionZero dispatch 19 Copy6 prerequisite
+**Committed:** DirectionZero successor work is now allowed by the user, so the
+first UPDATE 69 writer prerequisite landed: dispatch 19 maps through setup
+`0x10fc4b0` to the six-byte fixed-copy writer `0x10fc870`. The Rust port adds
+`TransformTailCopy6Spec`, `transform_tail_copy6_into`, `Copy6` writer dispatch
+wiring, and integration-helper address/unit-size mappings.
+
+Durable evidence: `local-assets/re/FINDINGS.md` UPDATE 71 records the
+enumerate-all population from
+`local-assets/re/phase1_direction_zero_writer_loop_capture.json`: Shell has the
+single observed `0x10fc870` row with stride 6, 31 records, 130 direct units, 32
+copy units, 12 zero-literal records, zero zero-copy records, and 780 consumed
+source bytes. `verify_transform_tail_10fc870.py` replays **1/1** and proves the
+wrong-width-four and no-copy variants fail **1/1**.
+
+Fixture-free coverage: `transform_tail_copy6_shell_direction_zero_writer`
+hardcodes the compact Shell prefix `(18,1,30)`, `(4,1,126)`, `(0,1,144)` with
+inline source/output bytes; `transform_tail_copy6_rejects_unobserved_and_malformed_inputs`
+guards zero-stride, truncated source, undersized output, copy-before-output, and
+unobserved zero-copy; `vertex_attribute_interstage_dispatch19_copy6_source` and
+`vertex_attribute_writer_dispatch_shell_copy6` cover the setup and writer
+pipeline.
+
+Ignored corpus sweep still fails structurally by design: **12,395 seen; 278
+no-FMSH/no mesh; 320 decoded clean; 11,797 failures; 151 distinct failure
+classes**. The state-4 head class remains
+`0x10f90d4 state-4 entry: UnobservedDirectionZeroDirectPath` at **2,635**
+because the guard is still in place. Downstream depth moved from writer-loop
+2,406 to **2,404**, tail from 900 to **901**, and index-decode remains
+**1,231**.
+
+Verification: `cargo test --lib copy6` passed 4/4;
+`python local-assets/re/verify_transform_tail_10fc870.py` passed 1/1;
+`python local-assets/re/verify_vertex_writer_loop.py` remains 25/25; ignored
+corpus sweep printed the counts above and failed by design. Full gate:
+`All green: 311 lib unit (incl. 164 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Next: continue DirectionZero prerequisites from UPDATE 69, likely one of
+`0x1106250`, `0x110aba0`, or `0x1108550`, before lifting the state-4
+DirectionZero guard.
+
 ### 2026-06-06 - MeshCodec P1-HARDEN split-index varbyte panic
 **Committed:** P1-HARDEN closes the 34-model decoder panic bucket. The root
 cause was the MeshCodec split index decoder calling `decode_vbyte_checked`,
