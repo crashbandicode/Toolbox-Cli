@@ -93,6 +93,8 @@ pub enum VertexKernelStateError {
     UnobservedWindowFlag { window: &'static str, flag: u8 },
     /// The second-submesh continuation selected an unobserved leaf.
     UnobservedContinuationModeKind { mode: u8, kind: u8 },
+    /// Branch-clear direction-zero leaves run more state-machine work before state 4.
+    UnobservedDirectionZeroDirectPath,
     /// Current captures cover a single pre-state-4 index leaf.
     UnobservedMultipleIndexLeaves,
     /// Current captures cover one submesh in the skipped index leaf.
@@ -365,9 +367,9 @@ pub fn vertex_kernel_state4_entry(
     let mut bits = Vec::new();
     let decision = take_vertex_kernel_decision_bit(payload, &mut state.reader, reverse_mode)?;
     bits.push(decision);
-    if decision != 0 {
-        return Err(VertexKernelStateError::UnobservedDecisionBit(decision));
-    }
+    // `0x10f910c..0x10f9124` allocates scratch for decision bit 1 before the
+    // same first kernel call. The scratch pointer is stored at `ctx+0x220` and
+    // later freed; it is not part of the `0x11104d0` reader/cursor contract.
 
     let code_window = read_vertex_kernel_window(payload, state, &mut bits, "code", 0)?;
     let first_unary = take_vertex_kernel_unary(payload, &mut state.reader)?;
@@ -455,12 +457,16 @@ pub fn vertex_kernel_state4_entry_from_table(
 ) -> Result<VertexKernelState4Entry, VertexKernelStateError> {
     if spec.first_table.branch_bit == 0 {
         apply_state0_table_to_byte_state(spec.first_table, state);
-        return vertex_kernel_state4_entry(
+        let entry = vertex_kernel_state4_entry(
             payload,
             state,
             spec.first_header.count as usize,
             spec.reverse_mode,
-        );
+        )?;
+        if spec.first_table.dir_bit == 0 {
+            return Err(VertexKernelStateError::UnobservedDirectionZeroDirectPath);
+        }
+        return Ok(entry);
     }
     apply_state0_table_to_state3_byte_state(spec.first_table, state)?;
 

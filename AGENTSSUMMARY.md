@@ -643,6 +643,42 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec P1-HEAD-1 direct DecisionBit(1)
+**Committed:** P1-HEAD-1 now accepts the direct-path decision bit 1 cursor when
+the branch-clear table has `direction=1`, while guarding the observed
+direction-zero direct path. This is a cursor/state4-contract port only; it does
+not claim the first-kernel scratch output.
+
+Durable evidence: `capture_phase1_decision_bit1.py` captured three
+representatives from the new head class. `verify_phase1_decision_bit1.py`
+replays them as **1 supported state4 cursor + 1 direction-zero guard + 1
+data-flag0 guard**. The supported Armor_005 path reaches `0x11104d0` at
+`P+17512/0x431c06f02d79fe3e/61`, stream `P+1182`. Armor_009 proves a
+successful first leaf with `direction=0` does not immediately enter state4, and
+Armor_017 proves decision bit 1 can expose the still-unported data-window flag
+0 path.
+
+Rust summary: `vertex_kernel_state4_entry` no longer rejects direct
+`DecisionBit(1)`. `vertex_kernel_state4_entry_from_table` now rejects
+`UnobservedDirectionZeroDirectPath` after replaying a successful direct leaf when
+`dir_bit == 0`, so it does not falsely claim a state4 entry. Fixture-free
+goldens `vertex_kernel_state4_entry_decision_bit1_direct_scratch_cursor` and
+`vertex_kernel_state4_entry_direction_zero_direct_path_is_guarded` cover both
+the supported and guarded branches.
+
+Verification: `python local-assets/re/verify_phase1_decision_bit1.py` passed;
+`cargo test --lib mc::geometry::tests::vertex_kernel_state4_entry` passed 6/6;
+ignored `mc_vertex_decode_oracle` passed 2/2. Full gate:
+`All green: 303 lib unit (incl. 157 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Ignored corpus sweep still fails by design with **12,395 seen; 278 no-FMSH/no
+mesh; 315 decoded clean; 11,802 failures**. `UnobservedDecisionBit(1)` dropped
+from 2,098 to **13**. New head: `UnobservedWindowFlag { window: "data", flag:
+0 }` at **2,886**, then `UnobservedFirstLeafUnary(0)` at **1,539** and
+`0x10f90d4 state-4 entry: UnobservedDirectionZeroDirectPath` at **1,205**.
+
+Next: P1-HEAD-2 direct data-window flag 0. Do not touch dispatch tails.
+
 ### 2026-06-06 - MeshCodec P1-HEAD-1 branch bit vs direction bit
 **Committed:** P1-HEAD-1 now distinguishes the state-branch bit tested at
 `0x10f900c` from the trailing direction bit stored at `ctx+0x118`. This is a

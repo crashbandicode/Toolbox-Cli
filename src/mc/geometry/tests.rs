@@ -5695,6 +5695,163 @@ fn vertex_kernel_state4_entry_count2_direction_zero_uses_direct_branch() {
     );
 }
 
+/// P1-HEAD-1 direct `DecisionBit(1)` path at `0x10f90d4..0x10f9128`.
+///
+/// Provenance: `capture_phase1_decision_bit1.py`,
+/// `Armor_005.Armor_005_Head.bfres.mc`. The decision bit is 1, so
+/// `0x10f9114..0x10f9124` allocates scratch for the first
+/// `0x10f9690 -> 0x10fa980` call. The scratch pointer is stored at
+/// `ctx+0x220` and later freed; the reader/cursor transition into
+/// `0x11104d0` still follows the same code-window, unary, and data-window
+/// sequence as the decision-0 fixtures.
+#[test]
+fn vertex_kernel_state4_entry_decision_bit1_direct_scratch_cursor() {
+    let payload = sparse_payload(
+        17522,
+        &[(15, "883e"), (1103, "4e"), (17512, "bca0e3fff09f01f0c73f")],
+    );
+    let first_header = SubBlockHeader {
+        count: 1,
+        a: 1,
+        b: 0,
+        c: 1,
+        d: 4935,
+        e: 0,
+        f: 4935,
+    };
+    let first_table = TableBuild {
+        fwd: 15,
+        rev_ptr: 17514,
+        rev_acc: 0x9a18_e037_816b_c000,
+        rev_bitpos: 50,
+        w8: 1532,
+        symbols: 8,
+        branch_bit: 0,
+        dir_bit: 1,
+        entries: Vec::new(),
+        offsets: Vec::new(),
+        cols: Vec::new(),
+        longs: Vec::new(),
+        byte_group_total: 0,
+        max_prod: 0,
+    };
+    let mut state = byte_group_state(
+        RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        },
+        0,
+    );
+
+    let entry = vertex_kernel_state4_entry_from_table(
+        &payload,
+        &mut state,
+        VertexKernelState4EntrySpec {
+            first_header,
+            first_table: &first_table,
+            remaining_subblocks: 23,
+            reverse_mode: u32::MAX,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(entry.bits, vec![1, 0, 0, 1, 1]);
+    assert_eq!(
+        entry.code_window,
+        VertexKernelWindow {
+            flag: 0,
+            src_start: 17,
+            src_size: 1086,
+            next_stream_pos: 1103,
+        }
+    );
+    assert_eq!(
+        entry.data_window,
+        VertexKernelWindow {
+            flag: 1,
+            src_start: 1104,
+            src_size: 78,
+            next_stream_pos: 1182,
+        }
+    );
+    assert_eq!(
+        (entry.reader, entry.stream_pos),
+        (
+            RansThreeLaneReader {
+                ptr: 17512,
+                acc: 0x431c_06f0_2d79_fe3e,
+                bitpos: 61,
+            },
+            1182,
+        )
+    );
+    assert_eq!(state.reader, entry.reader);
+    assert_eq!(state.stream_pos, entry.stream_pos);
+}
+
+/// Direction-zero branch-clear tables run the first kernel leaf but do not
+/// immediately enter `0x11104d0`.
+///
+/// Provenance: `capture_phase1_decision_bit1.py`,
+/// `Armor_009.Armor_009_Head.bfres.mc`. The first leaf is otherwise shaped like
+/// the direct state4 fixtures, but `ctx+0x118 == 0` sends the disassembly from
+/// `0x10f9180..0x10f9184` to the non-state4 path at `0x10f9220`.
+#[test]
+fn vertex_kernel_state4_entry_direction_zero_direct_path_is_guarded() {
+    let payload = sparse_payload(
+        23846,
+        &[(15, "895d"), (1262, "50"), (23836, "8000bdade870dbbaa87c")],
+    );
+    let first_header = SubBlockHeader {
+        count: 1,
+        a: 1,
+        b: 0,
+        c: 1,
+        d: 1767,
+        e: 0,
+        f: 1767,
+    };
+    let first_table = TableBuild {
+        fwd: 15,
+        rev_ptr: 23838,
+        rev_acc: 0x9bb2_cb50_254c_7000,
+        rev_bitpos: 48,
+        w8: 584,
+        symbols: 6,
+        branch_bit: 0,
+        dir_bit: 0,
+        entries: Vec::new(),
+        offsets: Vec::new(),
+        cols: Vec::new(),
+        longs: Vec::new(),
+        byte_group_total: 0,
+        max_prod: 0,
+    };
+    let mut state = byte_group_state(
+        RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        },
+        0,
+    );
+
+    assert_eq!(
+        vertex_kernel_state4_entry_from_table(
+            &payload,
+            &mut state,
+            VertexKernelState4EntrySpec {
+                first_header,
+                first_table: &first_table,
+                remaining_subblocks: 42,
+                reverse_mode: u32::MAX,
+            },
+        ),
+        Err(VertexKernelStateError::UnobservedDirectionZeroDirectPath)
+    );
+}
+
 #[test]
 fn vertex_kernel_state4_entry_rejects_malformed_inputs() {
     let mut state = byte_group_state(
@@ -5707,7 +5864,7 @@ fn vertex_kernel_state4_entry_rejects_malformed_inputs() {
     );
     assert_eq!(
         vertex_kernel_state4_entry(&[0; 8], &mut state, 1, u32::MAX),
-        Err(VertexKernelStateError::UnobservedDecisionBit(1))
+        Err(VertexKernelStateError::PayloadTooSmall)
     );
 
     let mut state = byte_group_state(
