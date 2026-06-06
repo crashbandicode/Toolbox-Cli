@@ -567,6 +567,8 @@ pub enum VertexAttributeWriterTarget {
     Copy8,
     /// `0x1101230`.
     U8PreviousDelta,
+    /// `0x1101410`.
+    U8x3PreviousDelta,
     /// `0x10fbcc0`.
     Delta2,
     /// `0x10fbdc0`.
@@ -1134,9 +1136,10 @@ fn vertex_attribute_source_descriptors(
         }
         // `0x11010b0`: one descriptor with element shift `rounded-1`
         // (`0x11010b0..0x11010cc`).
-        61 | 67 => {
+        61 | 63 | 67 => {
             let writer = match dispatch {
                 61 => VertexAttributeWriterTarget::U8PreviousDelta,
+                63 => VertexAttributeWriterTarget::U8x3PreviousDelta,
                 67 => VertexAttributeWriterTarget::U16x2PreviousDelta,
                 _ => unreachable!(),
             };
@@ -1407,6 +1410,21 @@ pub fn vertex_attribute_apply_writer(
             transform_tail_u8_previous_delta_into(
                 out,
                 TransformTailU8PreviousDeltaSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    source0,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::U8x3PreviousDelta => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            transform_tail_u8x3_previous_delta_into(
+                out,
+                TransformTailU8x3PreviousDeltaSpec {
                     output_stride,
                     block_index: spec.block_index,
                     out_offset,

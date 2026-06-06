@@ -643,6 +643,40 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-14 dispatch 63 writer `0x1101410`
+**Committed:** P1-14 ports dispatch 63's writer target `0x1101410` as the
+three-byte seed/previous-delta tail. Static table slot 63 uses the one-source
+setup `0x11010b0`; the port maps it through the same setup family as
+dispatches 61/67 and wires the writer-table call to
+`transform_tail_u8x3_previous_delta_into`.
+
+Durable evidence: the pre-port model-corpus sweep showed 67 dispatch-63
+paths. `local-assets/re/capture_phase1_dispatch_63_interstage.py` captured
+seven representatives spanning writer-loop indices 3/4/5, strides 12/16/20,
+and descriptor counts 83..703; all dispatch-63 rows used setup `0x11010b0`,
+writer `0x1101410`, one source, and descriptor `(0,3,count)`.
+`local-assets/re/capture_phase1_transform_tail_1101410.py` captured seven
+writer calls; `verify_transform_tail_1101410.py` replays **7/7** with 7 seed
+literals, 2,161 previous-row delta literals, 1,165 copy units, 3,333 emitted
+units, and 6,504 source0 bytes. Discriminators no-seed, no-previous-delta, and
+no-copy all fail 7/7. FINDINGS UPDATE 59 records the capture, replay, and
+disassembly-citation details.
+
+Verification: `cargo test --lib u8x3_previous_delta` passed 4/4; `cargo test
+--lib vertex_attribute` passed 27/27; `cargo test --lib transform_tail` passed
+49/49; `cargo test --lib mc::geometry` passed 138/138; `cargo test` passed the
+full suite; `cargo clippy --all-targets` is clean; `cargo build
+--no-default-features` builds. Current full gate:
+`All green: 284 lib unit (incl. 138 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2 for Bear/Bass/Dragonfly.
+
+Phase 1 re-sweep with `MC_MODEL_CORPUS` still fails by design but moved the
+coverage curve again: **12,395 seen; 278 no-FMSH/no mesh; 295 decoded clean;
+11,822 failures**. `UnobservedDispatch(63)` is gone. Next independent
+dispatch-family ports are `UnobservedDispatch(17)` at 55,
+`UnobservedDispatch(9)` at 41, and `UnobservedDispatch(39)` at 39; the larger
+kernel decision/window branches from FINDINGS UPDATE 47 still dominate.
+
 ### 2026-06-05 - MeshCodec P1-13 dispatch 79 writer `0x1103840`
 **Committed:** P1-13 ports dispatch 79's writer target `0x1103840` as the
 packed 10-10-10 seed/previous/matched delta tail. Static table slot 79 uses

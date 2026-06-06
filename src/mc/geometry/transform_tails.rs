@@ -37,6 +37,20 @@ pub struct TransformTailU8PreviousDeltaSpec<'a> {
     pub source0: &'a [u8],
 }
 
+/// Inputs for the three-byte seed/previous-delta transform tail (`0x1101410`).
+pub struct TransformTailU8x3PreviousDeltaSpec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Seed and previous-row delta stream at `[x4]`.
+    pub source0: &'a [u8],
+}
+
 /// Inputs for the two-byte transform tail (`0x10fc680`).
 pub struct TransformTailCopy2Spec<'a> {
     /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
@@ -1235,6 +1249,95 @@ pub fn transform_tail_u8_previous_delta_into(
             &mut cursor,
             spec.output_stride,
             1,
+            record.back_distance,
+            record.copy_count,
+        )?;
+
+        written = written
+            .checked_add(usize::from(record.copy_count))
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    }
+
+    Ok(TransformTailDeltaUsage {
+        source0: source0_pos,
+        source1: 0,
+        source2: 0,
+        match_entries: 0,
+    })
+}
+
+/// Apply the observed three-byte seed/previous delta tail (`0x1101410`).
+///
+/// The first emitted literal copies three source0 bytes directly
+/// (`0x11014b0..0x11014bc`). Later literals add three source0 byte deltas to
+/// the immediately previous output row (`0x1101460..0x1101494`). Copy runs
+/// clone three bytes by the record byte distance (`0x11014e0..0x1101510`).
+/// The match table at `[x0+0x10]` is not loaded by this writer.
+pub fn transform_tail_u8x3_previous_delta_into(
+    out: &mut [u8],
+    spec: TransformTailU8x3PreviousDeltaSpec<'_>,
+) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
+    let mut written = 0usize;
+    let mut source0_pos = 0usize;
+
+    for record in spec.records {
+        for _ in 0..record.literal_count {
+            let cursor_end = cursor
+                .checked_add(3)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let source0_end = source0_pos
+                .checked_add(3)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let bytes = spec
+                .source0
+                .get(source0_pos..source0_end)
+                .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+            if written == 0 {
+                let slot = out
+                    .get_mut(cursor..cursor_end)
+                    .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                slot.copy_from_slice(bytes);
+            } else {
+                let source = cursor
+                    .checked_sub(spec.output_stride)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let source_end = source
+                    .checked_add(3)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                if out.get(source..source_end).is_none() {
+                    return Err(TransformTailDeltaError::MatchBeforeOutput);
+                }
+                let previous = [
+                    *out.get(source)
+                        .ok_or(TransformTailDeltaError::MatchBeforeOutput)?,
+                    *out.get(source + 1)
+                        .ok_or(TransformTailDeltaError::MatchBeforeOutput)?,
+                    *out.get(source + 2)
+                        .ok_or(TransformTailDeltaError::MatchBeforeOutput)?,
+                ];
+                let slot = out
+                    .get_mut(cursor..cursor_end)
+                    .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                for lane in 0..3 {
+                    slot[lane] = previous[lane].wrapping_add(bytes[lane]);
+                }
+            }
+            source0_pos = source0_end;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            written = written
+                .checked_add(1)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        }
+
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            3,
             record.back_distance,
             record.copy_count,
         )?;
