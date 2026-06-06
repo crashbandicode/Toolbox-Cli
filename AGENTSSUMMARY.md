@@ -643,6 +643,30 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec P1-METRIC trough progress metrics
+**Committed:** P1-METRIC adds harness-only progress reporting to
+`tests/mc_vertex_decode_sweep.rs`: a distinct normalized failure-class count
+and a pipeline-depth histogram printed beside the existing sorted class table.
+No decoder logic changed.
+
+Durable evidence: `local-assets/re/FINDINGS.md` UPDATE 68 records the baseline
+trough curve from the local 12,395-model sweep. Current structural status is
+**12,395 seen; 278 no-FMSH/no mesh; 319 decoded clean; 11,798 failures; 153
+distinct failure classes**. Depth mass is now visible as: mesh-section 170,
+super-block 298, kernel-state4-entry 6,485, setup-streams `0x11104d0` 70,
+match-table `0x11106d0` 79, driver-setup `0x10fafe0` 159, writer-loop 2,406,
+tail 900, index-decode 1,197, panic 34.
+
+Verification: `cargo test --test mc_vertex_decode_sweep` passed 2/2
+non-ignored tests with the corpus sweep ignored; the ignored corpus sweep
+printed the baseline above and failed by design on the first unresolved model;
+`cargo test --test mc_vertex_decode_oracle -- --ignored --nocapture` passed 2/2.
+Full gate:
+`All green: 306 lib unit (incl. 160 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Next: P1-HEAD-5 `UnobservedDirectionZeroDirectPath` through the existing
+`0x10fafe0`/`0x10fb2e0` successor machinery. Do not drop to dispatch tails.
+
 ### 2026-06-06 - MeshCodec P1-HEAD-4 direct first-leaf unary 0
 **Committed:** P1-HEAD-4 now accepts the direct state-4 leaf shape where the
 first unary code is `1` (`clz=0`). Count-1 entries reach `0x11104d0` without a

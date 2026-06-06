@@ -49,6 +49,7 @@ fn model_corpus_decode_is_structurally_consistent() {
     let mut clean = 0usize;
     let mut failures = Vec::new();
     let mut failure_classes = BTreeMap::<String, usize>::new();
+    let mut failure_depths = BTreeMap::<PipelineDepth, usize>::new();
 
     for entry in walkdir::WalkDir::new(&root).into_iter().flatten() {
         if !entry.file_type().is_file() {
@@ -69,10 +70,14 @@ fn model_corpus_decode_is_structurally_consistent() {
             }
             Ok(Err(error)) => {
                 *failure_classes.entry(classify_failure(&error)).or_default() += 1;
+                *failure_depths
+                    .entry(classify_pipeline_depth(&error))
+                    .or_default() += 1;
                 failures.push(format!("{}: {error}", path.display()));
             }
             Err(_) => {
                 *failure_classes.entry("panic".to_string()).or_default() += 1;
+                *failure_depths.entry(PipelineDepth::Panic).or_default() += 1;
                 failures.push(format!("{}: panic", path.display()));
             }
         }
@@ -89,9 +94,8 @@ fn model_corpus_decode_is_structurally_consistent() {
         failures.len()
     );
     if !failures.is_empty() {
-        eprintln!("MeshCodec failure classes:");
-        for (class, count) in sorted_failure_classes(&failure_classes) {
-            eprintln!("  {class} -> {count}");
+        for line in format_failure_progress_report(&failure_classes, &failure_depths).lines() {
+            eprintln!("{line}");
         }
         for failure in failures.iter().take(40) {
             eprintln!("FAIL: {failure}");
@@ -226,6 +230,117 @@ fn classify_failure(error: &str) -> String {
     error.to_string()
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum PipelineDepth {
+    Container,
+    MeshSection,
+    SuperBlock,
+    State0Table,
+    KernelState4Entry,
+    SetupStreams,
+    MatchTable,
+    DriverSetup,
+    WriterLoop,
+    Tail,
+    IndexDecode,
+    Assembly,
+    Panic,
+    Unknown,
+}
+
+impl PipelineDepth {
+    fn label(self) -> &'static str {
+        match self {
+            PipelineDepth::Container => "container",
+            PipelineDepth::MeshSection => "mesh-section",
+            PipelineDepth::SuperBlock => "super-block",
+            PipelineDepth::State0Table => "state0-table",
+            PipelineDepth::KernelState4Entry => "kernel-state4-entry",
+            PipelineDepth::SetupStreams => "setup-streams 0x11104d0",
+            PipelineDepth::MatchTable => "match-table 0x11106d0",
+            PipelineDepth::DriverSetup => "driver-setup 0x10fafe0",
+            PipelineDepth::WriterLoop => "writer-loop",
+            PipelineDepth::Tail => "tail",
+            PipelineDepth::IndexDecode => "index-decode",
+            PipelineDepth::Assembly => "assembly",
+            PipelineDepth::Panic => "panic",
+            PipelineDepth::Unknown => "unknown",
+        }
+    }
+}
+
+fn classify_pipeline_depth(error: &str) -> PipelineDepth {
+    if error == "panic" {
+        return PipelineDepth::Panic;
+    }
+    if error.starts_with("read: ")
+        || error.starts_with("read_mc: ")
+        || error.starts_with("extract BFRES: ")
+    {
+        return PipelineDepth::Container;
+    }
+    if error.starts_with("FMSH: ")
+        || error.starts_with("unsupported first chunk kind ")
+        || error.contains("FMSH payload")
+        || error.contains("FMSH sub-stream")
+    {
+        return PipelineDepth::MeshSection;
+    }
+    if error.starts_with("unexpected super-block trailer")
+        || error == "empty first sub-block"
+        || error == "payload smaller than reverse-B seed"
+    {
+        return PipelineDepth::SuperBlock;
+    }
+    if error == "sub-A smaller than reverse seed" {
+        return PipelineDepth::State0Table;
+    }
+    if error.contains("0x10f90d4 state-4 entry") {
+        return PipelineDepth::KernelState4Entry;
+    }
+    if error.starts_with("0x11104d0 stream ")
+        || error.starts_with("0x11104d0 stream 3 slop ")
+        || error == "truncated MSB varint"
+        || error == "MSB varint overflow"
+        || error == "oversized MSB varint"
+    {
+        return PipelineDepth::SetupStreams;
+    }
+    if error.contains("0x11106d0 match table") {
+        return PipelineDepth::MatchTable;
+    }
+    if error.contains("0x10fafe0 setup") {
+        return PipelineDepth::DriverSetup;
+    }
+    if error.contains("state-5 writer loop") {
+        return PipelineDepth::WriterLoop;
+    }
+    if error.contains("byte-group length")
+        || error.contains("history-backed zstd tail")
+        || error.contains("tail fills through")
+        || error == "tail length overflow"
+    {
+        return PipelineDepth::Tail;
+    }
+    if error.contains("index code zstd window")
+        || error.contains("index decode count")
+        || error.contains("index stream cursor")
+        || error.contains("decoded bufA")
+        || error == "truncated transform-loop nibble"
+    {
+        return PipelineDepth::IndexDecode;
+    }
+    if error.contains("mesh info offset overflow")
+        || error.contains("bufA end overflow")
+        || error.contains("bufB end overflow")
+        || error.contains("assembled end")
+        || error.contains("MCPK decompressed size")
+    {
+        return PipelineDepth::Assembly;
+    }
+    PipelineDepth::Unknown
+}
+
 fn with_loop_context(error: &str, leaf: &str) -> String {
     if error.contains("ByteSegmentLoop(") {
         format!("ByteSegmentLoop({leaf})")
@@ -271,6 +386,33 @@ fn sorted_failure_classes(classes: &BTreeMap<String, usize>) -> Vec<(&str, usize
             .then_with(|| left_class.cmp(right_class))
     });
     sorted
+}
+
+fn sorted_failure_depths(depths: &BTreeMap<PipelineDepth, usize>) -> Vec<(PipelineDepth, usize)> {
+    depths
+        .iter()
+        .map(|(depth, count)| (*depth, *count))
+        .collect::<Vec<_>>()
+}
+
+fn format_failure_progress_report(
+    failure_classes: &BTreeMap<String, usize>,
+    failure_depths: &BTreeMap<PipelineDepth, usize>,
+) -> String {
+    let mut report = String::new();
+    report.push_str(&format!(
+        "MeshCodec distinct failure classes: {}\n",
+        failure_classes.len()
+    ));
+    report.push_str("MeshCodec failure classes:\n");
+    for (class, count) in sorted_failure_classes(failure_classes) {
+        report.push_str(&format!("  {class} -> {count}\n"));
+    }
+    report.push_str("MeshCodec pipeline depth histogram:\n");
+    for (depth, count) in sorted_failure_depths(failure_depths) {
+        report.push_str(&format!("  {} -> {count}\n", depth.label()));
+    }
+    report
 }
 
 #[test]
@@ -333,6 +475,61 @@ fn failure_classification_groups_common_phase1_gaps() {
     assert_eq!(
         sorted_failure_classes(&counts),
         vec![("a", 2), ("b", 2), ("z", 1)]
+    );
+
+    assert_eq!(
+        classify_pipeline_depth(
+            "0x10f90d4 state-4 entry: UnobservedWindowFlag { window: \"data\", flag: 0 }"
+        ),
+        PipelineDepth::KernelState4Entry
+    );
+    assert_eq!(
+        classify_pipeline_depth(
+            "0x11104d0 stream 2: ByteSegmentLoop(Descriptor(Mode0(FrequencyMassMismatch { expected: 1024, actual: 525312 })))"
+        ),
+        PipelineDepth::SetupStreams
+    );
+    assert_eq!(
+        classify_pipeline_depth(
+            "state-5 writer loop: Interstage { index: 2, error: UnobservedDispatch(35) }"
+        ),
+        PipelineDepth::WriterLoop
+    );
+    assert_eq!(
+        classify_pipeline_depth(
+            "history-backed zstd tail at P+10018: Truncated { what: \"literals section\", needed: 83 }"
+        ),
+        PipelineDepth::Tail
+    );
+    assert_eq!(
+        classify_pipeline_depth(
+            "index decode count 68: Invalid(\"index_count 68 must be a multiple of 3\")"
+        ),
+        PipelineDepth::IndexDecode
+    );
+}
+
+#[test]
+fn failure_progress_report_includes_distinct_classes_and_depths() {
+    let mut classes = BTreeMap::new();
+    classes.insert("UnobservedDispatch(35)".to_string(), 2);
+    classes.insert("UnobservedDecisionBit(1)".to_string(), 3);
+
+    let mut depths = BTreeMap::new();
+    depths.insert(PipelineDepth::KernelState4Entry, 3);
+    depths.insert(PipelineDepth::WriterLoop, 2);
+
+    assert_eq!(
+        format_failure_progress_report(&classes, &depths),
+        concat!(
+            "MeshCodec distinct failure classes: 2\n",
+            "MeshCodec failure classes:\n",
+            "  UnobservedDecisionBit(1) -> 3\n",
+            "  UnobservedDispatch(35) -> 2\n",
+            "MeshCodec pipeline depth histogram:\n",
+            "  kernel-state4-entry -> 3\n",
+            "  writer-loop -> 2\n",
+        )
     );
 }
 
