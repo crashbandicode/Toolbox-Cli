@@ -5667,7 +5667,7 @@ fn vertex_kernel_state4_entry_count2_direction_zero_uses_direct_branch() {
     );
     assert_eq!(
         vertex_kernel_state4_entry_from_table(&payload, &mut state, spec),
-        Err(VertexKernelStateError::UnobservedFirstLeafUnary(0))
+        Err(VertexKernelStateError::UnobservedContinuationModeKind { mode: 0, kind: 0 })
     );
 
     let mut old_cut_table = first_table.clone();
@@ -5928,6 +5928,235 @@ fn vertex_kernel_state4_entry_data_flag0_zstd_window() {
             },
         ),
         Err(VertexKernelStateError::WindowDecodeFailed("data"))
+    );
+}
+
+/// P1-HEAD-4 direct first-leaf unary 0 with one submesh.
+///
+/// Provenance: `capture_phase1_first_unary0.py`,
+/// `Animal_Fairy.Fairy.bfres.mc`. The first `0x10fa980` leaf decodes only the
+/// zstd code helper, then unary code `1` means no data helper is consumed before
+/// `0x11104d0`. This rules out treating unary 0 as an unobserved error for
+/// count-1 direct entries.
+#[test]
+fn vertex_kernel_state4_entry_unary0_count1_has_no_data_window() {
+    let payload = sparse_payload(
+        337,
+        &[
+            (13, "1858f0001010f02000f000000004003cb3883963258c063704"),
+            (327, "00ad6bd3ae0f30b2394d"),
+        ],
+    );
+    let first_header = SubBlockHeader {
+        count: 1,
+        a: 1,
+        b: 0,
+        c: 1,
+        d: 102,
+        e: 0,
+        f: 102,
+    };
+    let first_table = TableBuild {
+        fwd: 13,
+        rev_ptr: 329,
+        rev_acc: 0x2801_d000_a6a4_4000,
+        rev_bitpos: 48,
+        w8: 42,
+        symbols: 4,
+        branch_bit: 0,
+        dir_bit: 1,
+        entries: Vec::new(),
+        offsets: Vec::new(),
+        cols: Vec::new(),
+        longs: Vec::new(),
+        byte_group_total: 0,
+        max_prod: 0,
+    };
+    let mut state = byte_group_state(
+        RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        },
+        0,
+    );
+
+    let entry = vertex_kernel_state4_entry_from_table(
+        &payload,
+        &mut state,
+        VertexKernelState4EntrySpec {
+            first_header,
+            first_table: &first_table,
+            remaining_subblocks: 3,
+            reverse_mode: u32::MAX,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(entry.bits, vec![0, 0, 1]);
+    assert_eq!(
+        entry.code_window,
+        VertexKernelWindow {
+            flag: 0,
+            src_start: 14,
+            src_size: 24,
+            next_stream_pos: 38,
+        }
+    );
+    assert_eq!(
+        entry.data_window,
+        VertexKernelWindow {
+            flag: 0,
+            src_start: 38,
+            src_size: 0,
+            next_stream_pos: 38,
+        }
+    );
+    assert_eq!(entry.continuation, None);
+    assert_eq!(
+        (entry.reader, entry.stream_pos),
+        (
+            RansThreeLaneReader {
+                ptr: 327,
+                acc: 0x400e_8005_3522_69cc,
+                bitpos: 61,
+            },
+            38,
+        )
+    );
+}
+
+/// P1-HEAD-4 direct first-leaf unary 0 with count-2 continuation data.
+///
+/// Provenance: `capture_phase1_first_unary0.py`,
+/// `Animal_Beetle.Beetle.bfres.mc`. The first leaf consumes no data helper;
+/// `0x10f983c..0x10f9918` parses the second leaf header, continuation unary
+/// `01` requests the raw data helper, and only then does the path reach
+/// `0x11104d0`.
+#[test]
+fn vertex_kernel_state4_entry_unary0_count2_data_moves_to_continuation() {
+    let payload = sparse_payload(
+        7312,
+        &[
+            (
+                15,
+                concat!(
+                    "816f06102c2590354907bbf5aaeaff0735f6dcf39e7dd0d67fe803c4622ac7f7feb6b5fdb0dedf92b6770a1f00230023",
+                    "00ecb77e7da95d1e46b0022ed16be0c971dcb91fb70a00065060ac950ee3f73eb51f27c60011f6d1220c28612dcda5e5",
+                    "4b2b613045bbb09305832cb1d8e3e28fbd9e01c92261235524a3cddae31aa1d40ac7d47ad22271c9d4dc1e1c37a1a044",
+                    "973a6a2c94d87c7beeebb78f5da3eff99d6fbc018eaaa0227230dac408842ba2db9b744c5a1900480d00c1802a506e5d",
+                    "e182cb39021848099333ee73264307680916dc04b7998a97a92cc3561c904393c162682e76e6ca5339c822e250b73538",
+                    "23010181468202020210",
+                ),
+            ),
+            (7302, "400b3a4b6a37220030f1"),
+        ],
+    );
+    let first_header = SubBlockHeader {
+        count: 2,
+        a: 1,
+        b: 0,
+        c: 1,
+        d: 840,
+        e: 0,
+        f: 840,
+    };
+    let first_table = TableBuild {
+        fwd: 15,
+        rev_ptr: 7304,
+        rev_acc: 0x2d0c_7e28_9ebf_f000,
+        rev_bitpos: 50,
+        w8: 417,
+        symbols: 4,
+        branch_bit: 0,
+        dir_bit: 1,
+        entries: Vec::new(),
+        offsets: Vec::new(),
+        cols: Vec::new(),
+        longs: Vec::new(),
+        byte_group_total: 0,
+        max_prod: 0,
+    };
+    let spec = VertexKernelState4EntrySpec {
+        first_header,
+        first_table: &first_table,
+        remaining_subblocks: 7,
+        reverse_mode: u32::MAX,
+    };
+    let mut state = byte_group_state(
+        RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        },
+        0,
+    );
+
+    let entry = vertex_kernel_state4_entry_from_table(&payload, &mut state, spec).unwrap();
+
+    assert_eq!(entry.bits, vec![0, 0, 1, 0, 1, 1]);
+    assert_eq!(
+        entry.code_window,
+        VertexKernelWindow {
+            flag: 0,
+            src_start: 17,
+            src_size: 239,
+            next_stream_pos: 256,
+        }
+    );
+    assert_eq!(
+        entry.data_window,
+        VertexKernelWindow {
+            flag: 1,
+            src_start: 263,
+            src_size: 2,
+            next_stream_pos: 265,
+        }
+    );
+    assert_eq!(
+        entry.continuation,
+        Some(VertexKernelContinuation {
+            mode: 1,
+            kind: 0,
+            repeat: 1,
+            count: 198,
+            current: 258,
+        })
+    );
+    assert_eq!(
+        (entry.reader, entry.stream_pos),
+        (
+            RansThreeLaneReader {
+                ptr: 7302,
+                acc: 0x431f_8a27_afff_1300,
+                bitpos: 60,
+            },
+            265,
+        )
+    );
+
+    let mut malformed = payload;
+    malformed[262] = 0xff;
+    let mut malformed_state = byte_group_state(
+        RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        },
+        0,
+    );
+    assert_eq!(
+        vertex_kernel_state4_entry_from_table(
+            &malformed,
+            &mut malformed_state,
+            VertexKernelState4EntrySpec {
+                first_header,
+                first_table: &first_table,
+                remaining_subblocks: 7,
+                reverse_mode: u32::MAX,
+            },
+        ),
+        Err(VertexKernelStateError::StreamTooShort)
     );
 }
 

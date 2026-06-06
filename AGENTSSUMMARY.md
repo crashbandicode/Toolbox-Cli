@@ -643,6 +643,38 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec P1-HEAD-4 direct first-leaf unary 0
+**Committed:** P1-HEAD-4 now accepts the direct state-4 leaf shape where the
+first unary code is `1` (`clz=0`). Count-1 entries reach `0x11104d0` without a
+data helper; count-2 entries parse the continuation header first, then the
+observed continuation unary `01` moves the raw data helper to the continuation
+leaf.
+
+Durable evidence: `capture_phase1_first_unary0.py` captured three
+representatives, and `verify_phase1_first_unary0.py` replays **3/3 direct
+state4 cursors**. Fixture-free goldens cover both observed branches:
+`vertex_kernel_state4_entry_unary0_count1_has_no_data_window` reaches
+`P+327/0x400e8005352269cc/61`, stream `P+38`, and
+`vertex_kernel_state4_entry_unary0_count2_data_moves_to_continuation` reaches
+`P+7302/0x431f8a27afff1300/60`, stream `P+265`, with a malformed continuation
+data-size negative proving raw-window bounds rejection.
+
+Verification: `python local-assets/re/verify_phase1_first_unary0.py` passed;
+`cargo test --lib mc::geometry::tests::vertex_kernel_state4_entry` passed 9/9.
+Full gate:
+`All green: 306 lib unit (incl. 160 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Ignored corpus sweep still fails by design with **12,395 seen; 278 no-FMSH/no
+mesh; 319 decoded clean; 11,798 failures**. `UnobservedFirstLeafUnary(0)`
+dropped from **1,539** to **148**. New head remains
+`0x10f90d4 state-4 entry: UnobservedDirectionZeroDirectPath` at **2,635**;
+the next independent direct-leaf class is `UnobservedContinuationUnary(0)` at
+**456**.
+
+Next: either port the direction-zero successor through the existing
+`0x10fafe0`/`0x10fb2e0` machinery, or capture the continuation-unary-0 direct
+variant if keeping direction-zero guarded. Do not drop to dispatch tails.
+
 ### 2026-06-06 - MeshCodec P1-HEAD-2 direct data-window flag 0
 **Committed:** P1-HEAD-2 now accepts the direct state-4 data helper when
 `0x10fae60` takes flag 0, validates the zstd body, and advances to the same

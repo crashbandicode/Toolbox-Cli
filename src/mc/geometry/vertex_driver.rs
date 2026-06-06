@@ -288,6 +288,15 @@ fn read_vertex_kernel_direct_data_window(
     }
 }
 
+fn empty_vertex_kernel_window(stream_pos: usize) -> VertexKernelWindow {
+    VertexKernelWindow {
+        flag: 0,
+        src_start: stream_pos,
+        src_size: 0,
+        next_stream_pos: stream_pos,
+    }
+}
+
 fn read_vertex_kernel_zstd_window(
     payload: &[u8],
     state: &mut ByteGroupReadState,
@@ -380,6 +389,36 @@ fn push_vertex_kernel_unary_bits(bits: &mut Vec<u8>, leading_zeroes: u32) {
     bits.push(1);
 }
 
+fn read_vertex_kernel_continuation(
+    payload: &[u8],
+    state: &mut ByteGroupReadState,
+) -> Result<VertexKernelContinuation, VertexKernelStateError> {
+    let header = payload
+        .get(state.stream_pos)
+        .copied()
+        .ok_or(VertexKernelStateError::StreamTooShort)?;
+    state.stream_pos += 1;
+    let mode = header & 0x0f;
+    let kind = header >> 4;
+    if mode != 1 || kind >= 2 {
+        return Err(VertexKernelStateError::UnobservedContinuationModeKind { mode, kind });
+    }
+    let (repeat, pos) = read_vertex_kernel_varint(payload, state.stream_pos)?;
+    state.stream_pos = pos;
+    let (count, pos) = read_vertex_kernel_varint(payload, state.stream_pos)?;
+    state.stream_pos = pos;
+    let (current, pos) = read_vertex_kernel_varint(payload, state.stream_pos)?;
+    state.stream_pos = pos;
+
+    Ok(VertexKernelContinuation {
+        mode,
+        kind,
+        repeat,
+        count,
+        current,
+    })
+}
+
 /// Replay the observed CP5d transition from the state-0 table reader into
 /// state 4's `0x11104d0` setup entry.
 ///
@@ -390,7 +429,9 @@ fn push_vertex_kernel_unary_bits(bits: &mut Vec<u8>, leading_zeroes: u32) {
 /// have one (Dragonfly) or two (Bear/Bass) index submeshes: the first consumes a
 /// zstd code window, a unary `01` code, and an observed raw or zstd data window;
 /// the optional continuation consumes `mode=1,kind=0` plus three forward
-/// varints, then a unary `1` code.
+/// varints, then a unary `1` code. Unary `1` can also mean the first leaf needs
+/// no data window; in that shape the count-2 continuation leaf owns the data
+/// helper.
 pub fn vertex_kernel_state4_entry(
     payload: &[u8],
     state: &mut ByteGroupReadState,
@@ -413,48 +454,45 @@ pub fn vertex_kernel_state4_entry(
     let code_window = read_vertex_kernel_window(payload, state, &mut bits, "code", 0)?;
     let first_unary = take_vertex_kernel_unary(payload, &mut state.reader)?;
     push_vertex_kernel_unary_bits(&mut bits, first_unary);
-    if first_unary != 1 {
-        return Err(VertexKernelStateError::UnobservedFirstLeafUnary(
-            first_unary,
-        ));
-    }
-    let data_window = read_vertex_kernel_direct_data_window(payload, state, &mut bits)?;
-
-    let continuation = if submesh_count == 2 {
-        let header = payload
-            .get(state.stream_pos)
-            .copied()
-            .ok_or(VertexKernelStateError::StreamTooShort)?;
-        state.stream_pos += 1;
-        let mode = header & 0x0f;
-        let kind = header >> 4;
-        if mode != 1 || kind >= 2 {
-            return Err(VertexKernelStateError::UnobservedContinuationModeKind { mode, kind });
+    let (data_window, continuation) = match first_unary {
+        0 => {
+            if submesh_count == 1 {
+                (empty_vertex_kernel_window(state.stream_pos), None)
+            } else {
+                let continuation = read_vertex_kernel_continuation(payload, state)?;
+                let continuation_unary = take_vertex_kernel_unary(payload, &mut state.reader)?;
+                push_vertex_kernel_unary_bits(&mut bits, continuation_unary);
+                if continuation_unary != 1 {
+                    return Err(VertexKernelStateError::UnobservedContinuationUnary(
+                        continuation_unary,
+                    ));
+                }
+                let data_window = read_vertex_kernel_direct_data_window(payload, state, &mut bits)?;
+                (data_window, Some(continuation))
+            }
         }
-        let (repeat, pos) = read_vertex_kernel_varint(payload, state.stream_pos)?;
-        state.stream_pos = pos;
-        let (count, pos) = read_vertex_kernel_varint(payload, state.stream_pos)?;
-        state.stream_pos = pos;
-        let (current, pos) = read_vertex_kernel_varint(payload, state.stream_pos)?;
-        state.stream_pos = pos;
-
-        let continuation_unary = take_vertex_kernel_unary(payload, &mut state.reader)?;
-        push_vertex_kernel_unary_bits(&mut bits, continuation_unary);
-        if continuation_unary != 0 {
-            return Err(VertexKernelStateError::UnobservedContinuationUnary(
-                continuation_unary,
+        1 => {
+            let data_window = read_vertex_kernel_direct_data_window(payload, state, &mut bits)?;
+            let continuation = if submesh_count == 2 {
+                let continuation = read_vertex_kernel_continuation(payload, state)?;
+                let continuation_unary = take_vertex_kernel_unary(payload, &mut state.reader)?;
+                push_vertex_kernel_unary_bits(&mut bits, continuation_unary);
+                if continuation_unary != 0 {
+                    return Err(VertexKernelStateError::UnobservedContinuationUnary(
+                        continuation_unary,
+                    ));
+                }
+                Some(continuation)
+            } else {
+                None
+            };
+            (data_window, continuation)
+        }
+        _ => {
+            return Err(VertexKernelStateError::UnobservedFirstLeafUnary(
+                first_unary,
             ));
         }
-
-        Some(VertexKernelContinuation {
-            mode,
-            kind,
-            repeat,
-            count,
-            current,
-        })
-    } else {
-        None
     };
 
     Ok(VertexKernelState4Entry {
