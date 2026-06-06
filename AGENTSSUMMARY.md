@@ -643,6 +643,35 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec P1-HEAD-2 direct data-window flag 0
+**Committed:** P1-HEAD-2 now accepts the direct state-4 data helper when
+`0x10fae60` takes flag 0, validates the zstd body, and advances to the same
+`0x11104d0` reader/cursor contract as the existing raw flag-1 path. The
+carried-code path remains raw-only until a separate trace covers flag 0 there.
+
+Durable evidence: `capture_phase1_data_window_flag0.py` captured the head-class
+representatives, and `verify_phase1_data_window_flag0.py` replays **3/3 direct
+zstd data windows** through decision bit, code helper, unary, data helper,
+continuation varints, and final state4 reader. The fixture-free golden
+`vertex_kernel_state4_entry_data_flag0_zstd_window` embeds the compact
+`P+15..P+432` / reverse-reader byte ranges and reaches `0x11104d0` at
+`P+9319/0x4000990bf35c705a/58`, stream `P+432`; its malformed-size negative
+case proves the flag-0 data body is validated, not skipped.
+
+Verification: `python local-assets/re/verify_phase1_data_window_flag0.py`
+passed; `cargo test --lib mc::geometry::tests::vertex_kernel_state4_entry`
+passed 7/7. Full gate:
+`All green: 304 lib unit (incl. 158 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Ignored corpus sweep still fails by design with **12,395 seen; 278 no-FMSH/no
+mesh; 315 decoded clean; 11,802 failures**. `UnobservedWindowFlag { window:
+"data", flag: 0 }` dropped from **2,886** to **11**. New head:
+`0x10f90d4 state-4 entry: UnobservedDirectionZeroDirectPath` at **2,031**,
+then `UnobservedFirstLeafUnary(0)` at **1,539** and
+`0x10f90d4 state-4 entry: UnobservedIndexSubmeshCount(2)` at **994**.
+
+Next: P1-HEAD-3 direct direction-zero path. Do not drop to dispatch tails.
+
 ### 2026-06-06 - MeshCodec P1-HEAD-1 direct DecisionBit(1)
 **Committed:** P1-HEAD-1 now accepts the direct-path decision bit 1 cursor when
 the branch-clear table has `direction=1`, while guarding the observed

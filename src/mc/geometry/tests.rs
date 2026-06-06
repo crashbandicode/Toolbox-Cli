@@ -5790,6 +5790,147 @@ fn vertex_kernel_state4_entry_decision_bit1_direct_scratch_cursor() {
     assert_eq!(state.stream_pos, entry.stream_pos);
 }
 
+/// P1-HEAD-2 direct data-window flag 0 at `0x10fae60 -> 0x10fab08`.
+///
+/// Provenance: `capture_phase1_data_window_flag0.py`,
+/// `Animal_Crab.Crab_Boneless.bfres.mc`. The first direct state-4 leaf calls
+/// the helper twice: code flag 0 decodes `P+17..P+377`, unary `01` follows,
+/// then data flag 0 decodes `P+378..P+426` before the count-2 continuation
+/// header at `P+426`. This rules out the old "direct data is always raw flag
+/// 1" guard and a wrong skip-only implementation that would accept malformed
+/// zstd data without validating the helper body.
+#[test]
+fn vertex_kernel_state4_entry_data_flag0_zstd_window() {
+    let payload = sparse_payload(
+        9329,
+        &[
+            (
+                15,
+                concat!(
+                    "82683619482ca0254907c020929c024a50217070020b0c204000636cc23efccf8c0fffff2da7dadfdade51c612d208d9",
+                    "3b053c003b0040005e022cb041ffa4440f82948a3369a4ac172f57094bff780a0870165a86d252b65f4e4e43b04448fb",
+                    "9cda8a8a69ca4473a172cc6ebf6a47c478656b0c2c0f1441a15c96b5e7d0db1111b7387ca5e34413537fd57065677934",
+                    "14eae4893848c50096de8df6ca25b27f356a6892723565cfc8dd8acb2b6942099aa3b48cc17e3f324c4a542e6b448d6a",
+                    "90325cb062797148231eff54d31e9515e88b321c0e29404fef50dc32a3d02238e4502f071070221ee6d0876a8fc30345",
+                    "a38bf5d158645816534bd76ee54aecebd10f6912e73131ea44952b73436ea44e4ebdd2e8315e89679c8481e6f1cf4705",
+                    "7a5c7af4201c201048476ed40331c5b715eeb70b8d8339af9b5847081507cfe4e2f0b06437d0711029c379040b86c33b",
+                    "f6dcc0a0964e3eace2d809afe7137c853221c127000d632cc504303402020302030506fad2020507f810891e04020745",
+                    "030205050604060302050303020202030400ee80848aa10b1c00840101833c8449",
+                ),
+            ),
+            (9319, "cbd2d8201676e26fc171"),
+        ],
+    );
+    let first_header = SubBlockHeader {
+        count: 2,
+        a: 1,
+        b: 0,
+        c: 1,
+        d: 1794,
+        e: 0,
+        f: 1794,
+    };
+    let first_table = TableBuild {
+        fwd: 15,
+        rev_ptr: 9321,
+        rev_acc: 0x1500_0264_2fcd_7000,
+        rev_bitpos: 48,
+        w8: 971,
+        symbols: 4,
+        branch_bit: 0,
+        dir_bit: 1,
+        entries: Vec::new(),
+        offsets: Vec::new(),
+        cols: Vec::new(),
+        longs: Vec::new(),
+        byte_group_total: 0,
+        max_prod: 0,
+    };
+    let spec = VertexKernelState4EntrySpec {
+        first_header,
+        first_table: &first_table,
+        remaining_subblocks: 8,
+        reverse_mode: u32::MAX,
+    };
+    let mut state = byte_group_state(
+        RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        },
+        0,
+    );
+
+    let entry = vertex_kernel_state4_entry_from_table(&payload, &mut state, spec).unwrap();
+
+    assert_eq!(entry.bits, vec![0, 0, 0, 1, 0, 1]);
+    assert_eq!(
+        entry.code_window,
+        VertexKernelWindow {
+            flag: 0,
+            src_start: 17,
+            src_size: 360,
+            next_stream_pos: 377,
+        }
+    );
+    assert_eq!(
+        entry.data_window,
+        VertexKernelWindow {
+            flag: 0,
+            src_start: 378,
+            src_size: 48,
+            next_stream_pos: 426,
+        }
+    );
+    assert_eq!(
+        entry.continuation,
+        Some(VertexKernelContinuation {
+            mode: 1,
+            kind: 0,
+            repeat: 1,
+            count: 444,
+            current: 585,
+        })
+    );
+    assert_eq!(
+        (entry.reader, entry.stream_pos),
+        (
+            RansThreeLaneReader {
+                ptr: 9319,
+                acc: 0x4000_990b_f35c_705a,
+                bitpos: 58,
+            },
+            432,
+        )
+    );
+    assert_eq!(state.reader, entry.reader);
+    assert_eq!(state.stream_pos, entry.stream_pos);
+
+    let mut malformed = payload;
+    malformed[377] = 0;
+    let mut malformed_state = byte_group_state(
+        RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        },
+        0,
+    );
+    assert_eq!(
+        vertex_kernel_state4_entry_from_table(
+            &malformed,
+            &mut malformed_state,
+            VertexKernelState4EntrySpec {
+                first_header,
+                first_table: &first_table,
+                remaining_subblocks: 8,
+                reverse_mode: u32::MAX,
+            },
+        ),
+        Err(VertexKernelStateError::WindowDecodeFailed("data"))
+    );
+}
+
 /// Direction-zero branch-clear tables run the first kernel leaf but do not
 /// immediately enter `0x11104d0`.
 ///

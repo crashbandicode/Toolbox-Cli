@@ -232,6 +232,14 @@ fn read_vertex_kernel_window(
     if flag != expected_flag {
         return Err(VertexKernelStateError::UnobservedWindowFlag { window: name, flag });
     }
+    read_vertex_kernel_bounded_window_after_flag(payload, state, flag)
+}
+
+fn read_vertex_kernel_bounded_window_after_flag(
+    payload: &[u8],
+    state: &mut ByteGroupReadState,
+    flag: u8,
+) -> Result<VertexKernelWindow, VertexKernelStateError> {
     let (src_size, src_start) = read_vertex_kernel_varint(payload, state.stream_pos)?;
     let src_size = src_size as usize;
     let next_stream_pos = src_start
@@ -247,6 +255,37 @@ fn read_vertex_kernel_window(
         src_size,
         next_stream_pos,
     })
+}
+
+fn read_vertex_kernel_direct_data_window(
+    payload: &[u8],
+    state: &mut ByteGroupReadState,
+    bits: &mut Vec<u8>,
+) -> Result<VertexKernelWindow, VertexKernelStateError> {
+    let flag = take_vertex_kernel_bit(payload, &mut state.reader)?;
+    bits.push(flag);
+    match flag {
+        0 => {
+            // `0x10fab08` returns from the same `0x10fae60` helper used by
+            // the code window: flag 0 validates a zstd block and advances by
+            // the forward varint body size.
+            let (src_size, src_start) = read_vertex_kernel_varint(payload, state.stream_pos)?;
+            let (_, next_stream_pos) = decode_zstd_window(payload, state.stream_pos)
+                .map_err(|_| VertexKernelStateError::WindowDecodeFailed("data"))?;
+            state.stream_pos = next_stream_pos;
+            Ok(VertexKernelWindow {
+                flag,
+                src_start,
+                src_size: src_size as usize,
+                next_stream_pos,
+            })
+        }
+        1 => read_vertex_kernel_bounded_window_after_flag(payload, state, flag),
+        _ => Err(VertexKernelStateError::UnobservedWindowFlag {
+            window: "data",
+            flag,
+        }),
+    }
 }
 
 fn read_vertex_kernel_zstd_window(
@@ -349,9 +388,9 @@ fn push_vertex_kernel_unary_bits(bits: &mut Vec<u8>, leading_zeroes: u32) {
 /// the input contract of the already-ported `vertex_match_table`; it does not
 /// claim to port the full leaf output transforms. Observed first sub-blocks
 /// have one (Dragonfly) or two (Bear/Bass) index submeshes: the first consumes a
-/// zstd code window, a unary `01` code, and a raw data window; the optional
-/// continuation consumes `mode=1,kind=0` plus three forward varints, then a
-/// unary `1` code.
+/// zstd code window, a unary `01` code, and an observed raw or zstd data window;
+/// the optional continuation consumes `mode=1,kind=0` plus three forward
+/// varints, then a unary `1` code.
 pub fn vertex_kernel_state4_entry(
     payload: &[u8],
     state: &mut ByteGroupReadState,
@@ -379,7 +418,7 @@ pub fn vertex_kernel_state4_entry(
             first_unary,
         ));
     }
-    let data_window = read_vertex_kernel_window(payload, state, &mut bits, "data", 1)?;
+    let data_window = read_vertex_kernel_direct_data_window(payload, state, &mut bits)?;
 
     let continuation = if submesh_count == 2 {
         let header = payload
