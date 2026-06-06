@@ -591,6 +591,8 @@ pub enum VertexAttributeWriterTarget {
     U16x3Delta,
     /// `0x10fdfe0`.
     U16x2DirectDelta,
+    /// `0x10fe4d0`.
+    U32x2Delta,
     /// `0x1101850`.
     U16x2PreviousDelta,
     /// `0x11033e0`.
@@ -1084,7 +1086,7 @@ fn vertex_attribute_source_descriptors(
         }
         // `0x10fc4e0`: split one varint into two same-width descriptors
         // (`0x10fc508..0x10fc534`).
-        29 | 30 | 31 | 32 | 35 | 46 | 58 => {
+        29 | 30 | 31 | 32 | 35 | 39 | 46 | 58 => {
             let split = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
             let remainder = vertex_split_remainder(dispatch, wrapper_ret, split)?;
             let writer = match dispatch {
@@ -1093,6 +1095,7 @@ fn vertex_attribute_source_descriptors(
                 31 => VertexAttributeWriterTarget::Delta3Direct,
                 32 => VertexAttributeWriterTarget::Delta4Direct,
                 35 => VertexAttributeWriterTarget::U16x2DirectDelta,
+                39 => VertexAttributeWriterTarget::U32x2Delta,
                 46 => VertexAttributeWriterTarget::I8x3DirectDelta,
                 58 => VertexAttributeWriterTarget::U16x3Delta,
                 _ => unreachable!(),
@@ -1630,6 +1633,24 @@ pub fn vertex_attribute_apply_writer(
             transform_tail_u16x2_direct_delta_into(
                 out,
                 TransformTailU16x2DirectDeltaSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::U32x2Delta => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            transform_tail_u32x2_delta_into(
+                out,
+                TransformTailU32x2DeltaSpec {
                     output_stride,
                     block_index: spec.block_index,
                     out_offset,

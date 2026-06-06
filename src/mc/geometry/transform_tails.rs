@@ -477,6 +477,24 @@ pub struct TransformTailU16x2DirectDeltaSpec<'a> {
     pub source1: &'a [u8],
 }
 
+/// Inputs for the two-u32 direct/matched delta transform tail (`0x10fe4d0`).
+pub struct TransformTailU32x2DeltaSpec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Match table at `[x0+0x10]`, indexed by emitted vertex.
+    pub matches: &'a [u32],
+    /// Direct two-u32 literal source stream at `[x4]`.
+    pub source0: &'a [u8],
+    /// Matched two-u32 delta stream at `[x4+8]`.
+    pub source1: &'a [u8],
+}
+
 /// Inputs for the two-u16 seed/previous delta transform tail (`0x1101850`).
 pub struct TransformTailU16x2PreviousDeltaSpec<'a> {
     /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
@@ -1514,6 +1532,118 @@ pub fn transform_tail_u16x2_direct_delta_into(
             &mut cursor,
             spec.output_stride,
             4,
+            record.back_distance,
+            record.copy_count,
+        )?;
+
+        match_index = match_index
+            .checked_add(usize::from(record.copy_count))
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        if match_index > spec.matches.len() {
+            return Err(TransformTailDeltaError::MatchTableTooSmall);
+        }
+    }
+
+    Ok(TransformTailDeltaUsage {
+        source0: source0_pos,
+        source1: source1_pos,
+        source2: 0,
+        match_entries: match_index,
+    })
+}
+
+/// Apply the observed two-u32 direct/matched delta tail (`0x10fe4d0`).
+///
+/// Zero-match literals copy eight source0 bytes directly
+/// (`0x10fe510..0x10fe51c`). Non-zero match rows use
+/// `(match >> 3) * stride` as the look-back and add two little-endian u32
+/// deltas from source1 (`0x10fe528..0x10fe54c`). Copy runs clone eight bytes
+/// by byte distance (`0x10fe560..0x10fe598`).
+pub fn transform_tail_u32x2_delta_into(
+    out: &mut [u8],
+    spec: TransformTailU32x2DeltaSpec<'_>,
+) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
+    let mut match_index = 0usize;
+    let mut source0_pos = 0usize;
+    let mut source1_pos = 0usize;
+
+    for record in spec.records {
+        for _ in 0..record.literal_count {
+            let match_entry = *spec
+                .matches
+                .get(match_index)
+                .ok_or(TransformTailDeltaError::MatchTableTooSmall)?;
+            let cursor_end = cursor
+                .checked_add(8)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            if match_entry == 0 {
+                let source0_end = source0_pos
+                    .checked_add(8)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let bytes = spec
+                    .source0
+                    .get(source0_pos..source0_end)
+                    .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                let slot = out
+                    .get_mut(cursor..cursor_end)
+                    .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                slot.copy_from_slice(bytes);
+                source0_pos = source0_end;
+            } else {
+                let match_units = (match_entry >> 3) as usize;
+                let match_distance = match_units
+                    .checked_mul(spec.output_stride)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let source = cursor
+                    .checked_sub(match_distance)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let source_end = source
+                    .checked_add(8)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                if out.get(source..source_end).is_none() {
+                    return Err(TransformTailDeltaError::MatchBeforeOutput);
+                }
+                let source1_end = source1_pos
+                    .checked_add(8)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let deltas = spec
+                    .source1
+                    .get(source1_pos..source1_end)
+                    .ok_or(TransformTailDeltaError::Source1TooSmall)?;
+                let first = read_transform_tail_u32(out, source)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?
+                    .wrapping_add(
+                        read_transform_tail_u32(deltas, 0)
+                            .ok_or(TransformTailDeltaError::Source1TooSmall)?,
+                    );
+                let second = read_transform_tail_u32(out, source + 4)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?
+                    .wrapping_add(
+                        read_transform_tail_u32(deltas, 4)
+                            .ok_or(TransformTailDeltaError::Source1TooSmall)?,
+                    );
+                let slot = out
+                    .get_mut(cursor..cursor_end)
+                    .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                write_transform_tail_u32(slot, 0, first);
+                write_transform_tail_u32(slot, 4, second);
+                source1_pos = source1_end;
+            }
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            match_index = match_index
+                .checked_add(1)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        }
+
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            8,
             record.back_distance,
             record.copy_count,
         )?;

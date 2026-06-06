@@ -643,6 +643,42 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec P1-17 dispatch 39 writer `0x10fe4d0`
+**Committed:** P1-17 ports dispatch 39's writer target `0x10fe4d0` as the
+two-u32 direct/matched delta tail. Static table slot 39 uses the shared
+two-source setup `0x10fc4e0`; the port maps dispatch 39 through the same setup
+family as dispatches 29/30/31/32/35/46/58 and wires the writer-table call to
+`transform_tail_u32x2_delta_into`.
+
+Durable evidence: the pre-port model-corpus sweep showed 39 dispatch-39 paths.
+`local-assets/re/capture_phase1_dispatch_39_interstage.py` captured seven
+representatives spanning strides 20/24, split counts 134..1,319, and remainder
+counts 49..1,168; all dispatch-39 rows used setup `0x10fc4e0`, writer
+`0x10fe4d0`, two sources, and descriptors `(0,8,split)` and
+`(0,8,remainder)`. `local-assets/re/capture_phase1_transform_tail_10fe4d0.py`
+captured eight writer calls; `verify_transform_tail_10fe4d0.py` replays
+**8/8** with 3,585 direct literals, 2,528 matched literals, 1,837 copy units,
+1,306 zero-literal records, 3 zero-copy records, and source usage
+28,680/20,224 bytes. Discriminators no-direct and raw-match-distance fail 8/8;
+no-copy and no-copy-table-advance fail 7/8. FINDINGS UPDATE 62 records the
+capture, replay, and disassembly-citation details.
+
+Verification: `cargo test --lib u32x2_delta` passed 5/5; `cargo test --lib
+dispatch39` passed 1/1; `cargo test --lib vertex_attribute` passed 33/33;
+`cargo test --lib transform_tail` passed 58/58; `cargo test --lib
+mc::geometry` passed 153/153; `cargo test` passed the full suite; `cargo
+clippy --all-targets` is clean; `cargo build --no-default-features` builds.
+Current full gate:
+`All green: 299 lib unit (incl. 153 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2 for Bear/Bass/Dragonfly.
+
+Phase 1 re-sweep with `MC_MODEL_CORPUS` still fails by design but moved the
+coverage curve again: **12,395 seen; 278 no-FMSH/no mesh; 315 decoded clean;
+11,802 failures**. `UnobservedDispatch(39)` is gone. Next independent
+dispatch-family ports are `UnobservedDispatch(59)` at 25,
+`UnobservedDispatch(47)` at 22, and `UnobservedDispatch(75)` at 22; the larger
+kernel decision/window branches from FINDINGS UPDATE 47 still dominate.
+
 ### 2026-06-06 - MeshCodec P1-16 dispatch 9 writer `0x10fbee0`
 **Committed:** P1-16 ports dispatch 9's writer target `0x10fbee0` as the
 four-byte direct/matched delta tail. Static table slot 9 uses the shared
