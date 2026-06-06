@@ -575,6 +575,8 @@ pub enum VertexAttributeWriterTarget {
     Delta2,
     /// `0x10fbdc0`.
     Delta3,
+    /// `0x10fbee0`.
+    Delta4,
     /// `0x10fdb30`.
     Delta1Direct,
     /// `0x10fdc00`.
@@ -1105,16 +1107,17 @@ fn vertex_attribute_source_descriptors(
         }
         // `0x10fb730`: three descriptors, with the first two sharing the split
         // count (`0x10fb758..0x10fb794`).
-        7 | 8 => {
+        7..=9 => {
             let split = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
             let remainder = vertex_split_remainder(dispatch, wrapper_ret, split)?;
             let group_width_minus_one = group_width
                 .checked_sub(1)
                 .ok_or(VertexAttributeInterstageError::ArithmeticOverflow)?;
-            let writer = if dispatch == 7 {
-                VertexAttributeWriterTarget::Delta2
-            } else {
-                VertexAttributeWriterTarget::Delta3
+            let writer = match dispatch {
+                7 => VertexAttributeWriterTarget::Delta2,
+                8 => VertexAttributeWriterTarget::Delta3,
+                9 => VertexAttributeWriterTarget::Delta4,
+                _ => unreachable!(),
             };
             Ok((
                 writer,
@@ -1516,6 +1519,26 @@ pub fn vertex_attribute_apply_writer(
             transform_tail_delta3_into(
                 out,
                 TransformTailDelta3Spec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                    source2,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::Delta4 => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            let source2 = vertex_writer_source(spec.interstage, 2)?;
+            transform_tail_delta4_into(
+                out,
+                TransformTailDelta4Spec {
                     output_stride,
                     block_index: spec.block_index,
                     out_offset,
