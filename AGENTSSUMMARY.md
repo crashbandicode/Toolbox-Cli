@@ -643,6 +643,39 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-13 dispatch 79 writer `0x1103840`
+**Committed:** P1-13 ports dispatch 79's writer target `0x1103840` as the
+packed 10-10-10 seed/previous/matched delta tail. Static table slot 79 uses
+the two-source split setup `0x11010e0`; the port maps it through the same
+setup family as dispatches 76/77/81 and wires the writer-table call to
+`transform_tail_pack10x3_previous_delta_into`.
+
+Durable evidence: `local-assets/re/capture_phase1_dispatch_79_interstage.py`
+captured Item_Ore_L_Dummy current 1 with dispatch 79, setup `0x11010e0`,
+writer `0x1103840`, and descriptors `(1,3,411)` and `(1,3,365)`.
+`local-assets/re/capture_phase1_transform_tail_1103840.py` captured one writer
+call; `verify_transform_tail_1103840.py` replays **1/1** with 1 direct seed
+unit, 410 previous-row delta units, 365 matched units, 55 copy units, one
+zero-copy record, 831 match entries, and source usage 2,466/2,190 bytes.
+Discriminators no-seed, no-previous, and no-matched all fail 1/1. FINDINGS
+UPDATE 58 records the capture, replay, the source1-zero caveat for matched
+deltas, and disassembly-citation details.
+
+Verification: `cargo test --lib pack10x3_previous_delta` passed 4/4; `cargo
+test --lib vertex_attribute` passed 25/25; `cargo test --lib transform_tail`
+passed 47/47; `cargo test --lib mc::geometry` passed 134/134; `cargo test`
+passed the full suite; `cargo clippy --all-targets` is clean; `cargo build
+--no-default-features` builds. Current full gate:
+`All green: 280 lib unit (incl. 134 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2 for Bear/Bass/Dragonfly.
+
+Phase 1 re-sweep with `MC_MODEL_CORPUS` still fails by design but moved the
+coverage curve again: **12,395 seen; 278 no-FMSH/no mesh; 285 decoded clean;
+11,832 failures**. `UnobservedDispatch(79)` is gone. Next independent
+dispatch-family ports are `UnobservedDispatch(63)` at 67,
+`UnobservedDispatch(17)` at 55, and `UnobservedDispatch(9)` at 41; the larger
+kernel decision/window branches from FINDINGS UPDATE 47 still dominate.
+
 ### 2026-06-05 - MeshCodec P1-12 dispatch 20 writer `0x10fc920`
 **Committed:** P1-12 ports dispatch 20's writer target `0x10fc920` as the
 eight-byte sibling of the fixed-width copy tails. Static table slot 20 uses the

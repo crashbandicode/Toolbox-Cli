@@ -591,6 +591,8 @@ pub enum VertexAttributeWriterTarget {
     U8x2Delta,
     /// `0x1103530`.
     U8x3Delta,
+    /// `0x1103840`.
+    Pack10x3PreviousDelta,
     /// `0x1103ab0`.
     U16x2Delta,
     /// `0x110aac0`.
@@ -1151,12 +1153,13 @@ fn vertex_attribute_source_descriptors(
         }
         // `0x11010e0`: two descriptors with element shift `rounded-1`
         // (`0x1101108..0x1101134`).
-        76 | 77 | 81 => {
+        76 | 77 | 79 | 81 => {
             let split = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
             let remainder = vertex_split_remainder(dispatch, wrapper_ret, split)?;
             let writer = match dispatch {
                 76 => VertexAttributeWriterTarget::U8x2Delta,
                 77 => VertexAttributeWriterTarget::U8x3Delta,
+                79 => VertexAttributeWriterTarget::Pack10x3PreviousDelta,
                 81 => VertexAttributeWriterTarget::U16x2Delta,
                 _ => unreachable!(),
             };
@@ -1604,6 +1607,24 @@ pub fn vertex_attribute_apply_writer(
             transform_tail_u8x3_delta_into(
                 out,
                 TransformTailU8x3DeltaSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::Pack10x3PreviousDelta => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            transform_tail_pack10x3_previous_delta_into(
+                out,
+                TransformTailPack10x3PreviousDeltaSpec {
                     output_stride,
                     block_index: spec.block_index,
                     out_offset,
