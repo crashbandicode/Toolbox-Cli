@@ -643,6 +643,40 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-12 dispatch 20 writer `0x10fc920`
+**Committed:** P1-12 ports dispatch 20's writer target `0x10fc920` as the
+eight-byte sibling of the fixed-width copy tails. Static table slot 20 uses the
+simple one-source setup `0x10fc4b0`; the port maps it through the existing
+copy setup family and wires the writer-table call to `transform_tail_copy8_into`.
+
+Durable evidence: the filtered model-corpus sweep showed 68 dispatch-20 paths;
+`local-assets/re/capture_phase1_dispatch_20_interstage.py` captured
+DgnObj_Fire_WallBeam_A_09 current 2 with dispatch 20, setup `0x10fc4b0`,
+writer `0x10fc920`, and descriptor `(0,8,460)`.
+`local-assets/re/capture_phase1_transform_tail_10fc920.py` captured one writer
+call; `verify_transform_tail_10fc920.py` replays **1/1** with 460 direct
+eight-byte units, 434 copy units, 231 zero-literal records, zero zero-copy
+records, and 3,680 source0 bytes. Discriminators no-direct and no-copy both
+fail 1/1. FINDINGS UPDATE 57 records the capture, replay, guarded zero-copy
+shape, and disassembly-citation details.
+
+Verification: `cargo test --lib copy8` passed 4/4; `cargo test --lib
+vertex_attribute` passed 23/23; `cargo test --lib transform_tail` passed
+45/45; `cargo test --lib mc::geometry` passed 130/130; `cargo test` passed the
+full suite; `cargo clippy --all-targets` is clean; `cargo build
+--no-default-features` builds. Current full gate:
+`All green: 276 lib unit (incl. 130 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2 for Bear/Bass/Dragonfly.
+
+Phase 1 re-sweep with `MC_MODEL_CORPUS` still fails by design but moved the
+coverage curve again: **12,395 seen; 278 no-FMSH/no mesh; 281 decoded clean;
+11,836 failures**. `UnobservedDispatch(20)` is gone. The global
+`Copy(UnobservedRecordShape)` guard total is now 41, up from 15 before this
+port, reflecting newly reached fixed-copy shapes whose zero-copy branches still
+need captures. Next independent dispatch-family ports are `UnobservedDispatch(79)`
+at 62, `UnobservedDispatch(63)` at 60, and `UnobservedDispatch(17)` at 52; the
+larger kernel decision/window branches from FINDINGS UPDATE 47 still dominate.
+
 ### 2026-06-05 - MeshCodec P1-11 dispatch 46 writer `0x10ffdb0`
 **Committed:** P1-11 ports dispatch 46's writer target `0x10ffdb0` as a
 three-byte signed direct/matched delta transform tail. Static table slot 46

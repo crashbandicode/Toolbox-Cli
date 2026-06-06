@@ -3566,6 +3566,67 @@ fn vertex_attribute_interstage_dragonfly_copy2_source() {
     );
 }
 
+/// Interstage source setup/materialization for dispatch 20.
+///
+/// Provenance: `capture_phase1_dispatch_20_interstage.py`,
+/// DgnObj_Fire_WallBeam_A_09 current 2: dispatch 20 selects setup
+/// `0x10fc4b0`, descriptor `(w2=0,w3=8,w4=460)`, and writer `0x10fc920`.
+#[test]
+fn vertex_attribute_interstage_dispatch20_copy8_source() {
+    let mut payload = vec![0u8; 17];
+    payload[9..17].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    let mut state = ByteGroupReadState {
+        reader: RansThreeLaneReader {
+            ptr: 1,
+            acc: (20u64 << 57) | (3u64 << 55),
+            bitpos: 57,
+        },
+        mode1_extra_readers: [zero_three_lane_reader(); 2],
+        stream_pos: 9,
+        segment_state: RansStateBuffer::cold(),
+        selector2_history: Vec::new(),
+    };
+
+    let interstage = vertex_attribute_interstage_sources(
+        &mut state,
+        &payload,
+        ByteGroupTransformTableEntry { raw: 0x1c00_2012 },
+        1,
+    )
+    .unwrap();
+
+    assert_eq!(
+        interstage,
+        VertexAttributeInterstage {
+            dispatch: 20,
+            writer: VertexAttributeWriterTarget::Copy8,
+            descriptors: vec![VertexAttributeSourceDescriptor {
+                element_shift: 0,
+                group_stride: 8,
+                count: 1,
+            }],
+            sources: vec![VertexAttributeSource {
+                selector: 3,
+                bytes: hex_bytes("0102030405060708"),
+            }],
+        }
+    );
+    assert_eq!(
+        state,
+        ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 0,
+                acc: 0,
+                bitpos: 56,
+            },
+            mode1_extra_readers: [zero_three_lane_reader(); 2],
+            stream_pos: 17,
+            segment_state: RansStateBuffer::cold(),
+            selector2_history: Vec::new(),
+        }
+    );
+}
+
 /// Interstage source setup/materialization for dispatch 29.
 ///
 /// Provenance: `capture_phase1_dispatch_29_interstage.py`,
@@ -4144,6 +4205,59 @@ fn vertex_attribute_writer_dispatch_dragonfly_copy2() {
     assert_eq!(&out[4368..4370], &hex_bytes("7f80"));
     assert_eq!(&out[5148..5150], &hex_bytes("7f80"));
     assert_eq!(out[7], 0xee, "out_offset is byte-based, not contiguous");
+}
+
+/// Writer-table dispatch (`0x10f93d8`) into `0x10fc920`.
+#[test]
+fn vertex_attribute_writer_dispatch_copy8() {
+    let transform = VertexAttributeTransform {
+        index: 2,
+        table_entry: ByteGroupTransformTableEntry { raw: 0x1c00_2012 },
+        out_offset: 0,
+        column: 0,
+        limit: 19,
+        ret: 19,
+        records: vec![[0x0001_0012, 280]],
+    };
+    let interstage = VertexAttributeInterstage {
+        dispatch: 20,
+        writer: VertexAttributeWriterTarget::Copy8,
+        descriptors: Vec::new(),
+        sources: vec![VertexAttributeSource {
+            selector: 3,
+            bytes: hex_bytes(concat!(
+                "1b0c22bf78e748bf9a9919bf8c6144bf6fcf18bf28e846bf",
+                "9a9919bfd814b63d9a9919bf30de7c3dc6ee22bf70308a3d",
+                "d0cccc3eb0b02a3fd0cccc3e661a323fa0fce03e20bb2f3f",
+                "7d434441829855c0d1884341e28f55c02d944441400454c0",
+                "3333b33f80a4833ebcb0b53ff0a6833e3333b33ffcb86a3e",
+                "d0cccc3e7af05a3f5856e43eb062513fd0cccc3e4eb4503f",
+            )),
+        }],
+    };
+    let mut out = vec![0xee; 19 * 28];
+
+    let usage = vertex_attribute_apply_writer(
+        &mut out,
+        VertexAttributeWriterCall {
+            transform: &transform,
+            interstage: &interstage,
+            matches: &[],
+            block_index: 0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        usage,
+        VertexAttributeWriterUsage {
+            sources: [144, 0, 0, 0],
+            match_entries: 0,
+        }
+    );
+    assert_eq!(&out[0..8], &hex_bytes("1b0c22bf78e748bf"));
+    assert_eq!(&out[18 * 28..18 * 28 + 8], &hex_bytes("a0fce03e20bb2f3f"));
+    assert_eq!(out[8], 0xee, "writer must keep the table stride");
 }
 
 /// Writer-table dispatch (`0x10f93d8`) into `0x10fdb30`.
@@ -6364,6 +6478,68 @@ fn transform_tail_copy4_allows_observed_zero_literal_and_zero_copy() {
     }
 }
 
+/// Transform tail `0x10fc920`: eight-byte literals plus copy-back.
+///
+/// Provenance: `capture_phase1_transform_tail_10fc920.py`,
+/// DgnObj_Fire_WallBeam_A_09 current 2, first record from entry `0x1c002012`:
+/// `(18,1,280)`. `verify_transform_tail_10fc920.py` replays the full observed
+/// population 1/1.
+#[test]
+fn transform_tail_copy8_wallbeam_first_record() {
+    let source = hex_bytes(concat!(
+        "1b0c22bf78e748bf9a9919bf8c6144bf6fcf18bf28e846bf",
+        "9a9919bfd814b63d9a9919bf30de7c3dc6ee22bf70308a3d",
+        "d0cccc3eb0b02a3fd0cccc3e661a323fa0fce03e20bb2f3f",
+        "7d434441829855c0d1884341e28f55c02d944441400454c0",
+        "3333b33f80a4833ebcb0b53ff0a6833e3333b33ffcb86a3e",
+        "d0cccc3e7af05a3f5856e43eb062513fd0cccc3e4eb4503f",
+    ));
+    let records = [TransformTailRecord {
+        literal_count: 18,
+        copy_count: 1,
+        back_distance: 280,
+    }];
+    let expected_slots = hex_bytes(concat!(
+        "1b0c22bf78e748bf9a9919bf8c6144bf6fcf18bf28e846bf",
+        "9a9919bfd814b63d9a9919bf30de7c3dc6ee22bf70308a3d",
+        "d0cccc3eb0b02a3fd0cccc3e661a323fa0fce03e20bb2f3f",
+        "7d434441829855c0d1884341e28f55c02d944441400454c0",
+        "3333b33f80a4833ebcb0b53ff0a6833e3333b33ffcb86a3e",
+        "d0cccc3e7af05a3f5856e43eb062513fd0cccc3e4eb4503f",
+        "a0fce03e20bb2f3f",
+    ));
+    let mut out = vec![0xee; 19 * 28];
+
+    let consumed = transform_tail_copy8_into(
+        &mut out,
+        TransformTailCopy8Spec {
+            output_stride: 28,
+            block_index: 0,
+            out_offset: 0,
+            records: &records,
+            source: &source,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(consumed, 18 * 8);
+    assert_eq!(expected_slots.len(), 19 * 8);
+    for (unit_index, expected) in expected_slots.chunks_exact(8).enumerate() {
+        let base = unit_index * 28;
+        assert_eq!(&out[base..base + 8], expected, "unit {unit_index}");
+    }
+    for (index, &byte) in out.iter().enumerate() {
+        if index % 28 >= 8 {
+            assert_eq!(byte, 0xee, "non-lane byte {index} changed");
+        }
+    }
+    assert_eq!(
+        &out[18 * 28..18 * 28 + 8],
+        &source[8 * 8..9 * 8],
+        "copy-back distance is in bytes"
+    );
+}
+
 /// Transform tail `0x10fbcc0`: two-byte direct and matched deltas.
 ///
 /// Provenance: `capture_transform_tails.py`, Animal_Bass `0x10fbcc0` call,
@@ -7891,6 +8067,95 @@ fn transform_tail_copy4_rejects_malformed_inputs() {
             },
         ),
         Err(TransformTailCopyError::CopyBeforeOutput)
+    );
+}
+
+#[test]
+fn transform_tail_copy8_rejects_malformed_inputs() {
+    let records = [TransformTailRecord {
+        literal_count: 1,
+        copy_count: 1,
+        back_distance: 28,
+    }];
+    let mut out = [0u8; 36];
+    assert_eq!(
+        transform_tail_copy8_into(
+            &mut out,
+            TransformTailCopy8Spec {
+                output_stride: 0,
+                block_index: 0,
+                out_offset: 0,
+                records: &records,
+                source: &[1; 8],
+            },
+        ),
+        Err(TransformTailCopyError::ZeroStride)
+    );
+    assert_eq!(
+        transform_tail_copy8_into(
+            &mut out,
+            TransformTailCopy8Spec {
+                output_stride: 28,
+                block_index: 0,
+                out_offset: 0,
+                records: &records,
+                source: &[1; 7],
+            },
+        ),
+        Err(TransformTailCopyError::SourceTooSmall)
+    );
+
+    let mut short_out = [0u8; 7];
+    assert_eq!(
+        transform_tail_copy8_into(
+            &mut short_out,
+            TransformTailCopy8Spec {
+                output_stride: 28,
+                block_index: 0,
+                out_offset: 0,
+                records: &records,
+                source: &[1; 8],
+            },
+        ),
+        Err(TransformTailCopyError::OutputTooSmall)
+    );
+
+    let copy_before = [TransformTailRecord {
+        literal_count: 1,
+        copy_count: 1,
+        back_distance: 56,
+    }];
+    assert_eq!(
+        transform_tail_copy8_into(
+            &mut out,
+            TransformTailCopy8Spec {
+                output_stride: 28,
+                block_index: 0,
+                out_offset: 0,
+                records: &copy_before,
+                source: &[1; 8],
+            },
+        ),
+        Err(TransformTailCopyError::CopyBeforeOutput)
+    );
+
+    let zero_copy = [TransformTailRecord {
+        literal_count: 1,
+        copy_count: 0,
+        back_distance: 0,
+    }];
+    assert_eq!(
+        transform_tail_copy8_into(
+            &mut out,
+            TransformTailCopy8Spec {
+                output_stride: 28,
+                block_index: 0,
+                out_offset: 0,
+                records: &zero_copy,
+                source: &[1; 8],
+            },
+        ),
+        Err(TransformTailCopyError::UnobservedRecordShape)
     );
 }
 

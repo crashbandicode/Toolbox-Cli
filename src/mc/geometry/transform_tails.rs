@@ -65,6 +65,20 @@ pub struct TransformTailCopy4Spec<'a> {
     pub source: &'a [u8],
 }
 
+/// Inputs for the eight-byte transform tail (`0x10fc920`).
+pub struct TransformTailCopy8Spec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Source stream pointer at `[x4]`.
+    pub source: &'a [u8],
+}
+
 /// Errors from fixed-width transform copy tails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransformTailCopyError {
@@ -158,6 +172,32 @@ pub fn transform_tail_copy4_into(
             unit_size: 4,
             allow_zero_literal: true,
             allow_zero_copy: true,
+        },
+    )
+}
+
+/// Apply the observed eight-byte copy transform tail (`0x10fc920`).
+///
+/// This is the `ldp`/`stp` sibling of `0x10fc5e0`: literals and copies move
+/// two u32 words per record unit, while cursor advance and back-distance remain
+/// byte counts (`0x10fc960..0x10fc9a8`). The captured population exercises
+/// zero-literal records, but not zero-copy records, so zero-copy shapes are
+/// rejected until captured.
+pub fn transform_tail_copy8_into(
+    out: &mut [u8],
+    spec: TransformTailCopy8Spec<'_>,
+) -> Result<usize, TransformTailCopyError> {
+    transform_tail_copy_units_into(
+        out,
+        TransformTailCopyUnitsSpec {
+            output_stride: spec.output_stride,
+            block_index: spec.block_index,
+            out_offset: spec.out_offset,
+            records: spec.records,
+            source: spec.source,
+            unit_size: 8,
+            allow_zero_literal: true,
+            allow_zero_copy: false,
         },
     )
 }
