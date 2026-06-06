@@ -65,6 +65,20 @@ pub struct TransformTailCopy2Spec<'a> {
     pub source: &'a [u8],
 }
 
+/// Inputs for the three-byte transform tail (`0x10fc720`).
+pub struct TransformTailCopy3Spec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Source stream pointer at `[x4]`.
+    pub source: &'a [u8],
+}
+
 /// Inputs for the four-byte transform tail (`0x10fc7d0`).
 pub struct TransformTailCopy4Spec<'a> {
     /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
@@ -162,6 +176,31 @@ pub fn transform_tail_copy2_into(
             unit_size: 2,
             allow_zero_literal: false,
             allow_zero_copy: false,
+        },
+    )
+}
+
+/// Apply the observed three-byte copy transform tail (`0x10fc720`).
+///
+/// This is the `ldrh`+`ldrb` / `strh`+`strb` sibling of `0x10fc5e0`:
+/// literals and copies move three bytes per record unit, while cursor advance
+/// and back-distance remain byte counts (`0x10fc760..0x10fc7bc`). The captured
+/// population exercises both zero-literal and zero-copy records.
+pub fn transform_tail_copy3_into(
+    out: &mut [u8],
+    spec: TransformTailCopy3Spec<'_>,
+) -> Result<usize, TransformTailCopyError> {
+    transform_tail_copy_units_into(
+        out,
+        TransformTailCopyUnitsSpec {
+            output_stride: spec.output_stride,
+            block_index: spec.block_index,
+            out_offset: spec.out_offset,
+            records: spec.records,
+            source: spec.source,
+            unit_size: 3,
+            allow_zero_literal: true,
+            allow_zero_copy: true,
         },
     )
 }

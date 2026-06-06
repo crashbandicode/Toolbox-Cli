@@ -561,6 +561,8 @@ pub enum VertexAttributeWriterTarget {
     Copy1,
     /// `0x10fc680`.
     Copy2,
+    /// `0x10fc720`.
+    Copy3,
     /// `0x10fc7d0`.
     Copy4,
     /// `0x10fc920`.
@@ -1058,10 +1060,11 @@ fn vertex_attribute_source_descriptors(
 
     match dispatch {
         // `0x10fc4b0`: one descriptor, no setup varint (`0x10fc4b0..0x10fc4cc`).
-        15 | 16 | 18 | 20 => {
+        15 | 16 | 17 | 18 | 20 => {
             let writer = match dispatch {
                 15 => VertexAttributeWriterTarget::Copy1,
                 16 => VertexAttributeWriterTarget::Copy2,
+                17 => VertexAttributeWriterTarget::Copy3,
                 18 => VertexAttributeWriterTarget::Copy4,
                 20 => VertexAttributeWriterTarget::Copy8,
                 _ => unreachable!(),
@@ -1365,6 +1368,21 @@ pub fn vertex_attribute_apply_writer(
             transform_tail_copy2_into(
                 out,
                 TransformTailCopy2Spec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    source,
+                },
+            )
+            .map(vertex_copy_usage)
+            .map_err(VertexAttributeWriterError::Copy)
+        }
+        VertexAttributeWriterTarget::Copy3 => {
+            let source = vertex_writer_source(spec.interstage, 0)?;
+            transform_tail_copy3_into(
+                out,
+                TransformTailCopy3Spec {
                     output_stride,
                     block_index: spec.block_index,
                     out_offset,

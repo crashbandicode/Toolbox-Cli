@@ -755,6 +755,7 @@ fn target_unit_size(target: VertexAttributeWriterTarget) -> usize {
     match target {
         VertexAttributeWriterTarget::Copy1 => 1,
         VertexAttributeWriterTarget::Copy2 => 2,
+        VertexAttributeWriterTarget::Copy3 => 3,
         VertexAttributeWriterTarget::Copy4 => 4,
         VertexAttributeWriterTarget::Copy8 => 8,
         VertexAttributeWriterTarget::U8PreviousDelta => 1,
@@ -783,6 +784,7 @@ fn target_addr(target: VertexAttributeWriterTarget) -> &'static str {
     match target {
         VertexAttributeWriterTarget::Copy1 => "0x10fc5e0",
         VertexAttributeWriterTarget::Copy2 => "0x10fc680",
+        VertexAttributeWriterTarget::Copy3 => "0x10fc720",
         VertexAttributeWriterTarget::Copy4 => "0x10fc7d0",
         VertexAttributeWriterTarget::Copy8 => "0x10fc920",
         VertexAttributeWriterTarget::U8PreviousDelta => "0x1101230",
