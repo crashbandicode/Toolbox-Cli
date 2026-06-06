@@ -643,6 +643,45 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec DirectionZero dispatch 104 u16x2/f16x3 predictor prerequisite
+**Committed:** The next UPDATE 69 writer prerequisite landed:
+dispatch 104 maps through setup `0x1108200` to the u16x2/f16x3 predictor
+writer `0x1108550`. The Rust port adds
+`TransformTailU16x2F16x3PredictSpec`,
+`transform_tail_u16x2_f16x3_predict_into`, `U16x2F16x3Predict` writer dispatch
+wiring, selector/reference resolution, helper-slot guarding, and explicit
+missing-reference/error boundaries.
+
+Durable evidence: `local-assets/re/FINDINGS.md` UPDATE 74 records the
+enumerate-all population from
+`local-assets/re/phase1_direction_zero_writer_loop_capture.json`: Armor_009 has
+two observed `0x1108550` rows, both selector 3, reference index 0, helper slot
+3, with combined records 16, direct units 2121, copy units 74, zero-seed rows
+2, previous-predict rows 339, aux-predict rows 1780, source usage
+`[1364, 7120, 1780]`, and aux entries 2195.
+`verify_transform_tail_1108550.py` replays **2/2** and proves the
+base-only/no-helper discriminator fails **2/2**.
+
+Fixture-free coverage:
+`transform_tail_u16x2_f16x3_predict_direction_zero_writer` hardcodes the compact
+Armor golden covering zero seed, previous-row prediction, helper projection, and
+copy rows; `transform_tail_u16x2_f16x3_predict_rejects_malformed_inputs`
+guards zero stride, zero reference stride, aux truncation, all three source
+truncations, sign-zero, zero-literal, output-too-small, copy-before-output, and
+predictor-before-output cases; setup, selector/reference, helper-slot rejection,
+and writer pipeline wiring are covered by the new vertex attribute tests.
+
+Verification: `cargo test --lib u16x2_f16x3_predict` passed 4/4;
+`cargo test --lib writer_reference` passed 2/2;
+`cargo test --lib vertex_attribute_writer` passed 22/22;
+`cargo test --lib mc::geometry` passed 178/178;
+`python local-assets/re/verify_transform_tail_1108550.py` passed 2/2. Full gate:
+`All green: 325 lib unit (incl. 178 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Next: rerun the DirectionZero state-4 guard population and lift only the
+validated branch now that the observed `0x1106250`, `0x110aba0`, and
+`0x1108550` prerequisites are ported.
+
 ### 2026-06-06 - MeshCodec DirectionZero dispatch 92 f16x3 predictor prerequisite
 **Committed:** The next UPDATE 69 writer prerequisite landed: dispatch 92 maps
 through setup `0x11071c0` to the f16x3 predictor writer `0x1106250`. The Rust

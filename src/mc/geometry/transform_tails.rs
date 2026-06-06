@@ -613,6 +613,30 @@ pub struct TransformTailF16x3PredictSpec<'a> {
     pub source4: &'a [u8],
 }
 
+/// Inputs for the two-u16 f16x3 reference predictor transform tail (`0x1108550`).
+pub struct TransformTailU16x2F16x3PredictSpec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Referenced attribute high byte selected by the writer-local five-bit reader.
+    pub reference_output_stride: usize,
+    /// Referenced attribute byte offset selected by the same reader.
+    pub reference_out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Predictor table at `[x0+8]`, indexed by emitted vertex.
+    pub aux_table: &'a [u64],
+    /// Seed row and zero-aux previous-row u16 delta stream at `[x4]`.
+    pub source0: &'a [u8],
+    /// Base two-u16 rows for non-zero aux literals at `[x4+8]`.
+    pub source1: &'a [u8],
+    /// Non-zero aux orientation byte stream at `[x4+0x10]`.
+    pub source2: &'a [u8],
+}
+
 /// Inputs for the packed 10-10-10 seed/previous/matched delta tail (`0x1103840`).
 pub struct TransformTailPack10x3PreviousDeltaSpec<'a> {
     /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
@@ -729,6 +753,15 @@ pub struct TransformTailF16x3PredictUsage {
     pub aux_entries: usize,
 }
 
+/// Source and aux-table consumption from the two-u16 f16x3 reference predictor tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransformTailU16x2F16x3PredictUsage {
+    pub source0: usize,
+    pub source1: usize,
+    pub source2: usize,
+    pub aux_entries: usize,
+}
+
 /// Errors from delta-match transform tails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransformTailDeltaError {
@@ -746,6 +779,7 @@ pub enum TransformTailDeltaError {
     CopyBeforeOutput,
     ArithmeticOverflow,
     UnobservedRecordShape,
+    UnobservedPredictorSignZero,
 }
 
 #[inline]
@@ -983,6 +1017,143 @@ fn f16x3_predictor_row(
             .ok_or(TransformTailDeltaError::PredictorBeforeOutput)?;
         f16x3_row_at(out, previous)
     }
+}
+
+fn f16x3_row_as_f32(out: &[u8], offset: usize) -> Result<[f32; 3], TransformTailDeltaError> {
+    let row = f16x3_row_at(out, offset)?;
+    Ok([
+        half_to_f32(row[0]),
+        half_to_f32(row[1]),
+        half_to_f32(row[2]),
+    ])
+}
+
+fn u16x2_row_as_f32(out: &[u8], offset: usize) -> Result<[f32; 2], TransformTailDeltaError> {
+    let end = offset
+        .checked_add(4)
+        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let row = out
+        .get(offset..end)
+        .ok_or(TransformTailDeltaError::PredictorBeforeOutput)?;
+    Ok([
+        f32::from(
+            read_transform_tail_u16(row, 0)
+                .ok_or(TransformTailDeltaError::PredictorBeforeOutput)?,
+        ),
+        f32::from(
+            read_transform_tail_u16(row, 2)
+                .ok_or(TransformTailDeltaError::PredictorBeforeOutput)?,
+        ),
+    ])
+}
+
+fn checked_predictor_lookback(
+    cursor: usize,
+    distance: usize,
+    stride: usize,
+) -> Result<usize, TransformTailDeltaError> {
+    if distance == 0 {
+        return Err(TransformTailDeltaError::PredictorBeforeOutput);
+    }
+    distance
+        .checked_mul(stride)
+        .and_then(|bytes| cursor.checked_sub(bytes))
+        .ok_or(TransformTailDeltaError::PredictorBeforeOutput)
+}
+
+fn round_fcvtns_i32(value: f32) -> i32 {
+    value.round_ties_even() as i32
+}
+
+struct U16x2F16x3PredictorDeltaSpec {
+    cursor: usize,
+    output_stride: usize,
+    reference_cursor: usize,
+    reference_stride: usize,
+    distance_a: usize,
+    distance_b: usize,
+    sign_byte: u8,
+}
+
+fn u16x2_f16x3_predictor_delta(
+    out: &[u8],
+    spec: U16x2F16x3PredictorDeltaSpec,
+) -> Result<[i32; 2], TransformTailDeltaError> {
+    if spec.sign_byte == 0 {
+        return Err(TransformTailDeltaError::UnobservedPredictorSignZero);
+    }
+
+    let reference_a = checked_predictor_lookback(
+        spec.reference_cursor,
+        spec.distance_a,
+        spec.reference_stride,
+    )?;
+    let reference_b = checked_predictor_lookback(
+        spec.reference_cursor,
+        spec.distance_b,
+        spec.reference_stride,
+    )?;
+    let current_a = checked_predictor_lookback(spec.cursor, spec.distance_a, spec.output_stride)?;
+    let current_b = checked_predictor_lookback(spec.cursor, spec.distance_b, spec.output_stride)?;
+
+    let anchor = f16x3_row_as_f32(out, reference_a)?;
+    let other = f16x3_row_as_f32(out, reference_b)?;
+    let current = f16x3_row_as_f32(out, spec.reference_cursor)?;
+    let anchor_uv = u16x2_row_as_f32(out, current_a)?;
+    let other_uv = u16x2_row_as_f32(out, current_b)?;
+
+    let reference_delta = [
+        other[0] - anchor[0],
+        other[1] - anchor[1],
+        other[2] - anchor[2],
+    ];
+    let current_delta = [
+        current[0] - anchor[0],
+        current[1] - anchor[1],
+        current[2] - anchor[2],
+    ];
+    let denominator = (reference_delta[0] * reference_delta[0]
+        + reference_delta[1] * reference_delta[1]
+        + reference_delta[2] * reference_delta[2])
+        .max(f32::from_bits(0x3580_0000));
+    let scale = (reference_delta[0] * current_delta[0]
+        + reference_delta[1] * current_delta[1]
+        + reference_delta[2] * current_delta[2])
+        / denominator;
+
+    let projected = [
+        anchor[0] + reference_delta[0] * scale,
+        anchor[1] + reference_delta[1] * scale,
+        anchor[2] + reference_delta[2] * scale,
+    ];
+    let interpolated_uv = [
+        anchor_uv[0] + (other_uv[0] - anchor_uv[0]) * scale,
+        anchor_uv[1] + (other_uv[1] - anchor_uv[1]) * scale,
+    ];
+    let projected_delta = [
+        projected[0] - anchor[0],
+        projected[1] - anchor[1],
+        projected[2] - anchor[2],
+    ];
+    let current_len = current_delta[0] * current_delta[0]
+        + current_delta[1] * current_delta[1]
+        + current_delta[2] * current_delta[2];
+    let projected_len = projected_delta[0] * projected_delta[0]
+        + projected_delta[1] * projected_delta[1]
+        + projected_delta[2] * projected_delta[2];
+    let radius = ((current_len - projected_len) / denominator)
+        .max(0.0)
+        .sqrt();
+    let uv_delta = [other_uv[0] - anchor_uv[0], other_uv[1] - anchor_uv[1]];
+    let predicted = [
+        interpolated_uv[0] + uv_delta[1] * radius,
+        interpolated_uv[1] - uv_delta[0] * radius,
+    ];
+
+    Ok([
+        round_fcvtns_i32(predicted[0]),
+        round_fcvtns_i32(predicted[1]),
+    ])
 }
 
 #[inline]
@@ -2239,6 +2410,162 @@ pub fn transform_tail_f16x3_predict_into(
         source2: source2_pos,
         source3: source3_pos,
         source4: source4_pos,
+        aux_entries,
+    })
+}
+
+/// Apply the observed two-u16 f16x3 reference predictor tail (`0x1108550`).
+///
+/// Dispatch setup `0x1108200` supplies three streams: source0 for zero-aux
+/// seed/previous deltas, source1 for non-zero-aux base rows, and source2 for
+/// the non-zero orientation byte. The writer-local five-bit selector chooses a
+/// prior f16x3 attribute; the observed helper slot 3 (`0x11094b0`) projects the
+/// current f16x3 row onto two earlier f16x3 rows, interpolates their already
+/// written u16x2 rows, and returns two `fcvtns` deltas
+/// (`0x11094b0..0x1109638`). Copy runs clone four bytes by record distance
+/// (`0x1108660..0x1108670`).
+pub fn transform_tail_u16x2_f16x3_predict_into(
+    out: &mut [u8],
+    spec: TransformTailU16x2F16x3PredictSpec<'_>,
+) -> Result<TransformTailU16x2F16x3PredictUsage, TransformTailDeltaError> {
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
+    let reference_base = transform_tail_delta_cursor_init(
+        spec.block_index,
+        spec.reference_output_stride,
+        spec.reference_out_offset,
+    )?;
+    let mut source0_pos = 0usize;
+    let mut source1_pos = 0usize;
+    let mut source2_pos = 0usize;
+    let mut emitted = 0usize;
+    let mut aux_entries = 0usize;
+
+    for record in spec.records {
+        if record.literal_count == 0 {
+            return Err(TransformTailDeltaError::UnobservedRecordShape);
+        }
+
+        for _ in 0..record.literal_count {
+            let aux_entry = *spec
+                .aux_table
+                .get(emitted)
+                .ok_or(TransformTailDeltaError::AuxTableTooSmall)?;
+            aux_entries = aux_entries.max(
+                emitted
+                    .checked_add(1)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?,
+            );
+            let cursor_end = cursor
+                .checked_add(4)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+
+            if aux_entry != 0 {
+                let source1_end = source1_pos
+                    .checked_add(4)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let base0 = read_transform_tail_u16(spec.source1, source1_pos)
+                    .filter(|_| source1_end <= spec.source1.len())
+                    .ok_or(TransformTailDeltaError::Source1TooSmall)?;
+                let source1_second = source1_pos
+                    .checked_add(2)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let base1 = read_transform_tail_u16(spec.source1, source1_second)
+                    .filter(|_| source1_end <= spec.source1.len())
+                    .ok_or(TransformTailDeltaError::Source1TooSmall)?;
+                let sign_byte = *spec
+                    .source2
+                    .get(source2_pos)
+                    .ok_or(TransformTailDeltaError::Source2TooSmall)?;
+                let reference_cursor = emitted
+                    .checked_mul(spec.reference_output_stride)
+                    .and_then(|offset| reference_base.checked_add(offset))
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let predicted = u16x2_f16x3_predictor_delta(
+                    out,
+                    U16x2F16x3PredictorDeltaSpec {
+                        cursor,
+                        output_stride: spec.output_stride,
+                        reference_cursor,
+                        reference_stride: spec.reference_output_stride,
+                        distance_a: ((aux_entry >> 22) & 0x1f_ffff) as usize,
+                        distance_b: (aux_entry >> 43) as usize,
+                        sign_byte,
+                    },
+                )?;
+                let slot = out
+                    .get_mut(cursor..cursor_end)
+                    .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                write_transform_tail_u16(slot, 0, base0.wrapping_add(predicted[0] as u16));
+                write_transform_tail_u16(slot, 2, base1.wrapping_add(predicted[1] as u16));
+                source1_pos = source1_end;
+                source2_pos = source2_pos
+                    .checked_add(1)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            } else {
+                let source0_end = source0_pos
+                    .checked_add(4)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let source0 = spec
+                    .source0
+                    .get(source0_pos..source0_end)
+                    .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                if emitted == 0 {
+                    let seed = read_transform_tail_u32(source0, 0)
+                        .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                    let slot = out
+                        .get_mut(cursor..cursor_end)
+                        .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                    write_transform_tail_u32(slot, 0, seed);
+                } else {
+                    let previous = cursor
+                        .checked_sub(spec.output_stride)
+                        .ok_or(TransformTailDeltaError::PredictorBeforeOutput)?;
+                    let previous0 = read_transform_tail_u16(out, previous)
+                        .ok_or(TransformTailDeltaError::PredictorBeforeOutput)?;
+                    let previous_second = previous
+                        .checked_add(2)
+                        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                    let previous1 = read_transform_tail_u16(out, previous_second)
+                        .ok_or(TransformTailDeltaError::PredictorBeforeOutput)?;
+                    let delta0 = read_transform_tail_u16(source0, 0)
+                        .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                    let delta1 = read_transform_tail_u16(source0, 2)
+                        .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                    let slot = out
+                        .get_mut(cursor..cursor_end)
+                        .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                    write_transform_tail_u16(slot, 0, previous0.wrapping_add(delta0));
+                    write_transform_tail_u16(slot, 2, previous1.wrapping_add(delta1));
+                }
+                source0_pos = source0_end;
+            }
+
+            emitted = emitted
+                .checked_add(1)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        }
+
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            4,
+            record.back_distance,
+            record.copy_count,
+        )?;
+        emitted = emitted
+            .checked_add(usize::from(record.copy_count))
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    }
+
+    Ok(TransformTailU16x2F16x3PredictUsage {
+        source0: source0_pos,
+        source1: source1_pos,
+        source2: source2_pos,
         aux_entries,
     })
 }

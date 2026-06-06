@@ -982,6 +982,8 @@ pub enum VertexAttributeWriterTarget {
     Pack10x3Normal,
     /// `0x1106250`.
     F16x3Predict,
+    /// `0x1108550`.
+    U16x2F16x3Predict,
     /// `0x110ae30`.
     I8x3NormalDelta,
     /// `0x110afb0`.
@@ -1060,6 +1062,15 @@ pub struct VertexAttributeWriterCall<'a> {
     pub block_index: usize,
 }
 
+/// Referenced attribute selected by predictor writers with a local bit-reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexAttributeWriterReference {
+    /// Referenced attribute high byte (`entry >> 24`).
+    pub output_stride: usize,
+    /// Referenced attribute byte offset from `ctx+0x27c`.
+    pub out_offset: usize,
+}
+
 /// Writer-table state rooted at `ctx+0x218`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VertexAttributeWriterTable<'a> {
@@ -1094,6 +1105,27 @@ pub enum VertexAttributeWriterError {
     Copy(TransformTailCopyError),
     /// Delta/match writer rejected its inputs.
     Delta(TransformTailDeltaError),
+    /// Predictor writer needed a referenced attribute selected by writer-local bits.
+    MissingReference { target: VertexAttributeWriterTarget },
+    /// Resolving the writer-local referenced attribute failed.
+    Reference(VertexAttributeWriterReferenceError),
+}
+
+/// Errors from predictor writer-local reference selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VertexAttributeWriterReferenceError {
+    /// The writer-local reverse reader tried to load outside the payload.
+    PayloadTooSmall,
+    /// Selector or table arithmetic overflowed.
+    ArithmeticOverflow,
+    /// The selector chose a table entry outside the current table.
+    ReferenceIndexOutOfRange { index: usize, total: usize },
+    /// The selected reference has not been written yet.
+    ReferenceNotReady { reference: usize, current: usize },
+    /// The selected helper-table slot is not covered by ground-truth replay.
+    UnobservedPredictorHelperSlot { slot: u8 },
+    /// The selected reference entry has zero stride.
+    UnobservedZeroReferenceStride { index: usize },
 }
 
 /// One completed per-attribute writer-loop step.
@@ -1360,6 +1392,84 @@ fn take_vertex_attribute_dispatch(
     Ok(dispatch)
 }
 
+fn take_vertex_writer_reference_selector(
+    payload: &[u8],
+    reader: &mut RansThreeLaneReader,
+) -> Result<u8, VertexAttributeWriterReferenceError> {
+    let bitpos = reader.bitpos;
+    let ptr_step = ((bitpos >> 3) ^ 7) as usize;
+    let ptr = reader
+        .ptr
+        .checked_sub(ptr_step)
+        .ok_or(VertexAttributeWriterReferenceError::PayloadTooSmall)?;
+    let bits = (checked_byte_group_u64_le(payload, reader.ptr)
+        .map_err(|_| VertexAttributeWriterReferenceError::PayloadTooSmall)?
+        >> (bitpos & 63))
+        | reader.acc;
+    let selector = (bits >> 58) as u8;
+    reader.ptr = ptr;
+    reader.acc = bits
+        .checked_shl(5)
+        .ok_or(VertexAttributeWriterReferenceError::ArithmeticOverflow)?;
+    reader.bitpos = (bitpos | 0x38)
+        .checked_sub(5)
+        .ok_or(VertexAttributeWriterReferenceError::ArithmeticOverflow)?;
+    Ok(selector)
+}
+
+/// Resolve the referenced attribute for predictor writers with local selector bits.
+pub fn vertex_attribute_writer_reference(
+    byte_state: &mut ByteGroupReadState,
+    payload: &[u8],
+    table: &TableBuild,
+    current_index: usize,
+) -> Result<VertexAttributeWriterReference, VertexAttributeWriterReferenceError> {
+    let selector = take_vertex_writer_reference_selector(payload, &mut byte_state.reader)?;
+    let reference_index = ((selector & 0x3c) >> 2) as usize;
+    let total = table.entries.len();
+    if reference_index >= total || reference_index >= table.offsets.len() {
+        return Err(
+            VertexAttributeWriterReferenceError::ReferenceIndexOutOfRange {
+                index: reference_index,
+                total,
+            },
+        );
+    }
+    if reference_index >= current_index {
+        return Err(VertexAttributeWriterReferenceError::ReferenceNotReady {
+            reference: reference_index,
+            current: current_index,
+        });
+    }
+
+    let reference_entry = ByteGroupTransformTableEntry {
+        raw: table.entries[reference_index],
+    };
+    let helper_slot = (((reference_entry.raw >> 3) & 3) as u8)
+        .checked_add(selector & 2)
+        .ok_or(VertexAttributeWriterReferenceError::ArithmeticOverflow)?;
+    if helper_slot != 3 {
+        return Err(
+            VertexAttributeWriterReferenceError::UnobservedPredictorHelperSlot {
+                slot: helper_slot,
+            },
+        );
+    }
+
+    let output_stride = reference_entry.width_stride() as usize;
+    if output_stride == 0 {
+        return Err(
+            VertexAttributeWriterReferenceError::UnobservedZeroReferenceStride {
+                index: reference_index,
+            },
+        );
+    }
+    Ok(VertexAttributeWriterReference {
+        output_stride,
+        out_offset: table.offsets[reference_index] as usize,
+    })
+}
+
 fn vertex_entry_rounded_bytes(
     table_entry: ByteGroupTransformTableEntry,
 ) -> Result<usize, VertexAttributeInterstageError> {
@@ -1623,6 +1733,22 @@ fn vertex_attribute_source_descriptors(
                 ],
             ))
         }
+        // `0x1108200`: u16x2 rows predicted from a writer-selected f16x3
+        // reference attribute. One setup varint splits the vertex population:
+        // source0 is the zero-aux seed/previous stream, source1 and source2
+        // cover the remaining non-zero aux rows (`0x1108200..0x110825c`).
+        104 => {
+            let split = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
+            let remainder = vertex_split_remainder(dispatch, wrapper_ret, split)?;
+            Ok((
+                VertexAttributeWriterTarget::U16x2F16x3Predict,
+                vec![
+                    vertex_source_descriptor(dispatch, 0, 1, 2, split)?,
+                    vertex_source_descriptor(dispatch, 1, 1, 2, remainder)?,
+                    vertex_source_descriptor(dispatch, 2, 0, 1, remainder)?,
+                ],
+            ))
+        }
         // `0x110aa00`: normal-vector setup, no split varint
         // (`0x110aa00..0x110aa34`).
         107 | 108 => Ok((
@@ -1801,6 +1927,16 @@ fn vertex_f16x3_predict_usage(usage: TransformTailF16x3PredictUsage) -> VertexAt
     }
 }
 
+fn vertex_u16x2_f16x3_predict_usage(
+    usage: TransformTailU16x2F16x3PredictUsage,
+) -> VertexAttributeWriterUsage {
+    VertexAttributeWriterUsage {
+        sources: [usage.source0, usage.source1, usage.source2, 0, 0],
+        match_entries: 0,
+        aux_entries: usage.aux_entries,
+    }
+}
+
 /// Apply the writer target selected by the vertex interstage dispatch table.
 ///
 /// This mirrors the indirect call through `0x39ba570` at `0x10f93d8`: the
@@ -1810,6 +1946,23 @@ fn vertex_f16x3_predict_usage(usage: TransformTailF16x3PredictUsage) -> VertexAt
 pub fn vertex_attribute_apply_writer(
     out: &mut [u8],
     spec: VertexAttributeWriterCall<'_>,
+) -> Result<VertexAttributeWriterUsage, VertexAttributeWriterError> {
+    vertex_attribute_apply_writer_resolved(out, spec, None)
+}
+
+/// Apply a writer after resolving any writer-local referenced attribute.
+pub fn vertex_attribute_apply_writer_with_reference(
+    out: &mut [u8],
+    spec: VertexAttributeWriterCall<'_>,
+    reference: VertexAttributeWriterReference,
+) -> Result<VertexAttributeWriterUsage, VertexAttributeWriterError> {
+    vertex_attribute_apply_writer_resolved(out, spec, Some(reference))
+}
+
+fn vertex_attribute_apply_writer_resolved(
+    out: &mut [u8],
+    spec: VertexAttributeWriterCall<'_>,
+    reference: Option<VertexAttributeWriterReference>,
 ) -> Result<VertexAttributeWriterUsage, VertexAttributeWriterError> {
     let output_stride = spec.transform.table_entry.width_stride() as usize;
     let out_offset = spec.transform.out_offset as usize;
@@ -2289,6 +2442,31 @@ pub fn vertex_attribute_apply_writer(
             .map(vertex_f16x3_predict_usage)
             .map_err(VertexAttributeWriterError::Delta)
         }
+        VertexAttributeWriterTarget::U16x2F16x3Predict => {
+            let reference = reference.ok_or(VertexAttributeWriterError::MissingReference {
+                target: spec.interstage.writer,
+            })?;
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            let source2 = vertex_writer_source(spec.interstage, 2)?;
+            transform_tail_u16x2_f16x3_predict_into(
+                out,
+                TransformTailU16x2F16x3PredictSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    reference_output_stride: reference.output_stride,
+                    reference_out_offset: reference.out_offset,
+                    records: &records,
+                    aux_table: spec.aux_table,
+                    source0,
+                    source1,
+                    source2,
+                },
+            )
+            .map(vertex_u16x2_f16x3_predict_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
         VertexAttributeWriterTarget::I8x3NormalDelta => {
             let source0 = vertex_writer_source(spec.interstage, 0)?;
             let source1 = vertex_writer_source(spec.interstage, 1)?;
@@ -2368,7 +2546,19 @@ pub fn vertex_attribute_writer_loop_step(
     )
     .map_err(|error| VertexAttributeWriterLoopError::Interstage { index, error })?;
     let target = interstage.writer;
-    let usage = vertex_attribute_apply_writer(
+    let reference = if target == VertexAttributeWriterTarget::U16x2F16x3Predict {
+        Some(
+            vertex_attribute_writer_reference(&mut state.byte_state, payload, table, index)
+                .map_err(|error| VertexAttributeWriterLoopError::Writer {
+                    index,
+                    target,
+                    error: VertexAttributeWriterError::Reference(error),
+                })?,
+        )
+    } else {
+        None
+    };
+    let usage = vertex_attribute_apply_writer_resolved(
         out,
         VertexAttributeWriterCall {
             transform: &transform,
@@ -2377,6 +2567,7 @@ pub fn vertex_attribute_writer_loop_step(
             aux_table: writer_table.aux_table,
             block_index: writer_table.block_index,
         },
+        reference,
     )
     .map_err(|error| VertexAttributeWriterLoopError::Writer {
         index,

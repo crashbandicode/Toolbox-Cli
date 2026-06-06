@@ -790,6 +790,7 @@ fn target_unit_size(target: VertexAttributeWriterTarget) -> usize {
         VertexAttributeWriterTarget::I8x2Normal => 3,
         VertexAttributeWriterTarget::Pack10x3Normal => 4,
         VertexAttributeWriterTarget::F16x3Predict => 6,
+        VertexAttributeWriterTarget::U16x2F16x3Predict => 4,
         VertexAttributeWriterTarget::I8x3NormalDelta => 3,
         VertexAttributeWriterTarget::Pack10x3Delta => 4,
     }
@@ -824,6 +825,7 @@ fn target_addr(target: VertexAttributeWriterTarget) -> &'static str {
         VertexAttributeWriterTarget::I8x2Normal => "0x110aac0",
         VertexAttributeWriterTarget::Pack10x3Normal => "0x110aba0",
         VertexAttributeWriterTarget::F16x3Predict => "0x1106250",
+        VertexAttributeWriterTarget::U16x2F16x3Predict => "0x1108550",
         VertexAttributeWriterTarget::I8x3NormalDelta => "0x110ae30",
         VertexAttributeWriterTarget::Pack10x3Delta => "0x110afb0",
     }
