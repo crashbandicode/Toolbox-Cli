@@ -442,8 +442,9 @@ pub struct VertexKernelState4EntrySpec<'a> {
 
 /// Replay the observed state machine from a state-0 table to `0x11104d0`.
 ///
-/// The original CP5d golden starts directly at state 4. Bee adds one validated
-/// state-3 index leaf first: `0x10f8b60..0x10f8b94` calls
+/// The original CP5d golden starts from the `0x10f900c` branch-bit-clear path.
+/// Bee adds one validated state-3 index leaf first: `0x10f900c` takes the
+/// branch-bit-set path to `0x10f9080`, then `0x10f8b60..0x10f8b94` calls
 /// `0x10f9690 -> 0x10fa980`, `0x10faaf0` fills the code window, the
 /// `0x10faa44` unary is zero, and `0x10f8c58..0x10f8c1c` skips the raw index
 /// data window before the next sub-block's state-0 table reaches state 4.
@@ -452,7 +453,7 @@ pub fn vertex_kernel_state4_entry_from_table(
     state: &mut ByteGroupReadState,
     spec: VertexKernelState4EntrySpec<'_>,
 ) -> Result<VertexKernelState4Entry, VertexKernelStateError> {
-    if spec.first_table.dir_bit != 0 {
+    if spec.first_table.branch_bit == 0 {
         apply_state0_table_to_byte_state(spec.first_table, state);
         return vertex_kernel_state4_entry(
             payload,

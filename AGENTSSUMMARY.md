@@ -643,6 +643,42 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec P1-HEAD-1 branch bit vs direction bit
+**Committed:** P1-HEAD-1 now distinguishes the state-branch bit tested at
+`0x10f900c` from the trailing direction bit stored at `ctx+0x118`. This is a
+guard/routing correction, not closure of P1-HEAD-1.
+
+Durable evidence: `capture_phase1_index_submesh_count2.py` captured
+`AsbObj_AssassinParts.AsbObj_Assassin_BaloonkeyPlate_01.bfres.mc`, whose first
+table is `branch_bit=0,direction=0` and whose trace reaches `0x10f90d4` before
+running `0x10f9690 -> 0x10fa980`; it never reaches `0x11104d0`.
+`verify_phase1_branch_direction_split.py` replays first-table coverage **5/5**
+for Bear/Bass/Dragonfly, Bee, and the count-2 representative, then replays the
+count-2 direct path to the observed `UnobservedFirstLeafUnary(0)` guard.
+
+Rust summary: `TableBuild` now exposes `branch_bit`; `vertex_kernel_state4_entry_from_table`
+uses `branch_bit == 1` for the Bee-shaped skipped-index path and otherwise
+uses the direct `0x10f90d4` path. Fixture-free golden
+`vertex_kernel_state4_entry_count2_direction_zero_uses_direct_branch` embeds the
+minimal count-2 payload bytes and discriminates the old direction-zero shortcut,
+which incorrectly returned `UnobservedIndexSubmeshCount(2)`.
+
+Verification: `python local-assets/re/verify_phase1_branch_direction_split.py`
+passed; `cargo test --lib mc::geometry::tests::vertex_kernel_state4_entry`
+passed 4/4; `cargo test --lib mc::geometry::tests::bear_first_subblock_indices_match_oracle`
+passed 1/1; ignored `mc_vertex_decode_oracle` passed 2/2. Full gate:
+`All green: 301 lib unit (incl. 155 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Ignored corpus sweep still fails by design with **12,395 seen; 278 no-FMSH/no
+mesh; 315 decoded clean; 11,802 failures**. The misleading `0x10f90d4 state-4
+entry: UnobservedIndexSubmeshCount(2)` class dropped from 2,736 to **994**.
+New head: `UnobservedDecisionBit(1)` at **2,098**, then
+`UnobservedWindowFlag { window: "data", flag: 0 }` at **1,727** and
+`UnobservedFirstLeafUnary(0)` at **1,191**.
+
+Next: capture/replay the now-exposed `UnobservedDecisionBit(1)` population
+before touching any dispatch tail.
+
 ### 2026-06-06 - MeshCodec P1-HEAD-1 state-3 index leaf before state 4
 **Committed:** P1-HEAD-1 ports the validated Bee-shaped state-machine branch
 where a state-3 index leaf runs before the first state-4 entry. This is a

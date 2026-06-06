@@ -316,6 +316,7 @@ fn table_build(value: &Value) -> TableBuild {
         rev_bitpos: 0,
         w8: u32_field(value, "vertex_count"),
         symbols: u32_field(value, "count"),
+        branch_bit: 0,
         dir_bit: 1,
         entries: u32_vec(&value["entries"]),
         offsets: u32_vec(&value["offsets"]),

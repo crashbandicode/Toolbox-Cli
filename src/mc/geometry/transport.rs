@@ -134,7 +134,11 @@ pub struct TableBuild {
     pub w8: u32,
     /// Number of canonical-Huffman symbols (`w17`).
     pub symbols: u32,
-    /// The trailing direction bit (`ctx[0x118]`; 0 ⇒ index path).
+    /// Branch bit tested at `0x10f900c`; `1` skips the direction-bit consume and
+    /// enters the state-3 index-leaf path.
+    pub branch_bit: u32,
+    /// The trailing direction bit stored at `ctx+0x118` on the branch-clear path.
+    /// Branch-set callers use the post-consume cursor only to rewind this bit.
     pub dir_bit: u32,
     /// `ctx+0x240`: per-symbol packed entry (`0x10fb2e0` reads byte-count/type/
     /// bits/forward-byte from this).
@@ -152,10 +156,13 @@ pub struct TableBuild {
 }
 
 /// Port of state 0's continuation (`0x10f8cc8..0x10f9028`): read the forward
-/// var-int `w8`, then build the canonical-Huffman table (`0x10f8d20`: a 4-bit
-/// symbol count from reverse-A, then `symbols` entries of 11 reverse-A bits +
-/// conditional forward byte-pairs), then one direction bit. Returns the advanced
-/// cursors **and** the table (validated byte-exact against the decoder).
+/// var-int `w8`, then build the canonical-Huffman table (`0x10f8d20`: one
+/// state-branch bit, a 4-bit symbol count from reverse-A, then `symbols`
+/// entries of 11 reverse-A bits + conditional forward byte-pairs), then the
+/// trailing direction bit. Returns the advanced cursors **and** the table
+/// (validated byte-exact against the decoder). The game skips that last
+/// direction-bit consume when `branch_bit` is set; state-3 callers rewind the
+/// single bit before replaying the skipped-index path.
 ///
 /// `rev_ptr` is the reverse-A pointer (payload offset; the decoder seeds it at
 /// `sub_a_size - 8`); `w13` is the decoder's `ctx[0x2c0]` (an alignment-like
@@ -180,6 +187,7 @@ pub fn state0_table_builder(
     let mut x12 = f.pos;
 
     let x9 = x15 | rev_acc;
+    let branch_bit = (x9 >> 63) as u32 & 1;
     let w15 = w12 | 0x38;
     x11 = x11.wrapping_sub(w14 as usize);
     let symbols = ((x9 >> 0x3b) & 0xf) as u32;
@@ -267,6 +275,7 @@ pub fn state0_table_builder(
         rev_bitpos: w10,
         w8,
         symbols,
+        branch_bit,
         dir_bit,
         entries,
         offsets,

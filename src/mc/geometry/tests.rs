@@ -65,7 +65,10 @@ fn bear_first_subblock_indices_match_oracle() {
     assert_eq!(tb.fwd, 15, "forward cursor after table builder");
     assert_eq!(tb.rev_ptr, sub_a - 8 - 18, "reverse-A ptr (P+32807)");
     assert_eq!(tb.rev_bitpos, 50, "reverse-A bit position");
-    assert_eq!((tb.w8, tb.symbols, tb.dir_bit), (3327, 8, 1));
+    assert_eq!(
+        (tb.w8, tb.symbols, tb.branch_bit, tb.dir_bit),
+        (3327, 8, 0, 1)
+    );
     // Canonical-Huffman table values (golden, from the oracle/emulator).
     assert_eq!(
         tb.entries,
@@ -3287,6 +3290,7 @@ fn vertex_attribute_driver_dragonfly_setup_and_steps() {
         rev_bitpos: 0,
         w8: 523,
         symbols: 9,
+        branch_bit: 0,
         dir_bit: 1,
         entries: vec![
             0x0a00_100b,
@@ -5241,6 +5245,7 @@ fn vertex_attribute_writer_loop_step_dragonfly_copy2() {
         rev_bitpos: 0,
         w8: 523,
         symbols: 1,
+        branch_bit: 0,
         dir_bit: 1,
         entries: vec![0x0a00_0802],
         offsets: vec![8],
@@ -5533,6 +5538,7 @@ fn vertex_kernel_state4_entry_bee_skips_index_leaf() {
         rev_bitpos: 46,
         w8: 56,
         symbols: 4,
+        branch_bit: 1,
         dir_bit: 0,
         entries: Vec::new(),
         offsets: Vec::new(),
@@ -5606,6 +5612,87 @@ fn vertex_kernel_state4_entry_bee_skips_index_leaf() {
     );
     assert_eq!(state.reader, entry.reader);
     assert_eq!(state.stream_pos, entry.stream_pos);
+}
+
+/// P1-HEAD-1 branch-bit/direction-bit split at `0x10f900c..0x10f9028`.
+///
+/// Provenance: `capture_phase1_index_submesh_count2.py`,
+/// `AsbObj_AssassinParts.AsbObj_Assassin_BaloonkeyPlate_01.bfres.mc`. The
+/// first state-0 table is `branch_bit=0,direction=0`: the disassembly consumes
+/// the direction bit at `0x10f9010..0x10f9024`, then reaches the `0x10f90d4`
+/// decision site. This rules out the old shortcut that treated any direction-0
+/// table as the Bee-shaped state-3 skip branch.
+#[test]
+fn vertex_kernel_state4_entry_count2_direction_zero_uses_direct_branch() {
+    let payload = sparse_payload(8870, &[(15, "814d"), (8858, "3719762b25536d228a68872e")]);
+    let first_header = SubBlockHeader {
+        count: 2,
+        a: 1,
+        b: 0,
+        c: 1,
+        d: 3456,
+        e: 0,
+        f: 3456,
+    };
+    let first_table = TableBuild {
+        fwd: 15,
+        rev_ptr: 8860,
+        rev_acc: 0x3fe8_88fa_2e87_6000,
+        rev_bitpos: 48,
+        w8: 2330,
+        symbols: 6,
+        branch_bit: 0,
+        dir_bit: 0,
+        entries: Vec::new(),
+        offsets: Vec::new(),
+        cols: Vec::new(),
+        longs: Vec::new(),
+        byte_group_total: 0,
+        max_prod: 0,
+    };
+    let spec = VertexKernelState4EntrySpec {
+        first_header,
+        first_table: &first_table,
+        remaining_subblocks: 19,
+        reverse_mode: u32::MAX,
+    };
+
+    let mut state = byte_group_state(
+        RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        },
+        0,
+    );
+    assert_eq!(
+        vertex_kernel_state4_entry_from_table(&payload, &mut state, spec),
+        Err(VertexKernelStateError::UnobservedFirstLeafUnary(0))
+    );
+
+    let mut old_cut_table = first_table.clone();
+    old_cut_table.branch_bit = 1;
+    let mut old_cut_state = byte_group_state(
+        RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        },
+        0,
+    );
+    assert_eq!(
+        vertex_kernel_state4_entry_from_table(
+            &payload,
+            &mut old_cut_state,
+            VertexKernelState4EntrySpec {
+                first_header,
+                first_table: &old_cut_table,
+                remaining_subblocks: 19,
+                reverse_mode: u32::MAX,
+            },
+        ),
+        Err(VertexKernelStateError::UnobservedIndexSubmeshCount(2))
+    );
 }
 
 #[test]
@@ -5912,6 +5999,7 @@ fn vertex_attribute_driver_rejects_unobserved_and_malformed_inputs() {
         rev_bitpos: 0,
         w8: 1,
         symbols: 2,
+        branch_bit: 0,
         dir_bit: 1,
         entries: vec![0x0a00_0802],
         offsets: vec![0],
@@ -6187,6 +6275,7 @@ fn vertex_attribute_writer_dispatch_rejects_malformed_inputs() {
         rev_bitpos: 0,
         w8: 2,
         symbols: 1,
+        branch_bit: 0,
         dir_bit: 1,
         entries: vec![0x0a00_0802],
         offsets: vec![0],
