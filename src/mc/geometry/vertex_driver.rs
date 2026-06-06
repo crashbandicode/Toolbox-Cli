@@ -980,6 +980,8 @@ pub enum VertexAttributeWriterTarget {
     I8x2Normal,
     /// `0x110aba0`.
     Pack10x3Normal,
+    /// `0x1106250`.
+    F16x3Predict,
     /// `0x110ae30`.
     I8x3NormalDelta,
     /// `0x110afb0`.
@@ -1052,6 +1054,8 @@ pub struct VertexAttributeWriterCall<'a> {
     pub interstage: &'a VertexAttributeInterstage,
     /// Match table read through the writer-table state at `x0+0x10`.
     pub matches: &'a [u32],
+    /// Auxiliary predictor table read through the writer-table state at `x0+8`.
+    pub aux_table: &'a [u64],
     /// Block index stored at `[x0+0xa0]`.
     pub block_index: usize,
 }
@@ -1061,6 +1065,8 @@ pub struct VertexAttributeWriterCall<'a> {
 pub struct VertexAttributeWriterTable<'a> {
     /// Match words read by writer targets through `x0+0x10` (`ctx+0x228`).
     pub matches: &'a [u32],
+    /// Aux predictor words read by writer target `0x1106250` through `x0+8` (`ctx+0x220`).
+    pub aux_table: &'a [u64],
     /// Block index stored at writer-table `[x0+0xa0]`.
     pub block_index: usize,
 }
@@ -1068,10 +1074,12 @@ pub struct VertexAttributeWriterTable<'a> {
 /// Source/table consumption reported by the selected writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VertexAttributeWriterUsage {
-    /// Bytes consumed from up to four source streams.
-    pub sources: [usize; 4],
+    /// Bytes consumed from up to five source streams.
+    pub sources: [usize; 5],
     /// Match-table entries consumed by delta writers.
     pub match_entries: usize,
+    /// Aux-table entries required by predictor writers.
+    pub aux_entries: usize,
 }
 
 /// Errors from the writer-table dispatch at `0x10f93d8`.
@@ -1571,6 +1579,50 @@ fn vertex_attribute_source_descriptors(
                 ],
             ))
         }
+        // `0x11071c0`: f16x3 predictor setup, two setup varints split
+        // the `wrapper_ret * group_width` lane population into five streams
+        // (`0x11071c0..0x1107268`).
+        92 => {
+            let total_u32 = wrapper_ret
+                .checked_mul(
+                    u32::try_from(group_width)
+                        .map_err(|_| VertexAttributeInterstageError::ArithmeticOverflow)?,
+                )
+                .ok_or(VertexAttributeInterstageError::ArithmeticOverflow)?;
+            let total = total_u32 as usize;
+            let split0 = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
+            if split0 > total {
+                return Err(VertexAttributeInterstageError::SplitExceedsWrapperReturn {
+                    dispatch,
+                    split: split0,
+                    wrapper_ret: total_u32,
+                });
+            }
+            let split1 = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
+            if split1 > total {
+                return Err(VertexAttributeInterstageError::SplitExceedsWrapperReturn {
+                    dispatch,
+                    split: split1,
+                    wrapper_ret: total_u32,
+                });
+            }
+            Ok((
+                VertexAttributeWriterTarget::F16x3Predict,
+                vec![
+                    vertex_source_descriptor(dispatch, 0, 0, 1, total)?,
+                    vertex_source_descriptor(dispatch, 1, 0, 1, split0)?,
+                    vertex_source_descriptor(dispatch, 2, 0, 1, total - split0)?,
+                    vertex_source_descriptor(dispatch, 3, rounded_minus_one as u32, 1, split1)?,
+                    vertex_source_descriptor(
+                        dispatch,
+                        4,
+                        rounded_minus_one as u32,
+                        1,
+                        total - split1,
+                    )?,
+                ],
+            ))
+        }
         // `0x110aa00`: normal-vector setup, no split varint
         // (`0x110aa00..0x110aa34`).
         107 | 108 => Ok((
@@ -1691,22 +1743,31 @@ fn vertex_writer_source(
 
 fn vertex_copy_usage(consumed: usize) -> VertexAttributeWriterUsage {
     VertexAttributeWriterUsage {
-        sources: [consumed, 0, 0, 0],
+        sources: [consumed, 0, 0, 0, 0],
         match_entries: 0,
+        aux_entries: 0,
     }
 }
 
 fn vertex_delta_usage(usage: TransformTailDeltaUsage) -> VertexAttributeWriterUsage {
     VertexAttributeWriterUsage {
-        sources: [usage.source0, usage.source1, usage.source2, 0],
+        sources: [usage.source0, usage.source1, usage.source2, 0, 0],
         match_entries: usage.match_entries,
+        aux_entries: 0,
     }
 }
 
 fn vertex_pack10_usage(usage: TransformTailPack10Usage) -> VertexAttributeWriterUsage {
     VertexAttributeWriterUsage {
-        sources: [usage.source0, usage.source1, usage.source2, usage.source3],
+        sources: [
+            usage.source0,
+            usage.source1,
+            usage.source2,
+            usage.source3,
+            0,
+        ],
         match_entries: usage.match_entries,
+        aux_entries: 0,
     }
 }
 
@@ -1714,8 +1775,29 @@ fn vertex_i8x3_normal_delta_usage(
     usage: TransformTailI8x3NormalDeltaUsage,
 ) -> VertexAttributeWriterUsage {
     VertexAttributeWriterUsage {
-        sources: [usage.source0, usage.source1, usage.source2, usage.source3],
+        sources: [
+            usage.source0,
+            usage.source1,
+            usage.source2,
+            usage.source3,
+            0,
+        ],
         match_entries: usage.match_entries,
+        aux_entries: 0,
+    }
+}
+
+fn vertex_f16x3_predict_usage(usage: TransformTailF16x3PredictUsage) -> VertexAttributeWriterUsage {
+    VertexAttributeWriterUsage {
+        sources: [
+            usage.source0,
+            usage.source1,
+            usage.source2,
+            usage.source3,
+            usage.source4,
+        ],
+        match_entries: 0,
+        aux_entries: usage.aux_entries,
     }
 }
 
@@ -2183,6 +2265,30 @@ pub fn vertex_attribute_apply_writer(
             .map(vertex_pack10_usage)
             .map_err(VertexAttributeWriterError::Delta)
         }
+        VertexAttributeWriterTarget::F16x3Predict => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            let source2 = vertex_writer_source(spec.interstage, 2)?;
+            let source3 = vertex_writer_source(spec.interstage, 3)?;
+            let source4 = vertex_writer_source(spec.interstage, 4)?;
+            transform_tail_f16x3_predict_into(
+                out,
+                TransformTailF16x3PredictSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    aux_table: spec.aux_table,
+                    source0,
+                    source1,
+                    source2,
+                    source3,
+                    source4,
+                },
+            )
+            .map(vertex_f16x3_predict_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
         VertexAttributeWriterTarget::I8x3NormalDelta => {
             let source0 = vertex_writer_source(spec.interstage, 0)?;
             let source1 = vertex_writer_source(spec.interstage, 1)?;
@@ -2268,6 +2374,7 @@ pub fn vertex_attribute_writer_loop_step(
             transform: &transform,
             interstage: &interstage,
             matches: writer_table.matches,
+            aux_table: writer_table.aux_table,
             block_index: writer_table.block_index,
         },
     )

@@ -589,6 +589,30 @@ pub struct TransformTailPack10x3NormalSpec<'a> {
     pub source2: &'a [u8],
 }
 
+/// Inputs for the f16x3 predictor transform tail (`0x1106250`).
+pub struct TransformTailF16x3PredictSpec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Predictor table at `[x0+8]`, indexed by emitted vertex.
+    pub aux_table: &'a [u64],
+    /// Per-lane flag stream at `[x4]`.
+    pub source0: &'a [u8],
+    /// Exponent-delta stream for zero flags at `[x4+8]`.
+    pub source1: &'a [u8],
+    /// Exponent-delta stream for non-zero flags at `[x4+0x10]`.
+    pub source2: &'a [u8],
+    /// Zigzag mantissa deltas for unchanged sign/exponent lanes at `[x4+0x18]`.
+    pub source3: &'a [u8],
+    /// Direct mantissas for changed sign/exponent lanes at `[x4+0x20]`.
+    pub source4: &'a [u8],
+}
+
 /// Inputs for the packed 10-10-10 seed/previous/matched delta tail (`0x1103840`).
 pub struct TransformTailPack10x3PreviousDeltaSpec<'a> {
     /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
@@ -694,6 +718,17 @@ pub struct TransformTailI8x3NormalDeltaUsage {
     pub match_entries: usize,
 }
 
+/// Source and aux-table consumption from the f16x3 predictor tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransformTailF16x3PredictUsage {
+    pub source0: usize,
+    pub source1: usize,
+    pub source2: usize,
+    pub source3: usize,
+    pub source4: usize,
+    pub aux_entries: usize,
+}
+
 /// Errors from delta-match transform tails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransformTailDeltaError {
@@ -703,8 +738,11 @@ pub enum TransformTailDeltaError {
     Source1TooSmall,
     Source2TooSmall,
     Source3TooSmall,
+    Source4TooSmall,
     MatchTableTooSmall,
+    AuxTableTooSmall,
     MatchBeforeOutput,
+    PredictorBeforeOutput,
     CopyBeforeOutput,
     ArithmeticOverflow,
     UnobservedRecordShape,
@@ -786,6 +824,165 @@ fn pack10x3_reconstructed_normal(raw_x: u16, raw_y: u16, z_delta: u16, z_sign: u
     let z = z.wrapping_add(u32::from(z_delta));
     let z = if z_sign == 1 { 0u32.wrapping_sub(z) } else { z } & 0x03ff;
     (z << 20) | (u32::from(raw_y) << 10) | u32::from(raw_x)
+}
+
+#[inline]
+fn round_shift_to_even(value: u32, shift: u32) -> u32 {
+    if shift == 0 {
+        return value;
+    }
+    let keep = value >> shift;
+    let halfway = 1u32 << (shift - 1);
+    let dropped = value & ((1u32 << shift) - 1);
+    if dropped > halfway || (dropped == halfway && keep & 1 != 0) {
+        keep + 1
+    } else {
+        keep
+    }
+}
+
+#[inline]
+fn half_to_f32(bits: u16) -> f32 {
+    let sign = u32::from(bits & 0x8000) << 16;
+    let exponent = u32::from((bits >> 10) & 0x1f);
+    let mantissa = u32::from(bits & 0x03ff);
+    let out = match exponent {
+        0 if mantissa == 0 => sign,
+        0 => {
+            let mut mant = mantissa;
+            let mut exp = -14i32;
+            while mant & 0x0400 == 0 {
+                mant <<= 1;
+                exp -= 1;
+            }
+            mant &= 0x03ff;
+            sign | (((exp + 127) as u32) << 23) | (mant << 13)
+        }
+        0x1f => sign | 0x7f80_0000 | (mantissa << 13),
+        _ => sign | ((exponent + 112) << 23) | (mantissa << 13),
+    };
+    f32::from_bits(out)
+}
+
+#[inline]
+fn f32_to_half(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32;
+    let mantissa = bits & 0x007f_ffff;
+
+    if exponent == 0xff {
+        let payload = if mantissa == 0 {
+            0
+        } else {
+            ((mantissa >> 13) as u16).max(1)
+        };
+        return sign | 0x7c00 | payload;
+    }
+    if exponent == 0 {
+        return sign;
+    }
+
+    let mut half_exponent = exponent - 127 + 15;
+    if half_exponent >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if half_exponent <= 0 {
+        if half_exponent < -10 {
+            return sign;
+        }
+        let rounded = round_shift_to_even(mantissa | 0x0080_0000, (14 - half_exponent) as u32);
+        return sign | rounded.min(0x0400) as u16;
+    }
+
+    let rounded = round_shift_to_even(mantissa, 13);
+    if rounded == 0x0400 {
+        half_exponent += 1;
+        if half_exponent >= 0x1f {
+            return sign | 0x7c00;
+        }
+        return sign | ((half_exponent as u16) << 10);
+    }
+
+    sign | ((half_exponent as u16) << 10) | rounded as u16
+}
+
+#[inline]
+fn f16_predict_lane(older: u16, left: u16, right: u16) -> u16 {
+    f32_to_half(half_to_f32(left) + half_to_f32(right) - half_to_f32(older))
+}
+
+#[inline]
+fn f16x3_component(predicted: u16, flag: u8, exponent_delta: u8, mantissa_word: u16) -> u16 {
+    let sign = (predicted & 0x8000) ^ (u16::from(flag) << 15);
+    let exponent = predicted.wrapping_add(u16::from(exponent_delta) << 10) & 0x7c00;
+    let mantissa = if flag == 0 && exponent_delta == 0 {
+        predicted.wrapping_add(zigzag10_u16(mantissa_word)) & 0x03ff
+    } else {
+        mantissa_word
+    };
+    sign | exponent | mantissa
+}
+
+#[inline]
+fn zigzag10_u16(value: u16) -> u16 {
+    let magnitude = value >> 1;
+    if value & 1 == 0 {
+        magnitude
+    } else {
+        0u16.wrapping_sub(magnitude).wrapping_sub(1)
+    }
+}
+
+fn f16x3_row_at(out: &[u8], offset: usize) -> Result<[u16; 3], TransformTailDeltaError> {
+    let end = offset
+        .checked_add(6)
+        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let row = out
+        .get(offset..end)
+        .ok_or(TransformTailDeltaError::PredictorBeforeOutput)?;
+    Ok([
+        read_transform_tail_u16(row, 0).ok_or(TransformTailDeltaError::PredictorBeforeOutput)?,
+        read_transform_tail_u16(row, 2).ok_or(TransformTailDeltaError::PredictorBeforeOutput)?,
+        read_transform_tail_u16(row, 4).ok_or(TransformTailDeltaError::PredictorBeforeOutput)?,
+    ])
+}
+
+fn f16x3_predictor_row(
+    out: &[u8],
+    cursor: usize,
+    output_stride: usize,
+    emitted: usize,
+    aux_entry: u64,
+) -> Result<[u16; 3], TransformTailDeltaError> {
+    if aux_entry & 0x3f_ffff != 0 {
+        let distance0 = (aux_entry & 0x3f_ffff) as usize;
+        let distance1 = ((aux_entry >> 22) & 0x1f_ffff) as usize;
+        let distance2 = (aux_entry >> 43) as usize;
+        let row_offset = |distance: usize| {
+            distance
+                .checked_mul(output_stride)
+                .and_then(|bytes| cursor.checked_sub(bytes))
+                .ok_or(TransformTailDeltaError::PredictorBeforeOutput)
+        };
+        let older = f16x3_row_at(out, row_offset(distance0)?)?;
+        let left = f16x3_row_at(out, row_offset(distance1)?)?;
+        let right = f16x3_row_at(out, row_offset(distance2)?)?;
+        return Ok([
+            f16_predict_lane(older[0], left[0], right[0]),
+            f16_predict_lane(older[1], left[1], right[1]),
+            f16_predict_lane(older[2], left[2], right[2]),
+        ]);
+    }
+
+    if emitted == 0 {
+        Ok([0, 0, 0])
+    } else {
+        let previous = cursor
+            .checked_sub(output_stride)
+            .ok_or(TransformTailDeltaError::PredictorBeforeOutput)?;
+        f16x3_row_at(out, previous)
+    }
 }
 
 #[inline]
@@ -1916,6 +2113,133 @@ pub fn transform_tail_pack10x3_normal_into(
         source2: source2_pos,
         source3: 0,
         match_entries: written,
+    })
+}
+
+/// Apply the observed f16x3 predictor transform tail (`0x1106250`).
+///
+/// Literal rows choose a half-float predictor from the aux table at `[x0+8]`:
+/// non-zero low 22 bits load three prior rows and compute `row1 + row2 - row0`
+/// in f32 before narrowing with `fcvtn` (`0x1106320..0x1106358`), zero aux on
+/// the first emitted row seeds zero (`0x11063a8..0x11063b0`), and later zero aux
+/// reuses the previous row (`0x110638c..0x11063a4`). Helper `0x110c110`
+/// consumes five source streams to update each f16 component, while copy runs
+/// clone the six written bytes by record byte distance (`0x11062c0..0x1106304`).
+pub fn transform_tail_f16x3_predict_into(
+    out: &mut [u8],
+    spec: TransformTailF16x3PredictSpec<'_>,
+) -> Result<TransformTailF16x3PredictUsage, TransformTailDeltaError> {
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
+    let mut source0_pos = 0usize;
+    let mut source1_pos = 0usize;
+    let mut source2_pos = 0usize;
+    let mut source3_pos = 0usize;
+    let mut source4_pos = 0usize;
+    let mut emitted = 0usize;
+    let mut aux_entries = 0usize;
+
+    for record in spec.records {
+        if record.copy_count == 0 {
+            return Err(TransformTailDeltaError::UnobservedRecordShape);
+        }
+
+        for _ in 0..record.literal_count {
+            let aux_entry = *spec
+                .aux_table
+                .get(emitted)
+                .ok_or(TransformTailDeltaError::AuxTableTooSmall)?;
+            aux_entries = aux_entries.max(
+                emitted
+                    .checked_add(1)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?,
+            );
+            let predicted =
+                f16x3_predictor_row(out, cursor, spec.output_stride, emitted, aux_entry)?;
+            let cursor_end = cursor
+                .checked_add(6)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let slot = out
+                .get_mut(cursor..cursor_end)
+                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+
+            for (lane, &predicted_lane) in predicted.iter().enumerate() {
+                let flag = *spec
+                    .source0
+                    .get(source0_pos)
+                    .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                source0_pos = source0_pos
+                    .checked_add(1)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let exponent_delta = if flag == 0 {
+                    let value = *spec
+                        .source1
+                        .get(source1_pos)
+                        .ok_or(TransformTailDeltaError::Source1TooSmall)?;
+                    source1_pos = source1_pos
+                        .checked_add(1)
+                        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                    value
+                } else {
+                    let value = *spec
+                        .source2
+                        .get(source2_pos)
+                        .ok_or(TransformTailDeltaError::Source2TooSmall)?;
+                    source2_pos = source2_pos
+                        .checked_add(1)
+                        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                    value
+                };
+                let mantissa_word = if flag == 0 && exponent_delta == 0 {
+                    let value = read_transform_tail_u16(spec.source3, source3_pos)
+                        .ok_or(TransformTailDeltaError::Source3TooSmall)?;
+                    source3_pos = source3_pos
+                        .checked_add(2)
+                        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                    value
+                } else {
+                    let value = read_transform_tail_u16(spec.source4, source4_pos)
+                        .ok_or(TransformTailDeltaError::Source4TooSmall)?;
+                    source4_pos = source4_pos
+                        .checked_add(2)
+                        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                    value
+                };
+                write_transform_tail_u16(
+                    slot,
+                    lane * 2,
+                    f16x3_component(predicted_lane, flag, exponent_delta, mantissa_word),
+                );
+            }
+
+            emitted = emitted
+                .checked_add(1)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        }
+
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            6,
+            record.back_distance,
+            record.copy_count,
+        )?;
+        emitted = emitted
+            .checked_add(usize::from(record.copy_count))
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    }
+
+    Ok(TransformTailF16x3PredictUsage {
+        source0: source0_pos,
+        source1: source1_pos,
+        source2: source2_pos,
+        source3: source3_pos,
+        source4: source4_pos,
+        aux_entries,
     })
 }
 

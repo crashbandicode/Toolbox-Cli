@@ -453,6 +453,7 @@ fn decode_buf_b_from_payload(
             payload,
             VertexAttributeWriterTable {
                 matches: &matches,
+                aux_table: &[],
                 block_index: 0,
             },
         ) {
@@ -788,6 +789,7 @@ fn target_unit_size(target: VertexAttributeWriterTarget) -> usize {
         VertexAttributeWriterTarget::U16x2Delta => 4,
         VertexAttributeWriterTarget::I8x2Normal => 3,
         VertexAttributeWriterTarget::Pack10x3Normal => 4,
+        VertexAttributeWriterTarget::F16x3Predict => 6,
         VertexAttributeWriterTarget::I8x3NormalDelta => 3,
         VertexAttributeWriterTarget::Pack10x3Delta => 4,
     }
@@ -821,6 +823,7 @@ fn target_addr(target: VertexAttributeWriterTarget) -> &'static str {
         VertexAttributeWriterTarget::U16x2Delta => "0x1103ab0",
         VertexAttributeWriterTarget::I8x2Normal => "0x110aac0",
         VertexAttributeWriterTarget::Pack10x3Normal => "0x110aba0",
+        VertexAttributeWriterTarget::F16x3Predict => "0x1106250",
         VertexAttributeWriterTarget::I8x3NormalDelta => "0x110ae30",
         VertexAttributeWriterTarget::Pack10x3Delta => "0x110afb0",
     }

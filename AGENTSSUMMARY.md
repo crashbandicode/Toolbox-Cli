@@ -643,6 +643,43 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec DirectionZero dispatch 92 f16x3 predictor prerequisite
+**Committed:** The next UPDATE 69 writer prerequisite landed: dispatch 92 maps
+through setup `0x11071c0` to the f16x3 predictor writer `0x1106250`. The Rust
+port adds `TransformTailF16x3PredictSpec`,
+`transform_tail_f16x3_predict_into`, `F16x3Predict` writer dispatch wiring,
+five-source usage accounting, and a separate writer aux table for `[x0+8]`
+(`ctx+0x220`) alongside the existing match table at `[x0+0x10]`.
+
+Durable evidence: `local-assets/re/FINDINGS.md` UPDATE 73 records the
+enumerate-all population from
+`local-assets/re/phase1_direction_zero_writer_loop_capture.json`: Armor_009 has
+the single observed `0x1106250` row with stride 8, 232 records, 317 direct
+units, 267 copy units, 124 zero-literal records, zero zero-copy records, source
+usage `[951, 940, 11, 1586, 316]`, aux-predict 256, previous-predict 60,
+zero-predict 1, mantissa-delta 793, and mantissa-direct 158.
+`verify_transform_tail_1106250.py` replays **1/1** and proves no-aux and
+integer-predictor variants fail **1/1**.
+
+Fixture-free coverage:
+`transform_tail_f16x3_predict_direction_zero_writer` hardcodes the compact
+Armor prefix covering zero, previous, and aux prediction plus both mantissa
+paths and copy rows; `transform_tail_f16x3_predict_rejects_malformed_inputs`
+guards zero-stride, aux truncation, all five source truncations, undersized
+output, predictor-before-output, copy-before-output, and unobserved zero-copy;
+`vertex_attribute_interstage_dispatch92_f16x3_predict_sources` and
+`vertex_attribute_writer_dispatch_f16x3_predict` cover setup and writer
+pipeline wiring.
+
+Verification: `cargo test --lib f16x3_predict` passed 4/4;
+`cargo test --lib vertex_attribute_writer` passed 19/19;
+`cargo test --lib transform_tail` passed 64/64;
+`python local-assets/re/verify_transform_tail_1106250.py` passed 1/1. Full gate:
+`All green: 319 lib unit (incl. 172 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Next: continue DirectionZero prerequisites from UPDATE 69 with `0x1108550`
+before lifting the state-4 DirectionZero guard.
+
 ### 2026-06-06 - MeshCodec DirectionZero dispatch 108 packed normal prerequisite
 **Committed:** The second UPDATE 69 writer prerequisite landed:
 dispatch 108 maps through setup `0x110aa00` to the packed 10-10-10 normal

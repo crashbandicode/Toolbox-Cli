@@ -687,6 +687,7 @@ fn decode_buf_b_from_payload(
             payload,
             VertexAttributeWriterTable {
                 matches: &matches,
+                aux_table: &[],
                 block_index: 0,
             },
         ) {

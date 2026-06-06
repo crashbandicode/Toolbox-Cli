@@ -100,6 +100,7 @@ fn vertex_writer_loop_replays_captured_inputs() {
                     transform: &transform,
                     interstage: &interstage,
                     matches: &matches,
+                    aux_table: &[],
                     block_index: usize_field(expected, "block_index"),
                 },
             )
@@ -159,6 +160,7 @@ fn vertex_writer_loop_replays_captured_inputs() {
             &payload,
             VertexAttributeWriterTable {
                 matches: &matches,
+                aux_table: &[],
                 block_index: 0,
             },
         )
@@ -434,6 +436,7 @@ fn target_addr(target: VertexAttributeWriterTarget) -> &'static str {
         VertexAttributeWriterTarget::U16x2Delta => "0x1103ab0",
         VertexAttributeWriterTarget::I8x2Normal => "0x110aac0",
         VertexAttributeWriterTarget::Pack10x3Normal => "0x110aba0",
+        VertexAttributeWriterTarget::F16x3Predict => "0x1106250",
         VertexAttributeWriterTarget::I8x3NormalDelta => "0x110ae30",
         VertexAttributeWriterTarget::Pack10x3Delta => "0x110afb0",
     }
