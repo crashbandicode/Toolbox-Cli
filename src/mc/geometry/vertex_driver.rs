@@ -563,6 +563,8 @@ pub enum VertexAttributeWriterTarget {
     Copy2,
     /// `0x10fc7d0`.
     Copy4,
+    /// `0x1101230`.
+    U8PreviousDelta,
     /// `0x10fbcc0`.
     Delta2,
     /// `0x10fbdc0`.
@@ -1121,16 +1123,23 @@ fn vertex_attribute_source_descriptors(
         }
         // `0x11010b0`: one descriptor with element shift `rounded-1`
         // (`0x11010b0..0x11010cc`).
-        67 => Ok((
-            VertexAttributeWriterTarget::U16x2PreviousDelta,
-            vec![vertex_source_descriptor(
-                dispatch,
-                0,
-                rounded_minus_one as u32,
-                group_width,
-                ret,
-            )?],
-        )),
+        61 | 67 => {
+            let writer = match dispatch {
+                61 => VertexAttributeWriterTarget::U8PreviousDelta,
+                67 => VertexAttributeWriterTarget::U16x2PreviousDelta,
+                _ => unreachable!(),
+            };
+            Ok((
+                writer,
+                vec![vertex_source_descriptor(
+                    dispatch,
+                    0,
+                    rounded_minus_one as u32,
+                    group_width,
+                    ret,
+                )?],
+            ))
+        }
         // `0x11010e0`: two descriptors with element shift `rounded-1`
         // (`0x1101108..0x1101134`).
         76 | 77 | 81 => {
@@ -1365,6 +1374,21 @@ pub fn vertex_attribute_apply_writer(
             )
             .map(vertex_copy_usage)
             .map_err(VertexAttributeWriterError::Copy)
+        }
+        VertexAttributeWriterTarget::U8PreviousDelta => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            transform_tail_u8_previous_delta_into(
+                out,
+                TransformTailU8PreviousDeltaSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    source0,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
         }
         VertexAttributeWriterTarget::Delta2 => {
             let source0 = vertex_writer_source(spec.interstage, 0)?;

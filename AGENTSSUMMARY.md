@@ -643,6 +643,39 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-9 dispatch 61 writer `0x1101230`
+**Committed:** P1-9 ports dispatch 61's writer target `0x1101230` as a
+one-byte previous-row delta transform tail. Static table slot 61 uses setup
+`0x11010b0`; the port maps dispatches 61 and 67 through that one-source setup
+while routing 61 to `transform_tail_u8_previous_delta_into`.
+
+Durable evidence: gitignored
+`local-assets/re/capture_phase1_dispatch_61_interstage.py` captured
+Animal_Boar.Boar current 7 with dispatch 61, setup `0x11010b0`, writer
+`0x1101230`, and descriptor `(0,1,187)`.
+`local-assets/re/capture_phase1_transform_tail_1101230.py` captured one writer
+call; `verify_transform_tail_1101230.py` replays **1/1** with 1 seed literal,
+186 previous-row delta literals, 1495 copy units, 1682 emitted rows, and 187
+source0 bytes. Discriminators no-previous-delta and no-copy both fail 1/1.
+FINDINGS UPDATE 54 records the capture, replay, and disassembly-citation
+details.
+
+Verification: `cargo test --lib u8_previous_delta` passed 4/4; `cargo test
+--lib vertex_attribute` passed 17/17; `cargo test --lib transform_tail` passed
+39/39; `cargo test --lib mc::geometry` passed 118/118; `cargo test` passed the
+full suite; `cargo clippy --all-targets` is clean; `cargo build
+--no-default-features` builds. Current full gate:
+`All green: 264 lib unit (incl. 118 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2 for Bear/Bass/Dragonfly.
+
+Phase 1 re-sweep with `MC_MODEL_CORPUS` still fails by design but moved the
+coverage curve again: **12,395 seen; 278 no-FMSH/no mesh; 252 decoded clean;
+11,865 failures**. `UnobservedDispatch(61)` is gone. Next independent
+dispatch-family ports are `UnobservedDispatch(29)` at 115,
+`UnobservedDispatch(46)` at 111, and `UnobservedDispatch(20)` at 68; the larger
+kernel decision/window branches from FINDINGS UPDATE 47 still dominate and
+remain a separate state-machine task.
+
 ### 2026-06-05 - MeshCodec P1-8 dispatch 77 writer `0x1103530`
 **Committed:** P1-8 ports dispatch 77's writer target `0x1103530` as a
 three-byte previous/matched delta transform tail. Static table slot 77 uses
