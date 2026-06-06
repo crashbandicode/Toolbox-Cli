@@ -571,6 +571,24 @@ pub struct TransformTailPack10x3DeltaSpec<'a> {
     pub source3: &'a [u8],
 }
 
+/// Inputs for the packed 10-10-10 normal transform tail (`0x110aba0`).
+pub struct TransformTailPack10x3NormalSpec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Direct source stream with two raw 10-bit components per row at `[x4]`.
+    pub source0: &'a [u8],
+    /// Direct third-component delta stream at `[x4+8]`.
+    pub source1: &'a [u8],
+    /// Direct third-component sign-byte stream at `[x4+0x10]`.
+    pub source2: &'a [u8],
+}
+
 /// Inputs for the packed 10-10-10 seed/previous/matched delta tail (`0x1103840`).
 pub struct TransformTailPack10x3PreviousDeltaSpec<'a> {
     /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
@@ -751,6 +769,23 @@ fn pack10x3_from_lanes(lane0: u32, lane1: u32, lane2: u32) -> u32 {
 #[inline]
 fn pack10x3_direct(raw0: u16, raw1: u16, raw2: u16) -> u32 {
     u32::from(raw0) | (u32::from(raw1) << 10) | (u32::from(raw2) << 20)
+}
+
+#[inline]
+fn pack10x3_reconstructed_normal(raw_x: u16, raw_y: u16, z_delta: u16, z_sign: u8) -> u32 {
+    const MAX_COMPONENT_SQUARED: i64 = 0x3fc01;
+
+    let x = sign_extend_10(raw_x);
+    let y = sign_extend_10(raw_y);
+    let remaining = MAX_COMPONENT_SQUARED
+        .checked_sub(x * x)
+        .and_then(|value| value.checked_sub(y * y))
+        .unwrap_or(-1)
+        .max(0);
+    let z = (remaining as f32).sqrt().round() as u32;
+    let z = z.wrapping_add(u32::from(z_delta));
+    let z = if z_sign == 1 { 0u32.wrapping_sub(z) } else { z } & 0x03ff;
+    (z << 20) | (u32::from(raw_y) << 10) | u32::from(raw_x)
 }
 
 #[inline]
@@ -1798,6 +1833,92 @@ pub fn transform_tail_i8x2_normal_into(
     })
 }
 
+/// Apply the observed packed 10-10-10 normal transform tail (`0x110aba0`).
+///
+/// Direct literals read two signed 10-bit components from source0, reconstruct
+/// the third as `round(sqrt(511^2 - x^2 - y^2))`, add source1, apply the source2
+/// sign byte, and pack the row (`0x110abe8..0x110ac34` and
+/// `0x110ac50..0x110acf4`). Copy runs clone four packed bytes by record byte
+/// distance (`0x110ad08..0x110ad24`).
+pub fn transform_tail_pack10x3_normal_into(
+    out: &mut [u8],
+    spec: TransformTailPack10x3NormalSpec<'_>,
+) -> Result<TransformTailPack10Usage, TransformTailDeltaError> {
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
+    let mut source0_pos = 0usize;
+    let mut source1_pos = 0usize;
+    let mut source2_pos = 0usize;
+    let mut written = 0usize;
+
+    for record in spec.records {
+        for _ in 0..record.literal_count {
+            let cursor_end = cursor
+                .checked_add(4)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let source0_end = source0_pos
+                .checked_add(4)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let source1_end = source1_pos
+                .checked_add(2)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let source2_end = source2_pos
+                .checked_add(1)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            let raw_components = spec
+                .source0
+                .get(source0_pos..source0_end)
+                .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+            let z_delta = read_transform_tail_u16(spec.source1, source1_pos)
+                .filter(|_| source1_end <= spec.source1.len())
+                .ok_or(TransformTailDeltaError::Source1TooSmall)?;
+            let z_sign = *spec
+                .source2
+                .get(source2_pos)
+                .filter(|_| source2_end <= spec.source2.len())
+                .ok_or(TransformTailDeltaError::Source2TooSmall)?;
+            let raw_x = u16::from_le_bytes([raw_components[0], raw_components[1]]);
+            let raw_y = u16::from_le_bytes([raw_components[2], raw_components[3]]);
+            // Game code uses single-precision `fsqrt s0` + `frinti s0` at
+            // 0x110ac14..0x110ac18 and 0x110aca0..0x110acb8.
+            let packed = pack10x3_reconstructed_normal(raw_x, raw_y, z_delta, z_sign);
+            let slot = out
+                .get_mut(cursor..cursor_end)
+                .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+            write_transform_tail_u32(slot, 0, packed);
+            source0_pos = source0_end;
+            source1_pos = source1_end;
+            source2_pos = source2_end;
+            written = written
+                .checked_add(1)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        }
+
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            4,
+            record.back_distance,
+            record.copy_count,
+        )?;
+        written = written
+            .checked_add(usize::from(record.copy_count))
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    }
+
+    Ok(TransformTailPack10Usage {
+        source0: source0_pos,
+        source1: source1_pos,
+        source2: source2_pos,
+        source3: 0,
+        match_entries: written,
+    })
+}
+
 /// Apply the observed three-byte i8/i8/sqrt direct/matched delta tail (`0x110ae30`).
 ///
 /// Direct literals match the `0x110aac0` normal reconstruction: two signed i8
@@ -2098,8 +2219,6 @@ pub fn transform_tail_pack10x3_delta_into(
     out: &mut [u8],
     spec: TransformTailPack10x3DeltaSpec<'_>,
 ) -> Result<TransformTailPack10Usage, TransformTailDeltaError> {
-    const MAX_COMPONENT_SQUARED: i64 = 0x3fc01;
-
     let mut cursor =
         transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
     let mut match_index = 0usize;
@@ -2141,18 +2260,8 @@ pub fn transform_tail_pack10x3_delta_into(
                     .ok_or(TransformTailDeltaError::Source2TooSmall)?;
                 let raw_x = u16::from_le_bytes([raw_components[0], raw_components[1]]);
                 let raw_y = u16::from_le_bytes([raw_components[2], raw_components[3]]);
-                let x = sign_extend_10(raw_x);
-                let y = sign_extend_10(raw_y);
-                let remaining = MAX_COMPONENT_SQUARED
-                    .checked_sub(x * x)
-                    .and_then(|value| value.checked_sub(y * y))
-                    .unwrap_or(-1)
-                    .max(0);
                 // Game code uses single-precision `fsqrt s0` + `frinti s0` at 0x110b034..0x110b038.
-                let z = (remaining as f32).sqrt().round() as u32;
-                let z = z.wrapping_add(u32::from(z_delta));
-                let z = if z_sign == 1 { 0u32.wrapping_sub(z) } else { z } & 0x03ff;
-                let packed = (z << 20) | (u32::from(raw_y) << 10) | u32::from(raw_x);
+                let packed = pack10x3_reconstructed_normal(raw_x, raw_y, z_delta, z_sign);
                 let slot = out
                     .get_mut(cursor..cursor_end)
                     .ok_or(TransformTailDeltaError::OutputTooSmall)?;

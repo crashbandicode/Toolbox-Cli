@@ -978,6 +978,8 @@ pub enum VertexAttributeWriterTarget {
     U16x2Delta,
     /// `0x110aac0`.
     I8x2Normal,
+    /// `0x110aba0`.
+    Pack10x3Normal,
     /// `0x110ae30`.
     I8x3NormalDelta,
     /// `0x110afb0`.
@@ -1571,11 +1573,15 @@ fn vertex_attribute_source_descriptors(
         }
         // `0x110aa00`: normal-vector setup, no split varint
         // (`0x110aa00..0x110aa34`).
-        107 => Ok((
-            VertexAttributeWriterTarget::I8x2Normal,
+        107 | 108 => Ok((
+            if dispatch == 107 {
+                VertexAttributeWriterTarget::I8x2Normal
+            } else {
+                VertexAttributeWriterTarget::Pack10x3Normal
+            },
             vec![
                 vertex_source_descriptor(dispatch, 0, rounded_minus_one as u32, 2, ret)?,
-                vertex_source_descriptor(dispatch, 1, 0, 1, ret)?,
+                vertex_source_descriptor(dispatch, 1, rounded_minus_one as u32, 1, ret)?,
                 vertex_source_descriptor(dispatch, 2, 0, 1, ret)?,
             ],
         )),
@@ -2156,6 +2162,25 @@ pub fn vertex_attribute_apply_writer(
                 },
             )
             .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::Pack10x3Normal => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            let source2 = vertex_writer_source(spec.interstage, 2)?;
+            transform_tail_pack10x3_normal_into(
+                out,
+                TransformTailPack10x3NormalSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    source0,
+                    source1,
+                    source2,
+                },
+            )
+            .map(vertex_pack10_usage)
             .map_err(VertexAttributeWriterError::Delta)
         }
         VertexAttributeWriterTarget::I8x3NormalDelta => {

@@ -643,6 +643,49 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec DirectionZero dispatch 108 packed normal prerequisite
+**Committed:** The second UPDATE 69 writer prerequisite landed:
+dispatch 108 maps through setup `0x110aa00` to the packed 10-10-10 normal
+writer `0x110aba0`. The Rust port adds `TransformTailPack10x3NormalSpec`,
+`transform_tail_pack10x3_normal_into`, `Pack10x3Normal` writer dispatch wiring,
+and integration-helper address/unit-size mappings.
+
+Durable evidence: `local-assets/re/FINDINGS.md` UPDATE 72 records the
+enumerate-all population from
+`local-assets/re/phase1_direction_zero_writer_loop_capture.json`: Armor has one
+row with stride 12, 141 records, 378 direct literals, 206 copy units, 122
+negative-z sign bytes, and 16 zero-literal records; Shell has one row with
+stride 12, 11 records, 152 direct literals, 10 copy units, 102 negative-z sign
+bytes, and one zero-literal record. `verify_transform_tail_110aba0.py` replays
+**2/2** and proves sqrt-floor and no-copy variants fail **2/2**.
+
+Fixture-free coverage:
+`transform_tail_pack10x3_normal_direction_zero_writer` hardcodes a compact Armor
+prefix with odd literals, copy rows, a zero-literal record, and a negative sign
+byte; `transform_tail_pack10x3_normal_rejects_malformed_inputs` guards
+zero-stride, source0/source1/source2 truncation, undersized output, and
+copy-before-output; `vertex_attribute_interstage_dispatch108_pack10x3_normal_sources`
+and `vertex_attribute_writer_dispatch_pack10x3_normal` cover setup and writer
+pipeline wiring.
+
+Ignored corpus sweep still fails structurally by design: **12,395 seen; 278
+no-FMSH/no mesh; 326 decoded clean; 11,791 failures; 150 distinct failure
+classes**. The state-4 head class remains
+`0x10f90d4 state-4 entry: UnobservedDirectionZeroDirectPath` at **2,635**
+because the guard is still in place. Downstream depth is now writer-loop
+**2,391**, tail **902**, and index-decode **1,237**.
+
+Verification: `cargo test --lib pack10x3_normal` passed 4/4;
+`python local-assets/re/verify_transform_tail_110aba0.py` passed 2/2;
+`python local-assets/re/verify_transform_tail_110afb0.py` remains 3/3 after the
+shared packed-normal helper; `python local-assets/re/verify_vertex_writer_loop.py`
+remains 25/25; ignored corpus sweep printed the counts above and failed by
+design. Full gate:
+`All green: 315 lib unit (incl. 168 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Next: continue DirectionZero prerequisites from UPDATE 69, likely `0x1106250`
+or `0x1108550`, before lifting the state-4 DirectionZero guard.
+
 ### 2026-06-06 - MeshCodec DirectionZero dispatch 19 Copy6 prerequisite
 **Committed:** DirectionZero successor work is now allowed by the user, so the
 first UPDATE 69 writer prerequisite landed: dispatch 19 maps through setup
