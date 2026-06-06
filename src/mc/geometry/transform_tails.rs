@@ -260,6 +260,24 @@ pub struct TransformTailU8x2DeltaSpec<'a> {
     pub source1: &'a [u8],
 }
 
+/// Inputs for the three-byte previous/matched delta transform tail (`0x1103530`).
+pub struct TransformTailU8x3DeltaSpec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Match table at `[x0+0x10]`, indexed by emitted vertex.
+    pub matches: &'a [u32],
+    /// Seed and zero-match previous-row delta stream at `[x4]`.
+    pub source0: &'a [u8],
+    /// Non-zero match delta stream at `[x4+8]`.
+    pub source1: &'a [u8],
+}
+
 /// Inputs for the three-u16 direct/signed-delta transform tail (`0x1100c90`).
 pub struct TransformTailU16x3DeltaSpec<'a> {
     /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
@@ -1409,6 +1427,34 @@ fn write_transform_tail_u8x2_at(
     Ok(())
 }
 
+fn read_transform_tail_u8x3_at(
+    out: &[u8],
+    cursor: usize,
+) -> Result<[u8; 3], TransformTailDeltaError> {
+    let end = cursor
+        .checked_add(3)
+        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let bytes = out
+        .get(cursor..end)
+        .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+    Ok([bytes[0], bytes[1], bytes[2]])
+}
+
+fn write_transform_tail_u8x3_at(
+    out: &mut [u8],
+    cursor: usize,
+    bytes: [u8; 3],
+) -> Result<(), TransformTailDeltaError> {
+    let end = cursor
+        .checked_add(3)
+        .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+    let slot = out
+        .get_mut(cursor..end)
+        .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+    slot.copy_from_slice(&bytes);
+    Ok(())
+}
+
 /// Apply the observed two-byte previous/matched delta transform tail (`0x11033e0`).
 ///
 /// The first zero-match literal seeds two bytes from source0 (`0x11034d4..0x11034e0`).
@@ -1497,6 +1543,115 @@ pub fn transform_tail_u8x2_delta_into(
             let bytes = read_transform_tail_u8x2_at(out, source)
                 .map_err(|_| TransformTailDeltaError::CopyBeforeOutput)?;
             write_transform_tail_u8x2_at(out, cursor, bytes)?;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        }
+
+        match_index = match_index
+            .checked_add(usize::from(record.copy_count))
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        if match_index > spec.matches.len() {
+            return Err(TransformTailDeltaError::MatchTableTooSmall);
+        }
+    }
+
+    Ok(TransformTailDeltaUsage {
+        source0: source0_pos,
+        source1: source1_pos,
+        source2: 0,
+        match_entries: match_index,
+    })
+}
+
+/// Apply the observed three-byte previous/matched delta transform tail (`0x1103530`).
+///
+/// The first zero-match literal seeds three source0 bytes (`0x1103690..0x11036a0`).
+/// Later zero-match literals add source0 deltas to the previous row
+/// (`0x1103638..0x1103684`), while non-zero matches add source1 deltas to the
+/// matched row selected by `(match >> 3) * stride` (`0x11035d0..0x1103624`).
+/// Copy runs clone three bytes by record byte distance (`0x1103594..0x11035ac`).
+pub fn transform_tail_u8x3_delta_into(
+    out: &mut [u8],
+    spec: TransformTailU8x3DeltaSpec<'_>,
+) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
+    let mut match_index = 0usize;
+    let mut source0_pos = 0usize;
+    let mut source1_pos = 0usize;
+
+    for record in spec.records {
+        for _ in 0..record.literal_count {
+            let match_entry = *spec
+                .matches
+                .get(match_index)
+                .ok_or(TransformTailDeltaError::MatchTableTooSmall)?;
+            let bytes = if match_entry != 0 {
+                let match_units = (match_entry >> 3) as usize;
+                let match_distance = match_units
+                    .checked_mul(spec.output_stride)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let source = cursor
+                    .checked_sub(match_distance)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let previous = read_transform_tail_u8x3_at(out, source)?;
+                let source1_end = source1_pos
+                    .checked_add(3)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let deltas = spec
+                    .source1
+                    .get(source1_pos..source1_end)
+                    .ok_or(TransformTailDeltaError::Source1TooSmall)?;
+                source1_pos = source1_end;
+                [
+                    previous[0].wrapping_add(deltas[0]),
+                    previous[1].wrapping_add(deltas[1]),
+                    previous[2].wrapping_add(deltas[2]),
+                ]
+            } else if match_index == 0 {
+                let source0_end = source0_pos
+                    .checked_add(3)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let bytes = spec
+                    .source0
+                    .get(source0_pos..source0_end)
+                    .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                source0_pos = source0_end;
+                [bytes[0], bytes[1], bytes[2]]
+            } else {
+                let source = cursor
+                    .checked_sub(spec.output_stride)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let previous = read_transform_tail_u8x3_at(out, source)?;
+                let source0_end = source0_pos
+                    .checked_add(3)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let deltas = spec
+                    .source0
+                    .get(source0_pos..source0_end)
+                    .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                source0_pos = source0_end;
+                [
+                    previous[0].wrapping_add(deltas[0]),
+                    previous[1].wrapping_add(deltas[1]),
+                    previous[2].wrapping_add(deltas[2]),
+                ]
+            };
+            write_transform_tail_u8x3_at(out, cursor, bytes)?;
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            match_index += 1;
+        }
+
+        for _ in 0..record.copy_count {
+            let source = cursor
+                .checked_sub(record.back_distance)
+                .ok_or(TransformTailDeltaError::CopyBeforeOutput)?;
+            let bytes = read_transform_tail_u8x3_at(out, source)
+                .map_err(|_| TransformTailDeltaError::CopyBeforeOutput)?;
+            write_transform_tail_u8x3_at(out, cursor, bytes)?;
             cursor = cursor
                 .checked_add(spec.output_stride)
                 .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
