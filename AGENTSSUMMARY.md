@@ -643,6 +643,39 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-10 dispatch 29 writer `0x10fdb30`
+**Committed:** P1-10 ports dispatch 29's writer target `0x10fdb30` as a
+one-byte direct/matched delta transform tail. Static table slot 29 uses setup
+`0x10fc4e0`; the port maps dispatch 29 through the two-source split setup
+family and wires the writer-table call to `transform_tail_delta1_direct_into`.
+
+Durable evidence: gitignored
+`local-assets/re/capture_phase1_dispatch_29_interstage.py` captured
+Animal_Crab.Crab current 1 with dispatch 29, setup `0x10fc4e0`, writer
+`0x10fdb30`, and descriptors `(0,1,36)` and `(0,1,135)`.
+`local-assets/re/capture_phase1_transform_tail_10fdb30.py` captured one writer
+call; `verify_transform_tail_10fdb30.py` replays **1/1** with 36 direct
+literals, 135 matched-delta literals, 359 copy units, 530 match entries, and
+source usage 36/135 bytes. Discriminators no-direct, no-matched-delta, and
+no-copy all fail 1/1. FINDINGS UPDATE 55 records the capture, replay, and
+disassembly-citation details.
+
+Verification: `cargo test --lib delta1_direct` passed 4/4; `cargo test --lib
+vertex_attribute` passed 19/19; `cargo test --lib transform_tail` passed 41/41;
+`cargo test --lib mc::geometry` passed 122/122; `cargo test` passed the full
+suite; `cargo clippy --all-targets` is clean; `cargo build
+--no-default-features` builds. Current full gate:
+`All green: 268 lib unit (incl. 122 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2 for Bear/Bass/Dragonfly.
+
+Phase 1 re-sweep with `MC_MODEL_CORPUS` still fails by design but moved the
+coverage curve again: **12,395 seen; 278 no-FMSH/no mesh; 269 decoded clean;
+11,848 failures**. `UnobservedDispatch(29)` is gone, but guarded dispatch-29
+zero-source paths remain at 10 total hits. Next independent dispatch-family
+ports are `UnobservedDispatch(46)` at 112, `UnobservedDispatch(20)` at 68, and
+`UnobservedDispatch(79)` at 62; the larger kernel decision/window branches from
+FINDINGS UPDATE 47 still dominate and remain a separate state-machine task.
+
 ### 2026-06-05 - MeshCodec P1-9 dispatch 61 writer `0x1101230`
 **Committed:** P1-9 ports dispatch 61's writer target `0x1101230` as a
 one-byte previous-row delta transform tail. Static table slot 61 uses setup

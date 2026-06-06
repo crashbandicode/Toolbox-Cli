@@ -3566,6 +3566,82 @@ fn vertex_attribute_interstage_dragonfly_copy2_source() {
     );
 }
 
+/// Interstage source setup/materialization for dispatch 29.
+///
+/// Provenance: `capture_phase1_dispatch_29_interstage.py`,
+/// Animal_Crab.Crab current 1: dispatch 29 selects setup `0x10fc4e0`, reads
+/// one split varint, and maps to writer `0x10fdb30`.
+#[test]
+fn vertex_attribute_interstage_dispatch29_delta1_direct_sources() {
+    let mut payload = vec![0u8; 12];
+    payload[9] = 1;
+    payload[10] = 0xaa;
+    payload[11] = 0xbb;
+    let mut state = ByteGroupReadState {
+        reader: RansThreeLaneReader {
+            ptr: 1,
+            acc: (29u64 << 57) | (3u64 << 55) | (3u64 << 53),
+            bitpos: 57,
+        },
+        mode1_extra_readers: [zero_three_lane_reader(); 2],
+        stream_pos: 9,
+        segment_state: RansStateBuffer::cold(),
+        selector2_history: Vec::new(),
+    };
+
+    let interstage = vertex_attribute_interstage_sources(
+        &mut state,
+        &payload,
+        ByteGroupTransformTableEntry { raw: 0x0800_0801 },
+        2,
+    )
+    .unwrap();
+
+    assert_eq!(
+        interstage,
+        VertexAttributeInterstage {
+            dispatch: 29,
+            writer: VertexAttributeWriterTarget::Delta1Direct,
+            descriptors: vec![
+                VertexAttributeSourceDescriptor {
+                    element_shift: 0,
+                    group_stride: 1,
+                    count: 1,
+                },
+                VertexAttributeSourceDescriptor {
+                    element_shift: 0,
+                    group_stride: 1,
+                    count: 1,
+                },
+            ],
+            sources: vec![
+                VertexAttributeSource {
+                    selector: 3,
+                    bytes: hex_bytes("aa"),
+                },
+                VertexAttributeSource {
+                    selector: 3,
+                    bytes: hex_bytes("bb"),
+                },
+            ],
+        }
+    );
+    assert_eq!(
+        state,
+        ByteGroupReadState {
+            reader: RansThreeLaneReader {
+                ptr: 0,
+                acc: 0,
+                bitpos: 54,
+            },
+            mode1_extra_readers: [zero_three_lane_reader(); 2],
+            stream_pos: 12,
+            segment_state: RansStateBuffer::cold(),
+            selector2_history: Vec::new(),
+        }
+    );
+}
+
 /// Interstage source setup/materialization for dispatch 35.
 ///
 /// Provenance: `capture_transform_tail_10fdfe0.py`, Animal_Bass_Boneless
@@ -3992,6 +4068,60 @@ fn vertex_attribute_writer_dispatch_dragonfly_copy2() {
     assert_eq!(&out[4368..4370], &hex_bytes("7f80"));
     assert_eq!(&out[5148..5150], &hex_bytes("7f80"));
     assert_eq!(out[7], 0xee, "out_offset is byte-based, not contiguous");
+}
+
+/// Writer-table dispatch (`0x10f93d8`) into `0x10fdb30`.
+#[test]
+fn vertex_attribute_writer_dispatch_delta1_direct() {
+    let transform = VertexAttributeTransform {
+        index: 0,
+        table_entry: ByteGroupTransformTableEntry { raw: 0x0800_0801 },
+        out_offset: 0,
+        column: 0,
+        limit: 4,
+        ret: 2,
+        records: vec![[0x0001_0003, 8]],
+    };
+    let interstage = VertexAttributeInterstage {
+        dispatch: 29,
+        writer: VertexAttributeWriterTarget::Delta1Direct,
+        descriptors: Vec::new(),
+        sources: vec![
+            VertexAttributeSource {
+                selector: 3,
+                bytes: hex_bytes("1001"),
+            },
+            VertexAttributeSource {
+                selector: 3,
+                bytes: hex_bytes("05"),
+            },
+        ],
+    };
+    let mut out = vec![0xee; 25];
+
+    let usage = vertex_attribute_apply_writer(
+        &mut out,
+        VertexAttributeWriterCall {
+            transform: &transform,
+            interstage: &interstage,
+            matches: &[0, 8, 0, 0],
+            block_index: 0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        usage,
+        VertexAttributeWriterUsage {
+            sources: [2, 1, 0, 0],
+            match_entries: 4,
+        }
+    );
+    assert_eq!(out[0], 0x10);
+    assert_eq!(out[8], 0x15);
+    assert_eq!(out[16], 0x01);
+    assert_eq!(out[24], 0x01);
+    assert_eq!(out[1], 0xee, "writer must keep the table stride");
 }
 
 /// Writer-table dispatch (`0x10f93d8`) into `0x10fdfe0`.
@@ -5711,6 +5841,82 @@ fn transform_tail_u8x2_delta_bass_seed_previous_match_and_copy() {
         }
     );
     assert_eq!(&out[16..18], &[11, 22]);
+}
+
+/// Transform tail `0x10fdb30`: one-byte direct/matched delta.
+///
+/// Provenance: `capture_phase1_transform_tail_10fdb30.py`,
+/// Animal_Crab.Crab current 1, records 0 through 3 rebased from output offset
+/// 6 to zero. `verify_transform_tail_10fdb30.py` replays the full observed
+/// population 1/1.
+#[test]
+fn transform_tail_delta1_direct_crab_first_matched_prefix() {
+    let records = [
+        TransformTailRecord {
+            literal_count: 1,
+            copy_count: 17,
+            back_distance: 8,
+        },
+        TransformTailRecord {
+            literal_count: 1,
+            copy_count: 85,
+            back_distance: 8,
+        },
+        TransformTailRecord {
+            literal_count: 1,
+            copy_count: 7,
+            back_distance: 8,
+        },
+        TransformTailRecord {
+            literal_count: 1,
+            copy_count: 10,
+            back_distance: 832,
+        },
+    ];
+    let mut matches = vec![0u32; 123];
+    matches[112] = 840;
+    let source0 = hex_bytes("040306");
+    let source1 = hex_bytes("00");
+    let expected_slots = hex_bytes(concat!(
+        "0404040404040404040404040404040404040303030303030303030303030303",
+        "0303030303030303030303030303030303030303030303030303030303030303",
+        "0303030303030303030303030303030303030303030303030303030303030303",
+        "030303030303030306060606060606060404040404040404040403",
+    ));
+    let mut out = vec![0xee; 123 * 8];
+
+    let usage = transform_tail_delta1_direct_into(
+        &mut out,
+        TransformTailDelta1DirectSpec {
+            output_stride: 8,
+            block_index: 0,
+            out_offset: 0,
+            records: &records,
+            matches: &matches,
+            source0: &source0,
+            source1: &source1,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        usage,
+        TransformTailDeltaUsage {
+            source0: 3,
+            source1: 1,
+            source2: 0,
+            match_entries: 123,
+        }
+    );
+    assert_eq!(expected_slots.len(), 123);
+    for (unit_index, &expected) in expected_slots.iter().enumerate() {
+        assert_eq!(out[unit_index * 8], expected, "unit {unit_index}");
+    }
+    for (index, &byte) in out.iter().enumerate() {
+        if index % 8 != 0 {
+            assert_eq!(byte, 0xee, "non-lane byte {index} changed");
+        }
+    }
 }
 
 /// Transform tail `0x1101230`: one-byte seed/previous delta.
@@ -8771,6 +8977,137 @@ fn transform_tail_u16x2_direct_delta_rejects_malformed_inputs() {
             &mut out,
             TransformTailU16x2DirectDeltaSpec {
                 output_stride: 4,
+                block_index: 0,
+                out_offset: 0,
+                records: &copy_first,
+                matches: &[0],
+                source0: &[],
+                source1: &[],
+            },
+        ),
+        Err(TransformTailDeltaError::CopyBeforeOutput)
+    );
+}
+
+#[test]
+fn transform_tail_delta1_direct_rejects_malformed_inputs() {
+    let direct = [TransformTailRecord {
+        literal_count: 1,
+        copy_count: 0,
+        back_distance: 0,
+    }];
+    let mut out = [0u8; 1];
+    assert_eq!(
+        transform_tail_delta1_direct_into(
+            &mut out,
+            TransformTailDelta1DirectSpec {
+                output_stride: 0,
+                block_index: 0,
+                out_offset: 0,
+                records: &direct,
+                matches: &[0],
+                source0: &[0],
+                source1: &[],
+            },
+        ),
+        Err(TransformTailDeltaError::ZeroStride)
+    );
+    assert_eq!(
+        transform_tail_delta1_direct_into(
+            &mut out,
+            TransformTailDelta1DirectSpec {
+                output_stride: 1,
+                block_index: 0,
+                out_offset: 0,
+                records: &direct,
+                matches: &[],
+                source0: &[0],
+                source1: &[],
+            },
+        ),
+        Err(TransformTailDeltaError::MatchTableTooSmall)
+    );
+    assert_eq!(
+        transform_tail_delta1_direct_into(
+            &mut out,
+            TransformTailDelta1DirectSpec {
+                output_stride: 1,
+                block_index: 0,
+                out_offset: 0,
+                records: &direct,
+                matches: &[0],
+                source0: &[],
+                source1: &[],
+            },
+        ),
+        Err(TransformTailDeltaError::Source0TooSmall)
+    );
+
+    let matched = [TransformTailRecord {
+        literal_count: 1,
+        copy_count: 0,
+        back_distance: 0,
+    }];
+    assert_eq!(
+        transform_tail_delta1_direct_into(
+            &mut out,
+            TransformTailDelta1DirectSpec {
+                output_stride: 8,
+                block_index: 0,
+                out_offset: 0,
+                records: &matched,
+                matches: &[8],
+                source0: &[],
+                source1: &[0],
+            },
+        ),
+        Err(TransformTailDeltaError::MatchBeforeOutput)
+    );
+
+    let mut matched_out = [0u8; 9];
+    assert_eq!(
+        transform_tail_delta1_direct_into(
+            &mut matched_out,
+            TransformTailDelta1DirectSpec {
+                output_stride: 8,
+                block_index: 0,
+                out_offset: 8,
+                records: &matched,
+                matches: &[8],
+                source0: &[],
+                source1: &[],
+            },
+        ),
+        Err(TransformTailDeltaError::Source1TooSmall)
+    );
+
+    let mut short_out = [0u8; 0];
+    assert_eq!(
+        transform_tail_delta1_direct_into(
+            &mut short_out,
+            TransformTailDelta1DirectSpec {
+                output_stride: 1,
+                block_index: 0,
+                out_offset: 0,
+                records: &direct,
+                matches: &[0],
+                source0: &[0],
+                source1: &[],
+            },
+        ),
+        Err(TransformTailDeltaError::OutputTooSmall)
+    );
+
+    let copy_first = [TransformTailRecord {
+        literal_count: 0,
+        copy_count: 1,
+        back_distance: 1,
+    }];
+    assert_eq!(
+        transform_tail_delta1_direct_into(
+            &mut out,
+            TransformTailDelta1DirectSpec {
+                output_stride: 1,
                 block_index: 0,
                 out_offset: 0,
                 records: &copy_first,

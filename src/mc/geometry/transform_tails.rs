@@ -202,6 +202,24 @@ pub struct TransformTailDelta3Spec<'a> {
     pub source2: &'a [u8],
 }
 
+/// Inputs for the one-byte direct/delta transform tail (`0x10fdb30`).
+pub struct TransformTailDelta1DirectSpec<'a> {
+    /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
+    pub output_stride: usize,
+    /// Block index at `[x0+0xa0]`, folded into the initial output position.
+    pub block_index: usize,
+    /// Per-entry output byte offset from `[x0 + current*4 + 0x64]`.
+    pub out_offset: usize,
+    /// Run/copy records at `x2`.
+    pub records: &'a [TransformTailRecord],
+    /// Match table at `[x0+0x10]`, indexed by emitted vertex.
+    pub matches: &'a [u32],
+    /// Direct literal source stream at `[x4]`.
+    pub source0: &'a [u8],
+    /// Matched delta stream at `[x4+8]`.
+    pub source1: &'a [u8],
+}
+
 /// Inputs for the two-byte direct/delta transform tail (`0x10fdc00`).
 pub struct TransformTailDelta2DirectSpec<'a> {
     /// Entry high byte (`entry >> 24`): byte distance between consecutive vertices.
@@ -567,6 +585,95 @@ fn copy_run_units(
     }
 
     Ok(())
+}
+
+/// Apply the observed one-byte direct/delta transform tail (`0x10fdb30`).
+///
+/// Zero-match literals copy one source-0 byte directly (`0x10fdb70..0x10fdb80`).
+/// Matched literals use the match table's `entry >> 3` distance in vertices,
+/// add one source-1 delta to the earlier output byte, then advance the same
+/// strided cursor (`0x10fdb88..0x10fdbb8`). Copy runs clone prior output bytes
+/// by the record's byte distance (`0x10fdbc4..0x10fdbe8`).
+pub fn transform_tail_delta1_direct_into(
+    out: &mut [u8],
+    spec: TransformTailDelta1DirectSpec<'_>,
+) -> Result<TransformTailDeltaUsage, TransformTailDeltaError> {
+    let mut cursor =
+        transform_tail_delta_cursor_init(spec.block_index, spec.output_stride, spec.out_offset)?;
+    let mut match_index = 0usize;
+    let mut source0_pos = 0usize;
+    let mut source1_pos = 0usize;
+
+    for record in spec.records {
+        for _ in 0..record.literal_count {
+            let match_entry = *spec
+                .matches
+                .get(match_index)
+                .ok_or(TransformTailDeltaError::MatchTableTooSmall)?;
+            if match_entry == 0 {
+                let byte = *spec
+                    .source0
+                    .get(source0_pos)
+                    .ok_or(TransformTailDeltaError::Source0TooSmall)?;
+                let slot = out
+                    .get_mut(cursor)
+                    .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                *slot = byte;
+                source0_pos = source0_pos
+                    .checked_add(1)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            } else {
+                let match_units = (match_entry >> 3) as usize;
+                let match_distance = match_units
+                    .checked_mul(spec.output_stride)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+                let source = cursor
+                    .checked_sub(match_distance)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let base = *out
+                    .get(source)
+                    .ok_or(TransformTailDeltaError::MatchBeforeOutput)?;
+                let delta = *spec
+                    .source1
+                    .get(source1_pos)
+                    .ok_or(TransformTailDeltaError::Source1TooSmall)?;
+                let slot = out
+                    .get_mut(cursor)
+                    .ok_or(TransformTailDeltaError::OutputTooSmall)?;
+                *slot = delta.wrapping_add(base);
+                source1_pos = source1_pos
+                    .checked_add(1)
+                    .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            }
+            cursor = cursor
+                .checked_add(spec.output_stride)
+                .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+            match_index += 1;
+        }
+
+        copy_run_units(
+            out,
+            &mut cursor,
+            spec.output_stride,
+            1,
+            record.back_distance,
+            record.copy_count,
+        )?;
+
+        match_index = match_index
+            .checked_add(usize::from(record.copy_count))
+            .ok_or(TransformTailDeltaError::ArithmeticOverflow)?;
+        if match_index > spec.matches.len() {
+            return Err(TransformTailDeltaError::MatchTableTooSmall);
+        }
+    }
+
+    Ok(TransformTailDeltaUsage {
+        source0: source0_pos,
+        source1: source1_pos,
+        source2: 0,
+        match_entries: match_index,
+    })
 }
 
 /// Apply the observed two-byte direct/delta transform tail (`0x10fdc00`).

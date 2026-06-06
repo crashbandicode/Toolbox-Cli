@@ -569,6 +569,8 @@ pub enum VertexAttributeWriterTarget {
     Delta2,
     /// `0x10fbdc0`.
     Delta3,
+    /// `0x10fdb30`.
+    Delta1Direct,
     /// `0x10fdc00`.
     Delta2Direct,
     /// `0x10fdcf0`.
@@ -1068,10 +1070,11 @@ fn vertex_attribute_source_descriptors(
         }
         // `0x10fc4e0`: split one varint into two same-width descriptors
         // (`0x10fc508..0x10fc534`).
-        30 | 31 | 32 | 35 | 58 => {
+        29 | 30 | 31 | 32 | 35 | 58 => {
             let split = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
             let remainder = vertex_split_remainder(dispatch, wrapper_ret, split)?;
             let writer = match dispatch {
+                29 => VertexAttributeWriterTarget::Delta1Direct,
                 30 => VertexAttributeWriterTarget::Delta2Direct,
                 31 => VertexAttributeWriterTarget::Delta3Direct,
                 32 => VertexAttributeWriterTarget::Delta4Direct,
@@ -1385,6 +1388,24 @@ pub fn vertex_attribute_apply_writer(
                     out_offset,
                     records: &records,
                     source0,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::Delta1Direct => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            transform_tail_delta1_direct_into(
+                out,
+                TransformTailDelta1DirectSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
                 },
             )
             .map(vertex_delta_usage)
