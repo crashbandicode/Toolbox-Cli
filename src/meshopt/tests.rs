@@ -172,6 +172,30 @@ fn index_split_stream_single_triangle_vector() {
 }
 
 #[test]
+fn index_split_stream_rejects_truncated_varbyte_continuation() {
+    // `0xfe` plus codeaux low nibble 15 asks for a free-index var-byte from the
+    // split data stream after the codeaux byte. The corpus panic bucket hit the
+    // continuation-byte shape: the lead byte is present, but its high bit asks
+    // for another byte that is not present.
+    assert!(matches!(
+        decode_index_buffer_split(3, 4, &[0xfe], &[0x0f], 0),
+        Err(MeshoptError::Truncated {
+            what: "index data stream",
+            have: 1,
+            need: 2
+        })
+    ));
+    assert!(matches!(
+        decode_index_buffer_split(3, 4, &[0xfe], &[0x0f, 0x80], 0),
+        Err(MeshoptError::Truncated {
+            what: "index data stream",
+            have: 2,
+            need: 3
+        })
+    ));
+}
+
+#[test]
 fn sequence_roundtrip_random_both_versions() {
     for version in 0u8..=1 {
         let mut seed = 0x0000_0055u32 ^ version as u32;

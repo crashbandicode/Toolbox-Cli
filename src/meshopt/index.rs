@@ -153,7 +153,31 @@ fn decode_vbyte_checked(data: &[u8], p: &mut usize) -> Result<u32> {
             need: *p + 1,
         });
     }
-    Ok(decode_vbyte(data, p))
+    let lead = data[*p];
+    *p += 1;
+    if lead < 128 {
+        return Ok(lead as u32);
+    }
+
+    let mut result = (lead & 127) as u32;
+    let mut shift = 7u32;
+    for _ in 0..4 {
+        if *p >= data.len() {
+            return Err(MeshoptError::Truncated {
+                what: "index data stream",
+                have: data.len(),
+                need: *p + 1,
+            });
+        }
+        let group = data[*p];
+        *p += 1;
+        result |= ((group & 127) as u32) << shift;
+        shift += 7;
+        if group < 128 {
+            break;
+        }
+    }
+    Ok(result)
 }
 
 /// The shared meshoptimizer triangle-FIFO decode loop, reading the `code` and

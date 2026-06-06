@@ -643,6 +643,37 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec P1-HARDEN split-index varbyte panic
+**Committed:** P1-HARDEN closes the 34-model decoder panic bucket. The root
+cause was the MeshCodec split index decoder calling `decode_vbyte_checked`,
+which only checked the first byte and then delegated to the unchecked
+meshoptimizer varbyte reader. A malformed split data stream with a continuation
+lead byte but no continuation byte could panic at `src/meshopt/index.rs:35`
+instead of returning a typed error.
+
+Durable evidence: `local-assets/re/FINDINGS.md` UPDATE 70 records the
+backtrace capture and post-fix sweep. The new fixture-free regression
+`meshopt::tests::index_split_stream_rejects_truncated_varbyte_continuation`
+feeds both missing-first-varbyte and missing-continuation-byte shapes through
+`decode_index_buffer_split`; both now return typed `MeshoptError::Truncated`.
+
+Ignored corpus sweep still fails structurally by design but the panic depth is
+now **0**: **12,395 seen; 278 no-FMSH/no mesh; 319 decoded clean; 11,798
+failures; 152 distinct failure classes**. The former 34 panics moved into typed
+index failures: `index decode truncated stream` is **738** and `index-decode`
+depth is **1,231**.
+
+Verification: `cargo test --lib meshopt::tests::index_split_stream_rejects_truncated_varbyte_continuation`
+passed 1/1; `cargo test --test mc_vertex_decode_oracle -- --ignored
+--nocapture` passed 2/2; `cargo test --test mc_vertex_decode_sweep` passed 2/2
+non-ignored tests. Full gate:
+`All green: 307 lib unit (incl. 160 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Next: P1-HARDEN is complete. P1-HEAD-5 `UnobservedDirectionZeroDirectPath`
+remains blocked by FINDINGS UPDATE 69 unless the direction-zero writer targets
+are explicitly allowed as part of the kernel chunk or the checkpoint ordering is
+revised.
+
 ### 2026-06-06 - MeshCodec P1-METRIC trough progress metrics
 **Committed:** P1-METRIC adds harness-only progress reporting to
 `tests/mc_vertex_decode_sweep.rs`: a distinct normalized failure-class count
