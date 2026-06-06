@@ -20,11 +20,11 @@ use nx_layout_toolbox::{
             byte_group_read, decode_raw_window, decode_zstd_window,
             decode_zstd_window_with_history, parse_sub_block_header, parse_super_block_trailer,
             state0_table_builder, vertex_attribute_driver_setup, vertex_attribute_writer_loop_step,
-            vertex_kernel_state4_entry, vertex_match_table, ByteGroupReadSpec, ByteGroupReadState,
-            ByteGroupTransformState, ForwardReader, RansStateBuffer, RansThreeLaneReader,
-            TableBuild, VertexAttributeDriverError, VertexAttributeDriverState,
-            VertexAttributeWriterLoopError, VertexAttributeWriterTable, VertexMatchTableSpec,
-            VertexMatchTableState,
+            vertex_kernel_state4_entry_from_table, vertex_match_table, ByteGroupReadSpec,
+            ByteGroupReadState, ByteGroupTransformState, ForwardReader, RansStateBuffer,
+            RansThreeLaneReader, TableBuild, VertexAttributeDriverError,
+            VertexAttributeDriverState, VertexAttributeWriterLoopError, VertexAttributeWriterTable,
+            VertexKernelState4EntrySpec, VertexMatchTableSpec, VertexMatchTableState,
         },
         read_mc, read_mesh_section, MeshSection,
     },
@@ -558,7 +558,7 @@ fn state4_entry_from_payload(
         ));
     }
     let mut forward = ForwardReader::new(payload, pos);
-    let _sub_block_count = forward.varint();
+    let sub_block_count = forward.varint();
     let header =
         parse_sub_block_header(&mut forward).ok_or_else(|| "empty first sub-block".to_string())?;
     let table = state0_table_builder(
@@ -586,9 +586,17 @@ fn state4_entry_from_payload(
         segment_state: RansStateBuffer::cold(),
         selector2_history: Vec::new(),
     };
-    let entry =
-        vertex_kernel_state4_entry(payload, &mut byte_state, header.count as usize, u32::MAX)
-            .map_err(|error| format!("0x10f90d4 state-4 entry: {error:?}"))?;
+    let entry = vertex_kernel_state4_entry_from_table(
+        payload,
+        &mut byte_state,
+        VertexKernelState4EntrySpec {
+            first_header: header,
+            first_table: &table,
+            remaining_subblocks: (sub_block_count as usize).saturating_sub(1),
+            reverse_mode: u32::MAX,
+        },
+    )
+    .map_err(|error| format!("0x10f90d4 state-4 entry: {error:?}"))?;
     if byte_state.reader != entry.reader || byte_state.stream_pos != entry.stream_pos {
         return Err("state-4 entry did not update byte-state consistently".to_string());
     }

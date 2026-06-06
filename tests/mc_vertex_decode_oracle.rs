@@ -13,11 +13,12 @@ use nx_layout_toolbox::mc::{
         byte_group_read, decode_raw_window, decode_zstd_window, decode_zstd_window_with_history,
         parse_sub_block_header, parse_super_block_trailer, state0_table_builder,
         vertex_attribute_driver_setup, vertex_attribute_writer_loop_step,
-        vertex_kernel_state4_entry, vertex_match_table, ByteGroupReadSpec, ByteGroupReadState,
-        ByteGroupTransformState, ForwardReader, RansStateBuffer, RansThreeLaneReader, TableBuild,
-        VertexAttributeDriverError, VertexAttributeDriverState, VertexAttributeWriterLoopError,
-        VertexAttributeWriterLoopStep, VertexAttributeWriterTable, VertexAttributeWriterTarget,
-        VertexMatchTableSpec, VertexMatchTableState,
+        vertex_kernel_state4_entry_from_table, vertex_match_table, ByteGroupReadSpec,
+        ByteGroupReadState, ByteGroupTransformState, ForwardReader, RansStateBuffer,
+        RansThreeLaneReader, TableBuild, VertexAttributeDriverError, VertexAttributeDriverState,
+        VertexAttributeWriterLoopError, VertexAttributeWriterLoopStep, VertexAttributeWriterTable,
+        VertexAttributeWriterTarget, VertexKernelState4EntrySpec, VertexMatchTableSpec,
+        VertexMatchTableState,
     },
     read_mc, read_mesh_section, MeshSection,
 };
@@ -563,7 +564,7 @@ fn state4_entry_from_payload(
     let (trailer0, trailer1, pos) = parse_super_block_trailer(payload);
     assert_eq!((trailer0, trailer1), (0, 0), "single super-block trailer");
     let mut forward = ForwardReader::new(payload, pos);
-    let _sub_block_count = forward.varint();
+    let sub_block_count = forward.varint();
     let header = parse_sub_block_header(&mut forward).expect("first sub-block header");
     let table = state0_table_builder(payload, forward.pos, sub_a_size - 8, 0, 0, 7);
     // The mode-1 auxiliary reverse readers are the two remaining substream
@@ -584,9 +585,17 @@ fn state4_entry_from_payload(
         segment_state: RansStateBuffer::cold(),
         selector2_history: Vec::new(),
     };
-    let entry =
-        vertex_kernel_state4_entry(payload, &mut byte_state, header.count as usize, u32::MAX)
-            .expect("0x10f90d4 -> 0x11104d0 state-4 entry");
+    let entry = vertex_kernel_state4_entry_from_table(
+        payload,
+        &mut byte_state,
+        VertexKernelState4EntrySpec {
+            first_header: header,
+            first_table: &table,
+            remaining_subblocks: (sub_block_count as usize).saturating_sub(1),
+            reverse_mode: u32::MAX,
+        },
+    )
+    .expect("0x10f90d4 -> 0x11104d0 state-4 entry");
     assert_eq!(byte_state.reader, entry.reader);
     assert_eq!(byte_state.stream_pos, entry.stream_pos);
     (header, table, byte_state)

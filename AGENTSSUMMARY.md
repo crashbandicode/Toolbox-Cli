@@ -643,6 +643,47 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec P1-HEAD-1 state-3 index leaf before state 4
+**Committed:** P1-HEAD-1 ports the validated Bee-shaped state-machine branch
+where a state-3 index leaf runs before the first state-4 entry. This is a
+partial head-class port, not closure of P1-HEAD-1.
+
+Durable evidence: `capture_phase1_decision_bit.py` captured
+`Animal_Bee.Bee.bfres.mc`; `verify_phase1_decision_bit.py` replays the captured
+transition **1/1**. The disassembly correction is that `0x10f900c` branches to
+`0x10f9080` without executing the `0x10f9010..0x10f9020` direction-bit consume,
+so the state-3 path must use the one-bit-rewound reader before calling
+`0x10f9690 -> 0x10fa980`. The first leaf reads zstd code window `P+14` size 106
+with regenerated size 203, consumes unary 0, then `0x10f8c58..0x10f8c1c` skips
+the raw index-data window `P+122..P+706`. The next state-0 table reaches the
+captured decision reader at `P+2429/0x3422f426c9ac0000/44`; the carried quota
+then lets the state-4 leaf skip code refill and consume unary 1 plus raw data
+window `P+719` size 2.
+
+Rust summary: added `vertex_kernel_state4_entry_from_table`, keeping the
+original direct `vertex_kernel_state4_entry` for Bear/Bass/Dragonfly. The new
+helper validates the single skipped index-leaf path and guards the unobserved
+state-machine variants (`UnobservedIndexSubmeshCount`, non-zero index-leaf
+unary, full-size post-index data window, multiple skipped leaves, zstd decode
+failure, and carried-quota refill). Fixture-free golden
+`vertex_kernel_state4_entry_bee_skips_index_leaf` embeds the minimal Bee
+payload ranges inline and proves the final state-4 entry is
+`P+2427/0x422f426c9ac02d10/56`, stream `P+721`.
+
+Verification: `python local-assets/re/verify_phase1_decision_bit.py` passed
+Bee replay 1/1; `cargo test --lib mc::geometry::tests::vertex_kernel_state4_entry`
+passed 3/3; ignored `mc_vertex_decode_oracle` passed 2/2 for
+Bear/Bass/Dragonfly; full gate:
+`All green: 300 lib unit (incl. 154 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Phase 1 re-sweep still fails by design with **12,395 seen; 278 no-FMSH/no mesh;
+315 decoded clean; 11,802 failures**. `UnobservedDecisionBit(1)` dropped from
+3,722 to **1,222**; Bee now reaches `0x11106d0` and rejects as
+`MatchIndexOutOfBounds { index: 63, count: 56 }`. The new head class is
+`0x10f90d4 state-4 entry: UnobservedIndexSubmeshCount(2)` at **2,736**. Next:
+capture and replay that state-3 multi-submesh population before touching any
+dispatch tail.
+
 ### 2026-06-06 - MeshCodec P1-17 dispatch 39 writer `0x10fe4d0`
 **Committed:** P1-17 ports dispatch 39's writer target `0x10fe4d0` as the
 two-u32 direct/matched delta tail. Static table slot 39 uses the shared

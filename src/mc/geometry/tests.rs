@@ -5486,6 +5486,128 @@ fn vertex_kernel_state4_entry_bear_control_bits() {
     assert_ne!(skip_only_state.reader, entry.reader);
 }
 
+/// P1-HEAD-1 state-3 index leaf before the first state-4 entry.
+///
+/// Provenance: `capture_phase1_decision_bit.py`, `Animal_Bee.Bee.bfres.mc`.
+/// The trace reaches `0x10f9690 -> 0x10fa980` once from
+/// `0x10f8b60..0x10f8b94` before the `0x10f90d4` decision site. The first leaf
+/// decodes the zstd code window at `P+14` (regenerated size 203), consumes unary
+/// `1`, then `0x10f8c58..0x10f8c1c` consumes a raw index-data window from
+/// `P+122..P+706`. The next state-0 table lands exactly on the captured
+/// decision reader, and the carried code quota means the state-4 leaf starts at
+/// the unary read instead of refilling the code window. This rules out both the
+/// old "read a decision bit immediately after the first table" cut and the
+/// tempting "always refill the code window at state 4" cut.
+#[test]
+fn vertex_kernel_state4_entry_bee_skips_index_leaf() {
+    let payload = sparse_payload(
+        2458,
+        &[
+            (
+                13,
+                concat!(
+                    "6a9206141ac0251d9bfe7fd56ffa4d7f9b56dd94c010401a310d48f2965b06bd950c",
+                    "ae95c2f5d672a06b54f3e211818c832e6eb8fff87a0f7a0b90226a5863f26c806b",
+                    "f33227367dc445823a8aa815c6f9ede10509005917125208829c39a67480022ce",
+                    "3563680bd110e0b",
+                ),
+            ),
+            (120, "844814"),
+            (706, "010101836900814908000c0002701481"),
+            (2427, "f729ad91824c13102dc09a6c422f42130e72a8"),
+        ],
+    );
+    let first_header = SubBlockHeader {
+        count: 1,
+        a: 1,
+        b: 0,
+        c: 1,
+        d: 120,
+        e: 0,
+        f: 120,
+    };
+    let first_table = TableBuild {
+        fwd: 13,
+        rev_ptr: 2438,
+        rev_acc: 0x8cbd_83e4_965e_a000,
+        rev_bitpos: 46,
+        w8: 56,
+        symbols: 4,
+        dir_bit: 0,
+        entries: Vec::new(),
+        offsets: Vec::new(),
+        cols: Vec::new(),
+        longs: Vec::new(),
+        byte_group_total: 0,
+        max_prod: 0,
+    };
+    let mut state = byte_group_state(
+        RansThreeLaneReader {
+            ptr: 2438,
+            acc: 0x465e_c1f2_4b2f_5000,
+            bitpos: 47,
+        },
+        13,
+    );
+
+    let entry = vertex_kernel_state4_entry_from_table(
+        &payload,
+        &mut state,
+        VertexKernelState4EntrySpec {
+            first_header,
+            first_table: &first_table,
+            remaining_subblocks: 11,
+            reverse_mode: u32::MAX,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(entry.bits, vec![0, 1, 0, 0, 0, 1, 1]);
+    assert_eq!(entry.skipped_index_leaves.len(), 1);
+    assert_eq!(
+        entry.skipped_index_leaves[0].code_window,
+        VertexKernelWindow {
+            flag: 0,
+            src_start: 14,
+            src_size: 106,
+            next_stream_pos: 120,
+        }
+    );
+    assert_eq!(entry.skipped_index_leaves[0].code_regenerated_size, 203);
+    assert_eq!(entry.skipped_index_leaves[0].unary, 0);
+    assert_eq!(
+        entry.skipped_index_leaves[0].data_window,
+        VertexKernelWindow {
+            flag: 0,
+            src_start: 122,
+            src_size: 584,
+            next_stream_pos: 706,
+        }
+    );
+    assert_eq!(
+        entry.data_window,
+        VertexKernelWindow {
+            flag: 1,
+            src_start: 719,
+            src_size: 2,
+            next_stream_pos: 721,
+        }
+    );
+    assert_eq!(
+        (entry.reader, entry.stream_pos),
+        (
+            RansThreeLaneReader {
+                ptr: 2427,
+                acc: 0x422f_426c_9ac0_2d10,
+                bitpos: 56,
+            },
+            721,
+        )
+    );
+    assert_eq!(state.reader, entry.reader);
+    assert_eq!(state.stream_pos, entry.stream_pos);
+}
+
 #[test]
 fn vertex_kernel_state4_entry_rejects_malformed_inputs() {
     let mut state = byte_group_state(
