@@ -643,6 +643,43 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-05 - MeshCodec P1-11 dispatch 46 writer `0x10ffdb0`
+**Committed:** P1-11 ports dispatch 46's writer target `0x10ffdb0` as a
+three-byte signed direct/matched delta transform tail. Static table slot 46
+uses setup `0x10fc4e0`; the port maps it through the two-source split setup
+family and wires the writer-table call to
+`transform_tail_i8x3_direct_delta_into`.
+
+Durable evidence: gitignored
+`local-assets/re/capture_phase1_dispatch_46_interstage.py` captured
+Animal_Grasshopper.Grasshopper current 4 with dispatch 46, setup
+`0x10fc4e0`, writer `0x10ffdb0`, and descriptors `(0,3,100)` and
+`(0,3,164)`. `local-assets/re/capture_phase1_transform_tail_10ffdb0.py`
+captured one writer call; `verify_transform_tail_10ffdb0.py` replays **1/1**
+with 100 direct literals, 164 matched-delta literals, zero copy units, 75
+sign-flipped matched literals, 264 match entries, and source usage 300/492
+bytes. Discriminators no-direct, no-matched-delta, and no-sign-bits all fail
+1/1; no-copy fails 0/1 because the copy branch was not observed. FINDINGS
+UPDATE 56 records the capture, replay, guarded copy branch, and
+disassembly-citation details.
+
+Verification: `cargo test --lib i8x3_direct_delta` passed 4/4; `cargo test
+--lib vertex_attribute` passed 21/21; `cargo test --lib transform_tail` passed
+43/43; `cargo test --lib mc::geometry` passed 126/126; `cargo test` passed the
+full suite; `cargo clippy --all-targets` is clean; `cargo build
+--no-default-features` builds. Current full gate:
+`All green: 272 lib unit (incl. 126 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+The ignored byte-exact oracle gate also passed 2/2 for Bear/Bass/Dragonfly.
+
+Phase 1 re-sweep with `MC_MODEL_CORPUS` still fails by design but moved the
+coverage curve again: **12,395 seen; 278 no-FMSH/no mesh; 271 decoded clean;
+11,846 failures**. `UnobservedDispatch(46)` is gone. The unvalidated copy
+record branch is now an explicit typed guard: 67 total dispatch-46 writer-loop
+hits report `Delta(UnobservedRecordShape)`. Next independent dispatch-family
+ports are `UnobservedDispatch(20)` at 68, `UnobservedDispatch(79)` at 62, and
+`UnobservedDispatch(63)` at 57; the larger kernel decision/window branches from
+FINDINGS UPDATE 47 still dominate and remain a separate state-machine task.
+
 ### 2026-06-05 - MeshCodec P1-10 dispatch 29 writer `0x10fdb30`
 **Committed:** P1-10 ports dispatch 29's writer target `0x10fdb30` as a
 one-byte direct/matched delta transform tail. Static table slot 29 uses setup

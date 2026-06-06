@@ -577,6 +577,8 @@ pub enum VertexAttributeWriterTarget {
     Delta3Direct,
     /// `0x10fde00`.
     Delta4Direct,
+    /// `0x10ffdb0`.
+    I8x3DirectDelta,
     /// `0x1100c90`.
     U16x3Delta,
     /// `0x10fdfe0`.
@@ -1070,7 +1072,7 @@ fn vertex_attribute_source_descriptors(
         }
         // `0x10fc4e0`: split one varint into two same-width descriptors
         // (`0x10fc508..0x10fc534`).
-        29 | 30 | 31 | 32 | 35 | 58 => {
+        29 | 30 | 31 | 32 | 35 | 46 | 58 => {
             let split = read_vertex_source_setup_varint(payload, &mut byte_state.stream_pos)?;
             let remainder = vertex_split_remainder(dispatch, wrapper_ret, split)?;
             let writer = match dispatch {
@@ -1079,6 +1081,7 @@ fn vertex_attribute_source_descriptors(
                 31 => VertexAttributeWriterTarget::Delta3Direct,
                 32 => VertexAttributeWriterTarget::Delta4Direct,
                 35 => VertexAttributeWriterTarget::U16x2DirectDelta,
+                46 => VertexAttributeWriterTarget::I8x3DirectDelta,
                 58 => VertexAttributeWriterTarget::U16x3Delta,
                 _ => unreachable!(),
             };
@@ -1399,6 +1402,24 @@ pub fn vertex_attribute_apply_writer(
             transform_tail_delta1_direct_into(
                 out,
                 TransformTailDelta1DirectSpec {
+                    output_stride,
+                    block_index: spec.block_index,
+                    out_offset,
+                    records: &records,
+                    matches: spec.matches,
+                    source0,
+                    source1,
+                },
+            )
+            .map(vertex_delta_usage)
+            .map_err(VertexAttributeWriterError::Delta)
+        }
+        VertexAttributeWriterTarget::I8x3DirectDelta => {
+            let source0 = vertex_writer_source(spec.interstage, 0)?;
+            let source1 = vertex_writer_source(spec.interstage, 1)?;
+            transform_tail_i8x3_direct_delta_into(
+                out,
+                TransformTailI8x3DirectDeltaSpec {
                     output_stride,
                     block_index: spec.block_index,
                     out_offset,
