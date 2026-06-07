@@ -643,6 +643,40 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec DirectionZero compact aux-table scratch producer
+**Committed:** The `0x10fa980 -> 0x110ca30` compact split-index scratch producer
+landed as `meshopt::decode_index_buffer_split_aux_table`. This is the missing
+`ctx+0x220` aux table called out in FINDINGS UPDATE 75; the state-4
+`UnobservedDirectionZeroDirectPath` guard is intentionally still in place until
+the next chunk wires this table through the DirectionZero state-5 loop.
+
+Durable evidence: `local-assets/re/FINDINGS.md` UPDATE 76 records the
+enumerated scratch-producing Armor population from
+`local-assets/re/phase1_direction_zero_capture.json` and
+`local-assets/re/phase1_direction_zero_writer_loop_capture.json`.
+`local-assets/re/verify_kernel_scratch_10fa980.py` replays **2/2**: block 0
+uses count 1767, limit 584, 589 code bytes, 8 data bytes, and 501 nonzero aux
+entries; the carried block 1 uses count 5373, limit 1611, 1791 code bytes,
+48 data bytes, and 1342 nonzero aux entries.
+
+Fixture-free coverage:
+`index_split_aux_table_direction_zero_prefix` hardcodes the compact Armor code
+prefix and proves the edge-backed `0x10` case stores the previous triangle's
+opposite vertex in the low aux field; `index_split_aux_table_rejects_malformed_inputs`
+guards non-triangle counts, truncated code, truncated data, aux-table bounds, and
+unseeded edge FIFO use.
+
+Verification: `cargo test --lib index_split_aux_table` passed 2/2;
+`cargo test --lib index_split_stream` passed 3/3;
+`cargo test --lib mc::geometry` passed 178/178;
+`python local-assets/re/verify_kernel_scratch_10fa980.py` passed 2/2.
+Full gate:
+`All green: 327 lib unit (incl. 178 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Next: wire the validated aux table into `vertex_kernel_state4_entry_from_table`
+and lift only the observed DirectionZero branch, then rerun the guard population
+and corpus histogram.
+
 ### 2026-06-06 - MeshCodec DirectionZero dispatch 104 u16x2/f16x3 predictor prerequisite
 **Committed:** The next UPDATE 69 writer prerequisite landed:
 dispatch 104 maps through setup `0x1108200` to the u16x2/f16x3 predictor

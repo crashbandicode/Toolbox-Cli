@@ -83,6 +83,15 @@ fn write_triangle(out: &mut [u8], i: usize, index_size: usize, a: u32, b: u32, c
 type EdgeFifo = [[u32; 2]; 16];
 type VertexFifo = [u32; 16];
 
+#[derive(Clone, Copy)]
+struct AuxEdge {
+    first: u32,
+    second: u32,
+    opposite: u32,
+}
+
+type AuxEdgeFifo = [AuxEdge; 16];
+
 fn get_edge_fifo(fifo: &EdgeFifo, a: u32, b: u32, c: u32, offset: usize) -> i32 {
     for i in 0..16 {
         let index = (offset.wrapping_sub(1).wrapping_sub(i)) & 15;
@@ -104,6 +113,11 @@ fn get_edge_fifo(fifo: &EdgeFifo, a: u32, b: u32, c: u32, offset: usize) -> i32 
 fn push_edge_fifo(fifo: &mut EdgeFifo, a: u32, b: u32, offset: &mut usize) {
     fifo[*offset][0] = a;
     fifo[*offset][1] = b;
+    *offset = (*offset + 1) & 15;
+}
+
+fn push_aux_edge_fifo(fifo: &mut AuxEdgeFifo, edge: AuxEdge, offset: &mut usize) {
+    fifo[*offset] = edge;
     *offset = (*offset + 1) & 15;
 }
 
@@ -138,6 +152,63 @@ fn rotate_triangle(_a: u32, b: u32, c: u32, next: u32) -> usize {
     } else {
         0
     }
+}
+
+fn pack_aux_distances(low: u32, mid: u32, high: u32) -> u64 {
+    (low as u64 & 0x3f_ffff) | ((mid as u64 & 0x1f_ffff) << 22) | ((high as u64 & 0x1f_ffff) << 43)
+}
+
+fn max3(a: u32, b: u32, c: u32) -> u32 {
+    a.max(b).max(c)
+}
+
+fn checked_aux_index(index: u32, vertex_limit: usize) -> Result<usize> {
+    let index = index as usize;
+    if index >= vertex_limit {
+        return Err(MeshoptError::Invalid(format!(
+            "aux index {index} outside table length {vertex_limit}"
+        )));
+    }
+    Ok(index)
+}
+
+fn record_fresh_aux_triangle(aux: &mut [u64], a: u32, b: u32, c: u32) -> Result<()> {
+    let max_vertex = max3(a, b, c);
+    let index = checked_aux_index(max_vertex, aux.len())?;
+    if aux[index] & 0x3f_ffff != 0 {
+        return Ok(());
+    }
+
+    let (first, second) = if max_vertex == a {
+        (b, c)
+    } else if max_vertex == b {
+        (c, a)
+    } else {
+        (a, b)
+    };
+    aux[index] = pack_aux_distances(0, max_vertex - first, max_vertex - second);
+    Ok(())
+}
+
+fn record_edge_aux_triangle(aux: &mut [u64], edge: AuxEdge, new_vertex: u32) -> Result<()> {
+    let max_vertex = max3(edge.first, edge.second, new_vertex);
+    let index = checked_aux_index(max_vertex, aux.len())?;
+    if aux[index] & 0x3f_ffff != 0 {
+        return Ok(());
+    }
+
+    aux[index] = if max_vertex == new_vertex {
+        pack_aux_distances(
+            new_vertex.saturating_sub(edge.opposite),
+            new_vertex - edge.first,
+            new_vertex - edge.second,
+        )
+    } else if max_vertex == edge.first {
+        pack_aux_distances(0, edge.first - edge.second, edge.first - new_vertex)
+    } else {
+        pack_aux_distances(0, edge.second - new_vertex, edge.second - edge.first)
+    };
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +549,243 @@ pub fn decode_index_buffer_split_used(
         &CODE_AUX_ENCODING_TABLE,
         fecmax,
     )
+}
+
+/// Decode the MeshCodec `0x110ca30` split index helper's aux-table side
+/// effect. This is the compact sibling of [`decode_index_buffer_split_used`]:
+/// it walks the same meshopt 0.15 triangle FIFO stream but materializes the
+/// per-vertex three-distance table that DirectionZero state-5 predictor writers
+/// read through `ctx+0x220`.
+///
+/// The observed `0x10fa980 -> 0x110ca30` calls use the version-0 FIFO boundary
+/// and a zeroed aux table. The returned tuple is `(aux_table, code_used,
+/// data_used)`.
+pub fn decode_index_buffer_split_aux_table(
+    index_count: usize,
+    code: &[u8],
+    data: &[u8],
+    vertex_limit: usize,
+) -> Result<(Vec<u64>, usize, usize)> {
+    if !index_count.is_multiple_of(3) {
+        return Err(MeshoptError::Invalid(format!(
+            "index_count {index_count} must be a multiple of 3"
+        )));
+    }
+
+    let mut edgefifo = [AuxEdge {
+        first: u32::MAX,
+        second: u32::MAX,
+        opposite: u32::MAX,
+    }; 16];
+    let mut vertexfifo: VertexFifo = [u32::MAX; 16];
+    let mut edgefifooffset = 0usize;
+    let mut vertexfifooffset = 0usize;
+    let mut next = 0u32;
+    let mut last = 0u32;
+    let mut aux = vec![0u64; vertex_limit];
+
+    let mut cp = 0usize;
+    let mut dp = 0usize;
+    let mut i = 0usize;
+    while i < index_count {
+        if cp >= code.len() {
+            return Err(MeshoptError::Truncated {
+                what: "index code stream",
+                have: code.len(),
+                need: cp + 1,
+            });
+        }
+        let codetri = code[cp];
+        cp += 1;
+
+        if codetri < 0xf0 {
+            let edge = edgefifo[(edgefifooffset
+                .wrapping_sub(1)
+                .wrapping_sub((codetri >> 4) as usize))
+                & 15];
+            let fec = (codetri & 15) as i32;
+            let c = if fec < 15 {
+                let cf =
+                    vertexfifo[(vertexfifooffset.wrapping_sub(1).wrapping_sub(fec as usize)) & 15];
+                let c = if fec == 0 { next } else { cf };
+                let fec0 = (fec == 0) as usize;
+                next = next.wrapping_add(fec0 as u32);
+                push_vertex_fifo(&mut vertexfifo, c, &mut vertexfifooffset, fec0);
+                c
+            } else {
+                last = decode_index_split_stream(data, &mut dp, last)?;
+                push_vertex_fifo(&mut vertexfifo, last, &mut vertexfifooffset, 1);
+                last
+            };
+
+            push_aux_edge_fifo(
+                &mut edgefifo,
+                AuxEdge {
+                    first: c,
+                    second: edge.second,
+                    opposite: edge.first,
+                },
+                &mut edgefifooffset,
+            );
+            push_aux_edge_fifo(
+                &mut edgefifo,
+                AuxEdge {
+                    first: edge.first,
+                    second: c,
+                    opposite: edge.second,
+                },
+                &mut edgefifooffset,
+            );
+            record_edge_aux_triangle(&mut aux, edge, c)?;
+        } else if codetri < 0xfe {
+            let codeaux = CODE_AUX_ENCODING_TABLE[(codetri & 15) as usize];
+            let feb = (codeaux >> 4) as usize;
+            let fec = (codeaux & 15) as usize;
+
+            let a = next;
+            next = next.wrapping_add(1);
+
+            let bf = vertexfifo[(vertexfifooffset.wrapping_sub(feb)) & 15];
+            let b = if feb == 0 { next } else { bf };
+            let feb0 = (feb == 0) as usize;
+            next = next.wrapping_add(feb0 as u32);
+
+            let cf = vertexfifo[(vertexfifooffset.wrapping_sub(fec)) & 15];
+            let c = if fec == 0 { next } else { cf };
+            let fec0 = (fec == 0) as usize;
+            next = next.wrapping_add(fec0 as u32);
+
+            push_vertex_fifo(&mut vertexfifo, a, &mut vertexfifooffset, 1);
+            push_vertex_fifo(&mut vertexfifo, b, &mut vertexfifooffset, feb0);
+            push_vertex_fifo(&mut vertexfifo, c, &mut vertexfifooffset, fec0);
+            push_aux_edge_fifo(
+                &mut edgefifo,
+                AuxEdge {
+                    first: b,
+                    second: a,
+                    opposite: c,
+                },
+                &mut edgefifooffset,
+            );
+            push_aux_edge_fifo(
+                &mut edgefifo,
+                AuxEdge {
+                    first: c,
+                    second: b,
+                    opposite: a,
+                },
+                &mut edgefifooffset,
+            );
+            push_aux_edge_fifo(
+                &mut edgefifo,
+                AuxEdge {
+                    first: a,
+                    second: c,
+                    opposite: b,
+                },
+                &mut edgefifooffset,
+            );
+            record_fresh_aux_triangle(&mut aux, a, b, c)?;
+        } else {
+            if dp >= data.len() {
+                return Err(MeshoptError::Truncated {
+                    what: "index data stream",
+                    have: data.len(),
+                    need: dp + 1,
+                });
+            }
+            let codeaux = data[dp];
+            dp += 1;
+            let fea = if codetri == 0xfe { 0usize } else { 15 };
+            let feb = (codeaux >> 4) as usize;
+            let fec = (codeaux & 15) as usize;
+
+            if codeaux == 0 {
+                next = 0;
+            }
+
+            let mut a = if fea == 0 {
+                let t = next;
+                next = next.wrapping_add(1);
+                t
+            } else {
+                0
+            };
+            let mut b = if feb == 0 {
+                let t = next;
+                next = next.wrapping_add(1);
+                t
+            } else {
+                vertexfifo[(vertexfifooffset.wrapping_sub(feb)) & 15]
+            };
+            let mut c = if fec == 0 {
+                let t = next;
+                next = next.wrapping_add(1);
+                t
+            } else {
+                vertexfifo[(vertexfifooffset.wrapping_sub(fec)) & 15]
+            };
+
+            if fea == 15 {
+                last = decode_index_split_stream(data, &mut dp, last)?;
+                a = last;
+            }
+            if feb == 15 {
+                last = decode_index_split_stream(data, &mut dp, last)?;
+                b = last;
+            }
+            if fec == 15 {
+                last = decode_index_split_stream(data, &mut dp, last)?;
+                c = last;
+            }
+
+            push_vertex_fifo(&mut vertexfifo, a, &mut vertexfifooffset, 1);
+            push_vertex_fifo(
+                &mut vertexfifo,
+                b,
+                &mut vertexfifooffset,
+                ((feb == 0) || (feb == 15)) as usize,
+            );
+            push_vertex_fifo(
+                &mut vertexfifo,
+                c,
+                &mut vertexfifooffset,
+                ((fec == 0) || (fec == 15)) as usize,
+            );
+            push_aux_edge_fifo(
+                &mut edgefifo,
+                AuxEdge {
+                    first: b,
+                    second: a,
+                    opposite: c,
+                },
+                &mut edgefifooffset,
+            );
+            push_aux_edge_fifo(
+                &mut edgefifo,
+                AuxEdge {
+                    first: c,
+                    second: b,
+                    opposite: a,
+                },
+                &mut edgefifooffset,
+            );
+            push_aux_edge_fifo(
+                &mut edgefifo,
+                AuxEdge {
+                    first: a,
+                    second: c,
+                    opposite: b,
+                },
+                &mut edgefifooffset,
+            );
+            record_fresh_aux_triangle(&mut aux, a, b, c)?;
+        }
+
+        i += 3;
+    }
+
+    Ok((aux, cp, dp))
 }
 
 // ---------------------------------------------------------------------------

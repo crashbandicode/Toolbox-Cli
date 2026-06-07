@@ -172,6 +172,61 @@ fn index_split_stream_single_triangle_vector() {
 }
 
 #[test]
+fn index_split_aux_table_direction_zero_prefix() {
+    // Provenance: `phase1_direction_zero_capture.json` +
+    // `phase1_direction_zero_writer_loop_capture.json`, Armor_009 first
+    // `0x10fa980 -> 0x110ca30` scratch-producing leaf. The compact prefix is
+    // the first six decoded code bytes from the zstd code window: five fresh
+    // triangles followed by edge-backed code `0x10`, which stores the previous
+    // triangle's opposite vertex in the low aux field. This rules out the
+    // plausible but wrong "pack only the current triangle's max distances" cut.
+    let (aux, code_used, data_used) =
+        decode_index_buffer_split_aux_table(18, &[0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0x10], &[], 20)
+            .unwrap();
+
+    assert_eq!(code_used, 6);
+    assert_eq!(data_used, 0);
+    assert_eq!(aux[2], 0x0000_0800_0080_0000);
+    assert_eq!(aux[5], 0x0000_0800_0080_0000);
+    assert_eq!(aux[8], 0x0000_0800_0080_0000);
+    assert_eq!(aux[11], 0x0000_0800_0080_0000);
+    assert_eq!(aux[14], 0x0000_0800_0080_0000);
+    assert_eq!(aux[15], 0x0000_1000_0040_0003);
+}
+
+#[test]
+fn index_split_aux_table_rejects_malformed_inputs() {
+    assert!(matches!(
+        decode_index_buffer_split_aux_table(4, &[0xf0, 0xf0], &[], 8),
+        Err(MeshoptError::Invalid(_))
+    ));
+    assert!(matches!(
+        decode_index_buffer_split_aux_table(3, &[], &[], 8),
+        Err(MeshoptError::Truncated {
+            what: "index code stream",
+            have: 0,
+            need: 1
+        })
+    ));
+    assert!(matches!(
+        decode_index_buffer_split_aux_table(3, &[0xff], &[], 8),
+        Err(MeshoptError::Truncated {
+            what: "index data stream",
+            have: 0,
+            need: 1
+        })
+    ));
+    assert!(matches!(
+        decode_index_buffer_split_aux_table(3, &[0xf0], &[], 2),
+        Err(MeshoptError::Invalid(_))
+    ));
+    assert!(matches!(
+        decode_index_buffer_split_aux_table(3, &[0x10], &[], 20),
+        Err(MeshoptError::Invalid(_))
+    ));
+}
+
+#[test]
 fn index_split_stream_rejects_truncated_varbyte_continuation() {
     // `0xfe` plus codeaux low nibble 15 asks for a free-index var-byte from the
     // split data stream after the codeaux byte. The corpus panic bucket hit the
