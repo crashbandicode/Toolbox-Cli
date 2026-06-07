@@ -24,7 +24,8 @@ use nx_layout_toolbox::{
             ByteGroupReadState, ByteGroupTransformState, ForwardReader, RansStateBuffer,
             RansThreeLaneReader, TableBuild, VertexAttributeDriverError,
             VertexAttributeDriverState, VertexAttributeWriterLoopError, VertexAttributeWriterTable,
-            VertexKernelState4EntrySpec, VertexMatchTableSpec, VertexMatchTableState,
+            VertexKernelState4Entry, VertexKernelState4EntrySpec, VertexMatchTableSpec,
+            VertexMatchTableState,
         },
         read_mc, read_mesh_section, MeshSection,
     },
@@ -634,8 +635,9 @@ fn decode_buf_b_from_payload(
     section: &MeshSection,
     payload: &[u8],
 ) -> Result<VertexBufBDecode, String> {
-    let (_header, table, mut byte_state) =
+    let (_header, table, mut byte_state, entry) =
         state4_entry_from_payload(payload, section.first_chunk.sub_a_size as usize)?;
+    let aux_table = entry.aux_table;
     let setup = state4_setup_streams(&mut byte_state, payload)?;
     let mut match_state = VertexMatchTableState {
         base: 0,
@@ -687,7 +689,7 @@ fn decode_buf_b_from_payload(
             payload,
             VertexAttributeWriterTable {
                 matches: &matches,
-                aux_table: &[],
+                aux_table: &aux_table,
                 block_index: 0,
             },
         ) {
@@ -746,6 +748,7 @@ fn state4_entry_from_payload(
         nx_layout_toolbox::mc::geometry::SubBlockHeader,
         TableBuild,
         ByteGroupReadState,
+        VertexKernelState4Entry,
     ),
     String,
 > {
@@ -798,7 +801,7 @@ fn state4_entry_from_payload(
     if byte_state.reader != entry.reader || byte_state.stream_pos != entry.stream_pos {
         return Err("state-4 entry did not update byte-state consistently".to_string());
     }
-    Ok((header, table, byte_state))
+    Ok((header, table, byte_state, entry))
 }
 
 fn state4_setup_streams(

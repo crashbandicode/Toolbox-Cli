@@ -5,6 +5,7 @@ use super::transport::{
     decode_zstd_window, parse_sub_block_header, state0_table_builder, ForwardReader,
     SubBlockHeader, TableBuild,
 };
+use crate::meshopt;
 /// One payload window located by the CP5d vertex/index kernel path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VertexKernelWindow {
@@ -64,6 +65,9 @@ pub struct VertexKernelState4Entry {
     pub skipped_index_leaves: Vec<VertexKernelSkippedIndexLeaf>,
     /// Optional second-submesh continuation header.
     pub continuation: Option<VertexKernelContinuation>,
+    /// Optional compact split-index aux table materialized for DirectionZero
+    /// predictor writers through `ctx+0x220`.
+    pub aux_table: Vec<u64>,
     /// Reader state at the `0x11104d0` state-4 setup entry.
     pub reader: RansThreeLaneReader,
     /// Forward stream position at the `0x11104d0` state-4 setup entry.
@@ -93,8 +97,6 @@ pub enum VertexKernelStateError {
     UnobservedWindowFlag { window: &'static str, flag: u8 },
     /// The second-submesh continuation selected an unobserved leaf.
     UnobservedContinuationModeKind { mode: u8, kind: u8 },
-    /// Branch-clear direction-zero leaves run more state-machine work before state 4.
-    UnobservedDirectionZeroDirectPath,
     /// Current captures cover a single pre-state-4 index leaf.
     UnobservedMultipleIndexLeaves,
     /// Current captures cover one submesh in the skipped index leaf.
@@ -111,6 +113,8 @@ pub enum VertexKernelStateError {
     WindowRegeneratedTooSmall { needed: usize, actual: usize },
     /// The observed cursor replay only covers a carried code quota satisfying the leaf.
     UnobservedKernelCodeRefill { needed: usize, available: usize },
+    /// The compact split-index aux-table side effect rejected the observed leaf.
+    AuxTableDecodeFailed(String),
 }
 
 fn checked_vertex_kernel_u64_le(payload: &[u8], ptr: usize) -> Result<u64, VertexKernelStateError> {
@@ -358,6 +362,40 @@ fn kernel_leaf_code_need(count: u32) -> Result<usize, VertexKernelStateError> {
         .ok_or(VertexKernelStateError::ArithmeticOverflow)
 }
 
+fn materialize_direction_zero_aux_table(
+    payload: &[u8],
+    code_fwd_pos: usize,
+    data_window: &VertexKernelWindow,
+    index_count: usize,
+    vertex_limit: usize,
+) -> Result<Vec<u64>, VertexKernelStateError> {
+    let (code, _) = decode_zstd_window(payload, code_fwd_pos)
+        .map_err(|_| VertexKernelStateError::WindowDecodeFailed("aux_code"))?;
+    let data = match data_window.flag {
+        0 if data_window.src_size == 0 => Vec::new(),
+        1 => {
+            let end = data_window
+                .src_start
+                .checked_add(data_window.src_size)
+                .ok_or(VertexKernelStateError::StreamTooShort)?;
+            payload
+                .get(data_window.src_start..end)
+                .ok_or(VertexKernelStateError::StreamTooShort)?
+                .to_vec()
+        }
+        flag => {
+            return Err(VertexKernelStateError::UnobservedWindowFlag {
+                window: "aux_data",
+                flag,
+            });
+        }
+    };
+    let (aux_table, _, _) =
+        meshopt::decode_index_buffer_split_aux_table(index_count, &code, &data, vertex_limit)
+            .map_err(|error| VertexKernelStateError::AuxTableDecodeFailed(format!("{error:?}")))?;
+    Ok(aux_table)
+}
+
 fn apply_state0_table_to_byte_state(table: &TableBuild, state: &mut ByteGroupReadState) {
     state.reader = RansThreeLaneReader {
         ptr: table.rev_ptr,
@@ -501,6 +539,7 @@ pub fn vertex_kernel_state4_entry(
         data_window,
         skipped_index_leaves: Vec::new(),
         continuation,
+        aux_table: Vec::new(),
         reader: state.reader,
         stream_pos: state.stream_pos,
     })
@@ -534,14 +573,20 @@ pub fn vertex_kernel_state4_entry_from_table(
 ) -> Result<VertexKernelState4Entry, VertexKernelStateError> {
     if spec.first_table.branch_bit == 0 {
         apply_state0_table_to_byte_state(spec.first_table, state);
-        let entry = vertex_kernel_state4_entry(
+        let mut entry = vertex_kernel_state4_entry(
             payload,
             state,
             spec.first_header.count as usize,
             spec.reverse_mode,
         )?;
-        if spec.first_table.dir_bit == 0 {
-            return Err(VertexKernelStateError::UnobservedDirectionZeroDirectPath);
+        if spec.first_table.dir_bit == 0 && entry.bits.first().copied() == Some(1) {
+            entry.aux_table = materialize_direction_zero_aux_table(
+                payload,
+                spec.first_table.fwd,
+                &entry.data_window,
+                spec.first_header.d as usize,
+                spec.first_table.w8 as usize,
+            )?;
         }
         return Ok(entry);
     }
@@ -668,6 +713,7 @@ fn vertex_kernel_state4_entry_with_carried_code_quota(
         data_window,
         skipped_index_leaves: Vec::new(),
         continuation: None,
+        aux_table: Vec::new(),
         reader: state.reader,
         stream_pos: state.stream_pos,
     })

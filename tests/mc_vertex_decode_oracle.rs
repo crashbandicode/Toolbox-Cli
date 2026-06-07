@@ -17,8 +17,8 @@ use nx_layout_toolbox::mc::{
         ByteGroupReadState, ByteGroupTransformState, ForwardReader, RansStateBuffer,
         RansThreeLaneReader, TableBuild, VertexAttributeDriverError, VertexAttributeDriverState,
         VertexAttributeWriterLoopError, VertexAttributeWriterLoopStep, VertexAttributeWriterTable,
-        VertexAttributeWriterTarget, VertexKernelState4EntrySpec, VertexMatchTableSpec,
-        VertexMatchTableState,
+        VertexAttributeWriterTarget, VertexKernelState4Entry, VertexKernelState4EntrySpec,
+        VertexMatchTableSpec, VertexMatchTableState,
     },
     read_mc, read_mesh_section, MeshSection,
 };
@@ -380,8 +380,9 @@ fn decode_buf_b_from_payload(
     let driver_json = json_file("vertex_driver_setup_capture.json");
     let driver_capture = model_row(&driver_json, case.model);
 
-    let (header, table, mut byte_state) =
+    let (header, table, mut byte_state, entry) =
         state4_entry_from_payload(payload, section.first_chunk.sub_a_size as usize);
+    let aux_table = entry.aux_table;
     assert!(header.count > 0, "{} first sub-block count", case.label);
     assert_table_matches_capture(&table, &driver_capture["table"]);
 
@@ -453,7 +454,7 @@ fn decode_buf_b_from_payload(
             payload,
             VertexAttributeWriterTable {
                 matches: &matches,
-                aux_table: &[],
+                aux_table: &aux_table,
                 block_index: 0,
             },
         ) {
@@ -561,6 +562,7 @@ fn state4_entry_from_payload(
     nx_layout_toolbox::mc::geometry::SubBlockHeader,
     TableBuild,
     ByteGroupReadState,
+    VertexKernelState4Entry,
 ) {
     let (trailer0, trailer1, pos) = parse_super_block_trailer(payload);
     assert_eq!((trailer0, trailer1), (0, 0), "single super-block trailer");
@@ -599,7 +601,7 @@ fn state4_entry_from_payload(
     .expect("0x10f90d4 -> 0x11104d0 state-4 entry");
     assert_eq!(byte_state.reader, entry.reader);
     assert_eq!(byte_state.stream_pos, entry.stream_pos);
-    (header, table, byte_state)
+    (header, table, byte_state, entry)
 }
 
 fn state4_setup_streams(

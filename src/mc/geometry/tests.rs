@@ -6597,6 +6597,36 @@ fn vertex_kernel_state4_entry_data_flag0_zstd_window() {
     assert_eq!(state.reader, entry.reader);
     assert_eq!(state.stream_pos, entry.stream_pos);
 
+    let mut direction_zero_state = byte_group_state(
+        RansThreeLaneReader {
+            ptr: 0,
+            acc: 0,
+            bitpos: 0,
+        },
+        0,
+    );
+    let direction_zero_table = TableBuild {
+        rev_acc: 0x9500_0264_2fcd_7000,
+        dir_bit: 0,
+        ..first_table.clone()
+    };
+    assert_eq!(
+        vertex_kernel_state4_entry_from_table(
+            &payload,
+            &mut direction_zero_state,
+            VertexKernelState4EntrySpec {
+                first_header,
+                first_table: &direction_zero_table,
+                remaining_subblocks: 8,
+                reverse_mode: u32::MAX,
+            },
+        ),
+        Err(VertexKernelStateError::UnobservedWindowFlag {
+            window: "aux_data",
+            flag: 0
+        })
+    );
+
     let mut malformed = payload;
     malformed[377] = 0;
     let mut malformed_state = byte_group_state(
@@ -6851,18 +6881,53 @@ fn vertex_kernel_state4_entry_unary0_count2_data_moves_to_continuation() {
     );
 }
 
-/// Direction-zero branch-clear tables run the first kernel leaf but do not
-/// immediately enter `0x11104d0`.
+/// Direction-zero branch-clear tables materialize the first kernel leaf's aux
+/// predictor table before the next state-machine step.
 ///
-/// Provenance: `capture_phase1_decision_bit1.py`,
-/// `Armor_009.Armor_009_Head.bfres.mc`. The first leaf is otherwise shaped like
-/// the direct state4 fixtures, but `ctx+0x118 == 0` sends the disassembly from
-/// `0x10f9180..0x10f9184` to the non-state4 path at `0x10f9220`.
+/// Provenance: `phase1_direction_zero_capture.json`,
+/// `Armor_009.Armor_009_Head.bfres.mc`. The first leaf reaches `0x10fa980`,
+/// and `ctx+0x118 == 0` makes `0x10f9220..0x10f9238` preserve the scratch table
+/// that predictor writers read through `ctx+0x220`.
 #[test]
-fn vertex_kernel_state4_entry_direction_zero_direct_path_is_guarded() {
+fn vertex_kernel_state4_entry_direction_zero_materializes_aux_table() {
     let payload = sparse_payload(
         23846,
-        &[(15, "895d"), (1262, "50"), (23836, "8000bdade870dbbaa87c")],
+        &[
+            (
+                15,
+                concat!(
+                    "895dd639a139606b920eb84d18e507bae008d116d641434bc21ab20c2e651110ee03973a2c13fb8b9d254d12f1df6d3c",
+                    "1bbf91d6c8aee3f1edffd608d9320584008c00970013a6ac3861d44ccf88a94ac0d408b8cf8945715a92311af9ef0fb8",
+                    "3c75baffb6dff80c18f549e67ef4f976a8eeceefee515dfa92b5fbcea4bbb34b57452f9d33e3328ea2d422a493723451",
+                    "535d2138934f256b92ae289f49719f76b55bf95cf7ee6957c54ca6ba9c79a67e1629185bb1ada71156c85ffaeea59dce",
+                    "2e9fefeceedfbeef021c343824f49c5c92b589e43f37d6dfca03a6895188dbdf9da1a6fa1760b47166bc8e86d29ade33",
+                    "7777fc6bbb23167fca8192ae53834539a10ca933fdfed3adc63215a33f2f0cfd25852ac52b10dfce8c0fac41ed9674ad",
+                    "f3b7d9ef1a5b9884fe7cda1b5dcd796afbce62234c8ad044376e64f7d99f70f3e839f97e3b5d5a9ec5caea066b4e06cf",
+                    "92b5506d01cf74f1918fe5b7c38d04082e18b003d326baf4d6f68ec00280b4836251854a28996552f993934c9584545b",
+                    "c4f90d0f5668915979d54c77bbbe8b7381baac15973865f7913e61e4545fef9bc5bd3e0affa2c293a3bb799f43f5c511",
+                    "d0dddaab78e255ee95fed59ae781d90258c0d40ab8d70e54bb7a26c9b345ba3f766dc6411a059207d85a4094ac553221",
+                    "354a13959faeb290ca476604053c1c6c3089cc88f24b8eecf5bf66ce74ce1d4f24090605c47862caa31625a124922e29",
+                    "c37aea985d98669c1a2f23045a5673c3481ec96345c9a606190f2937190c9b9e096362d413616c68bca4fcc91a5a70df",
+                    "773d04c12aea147a70ba025b21402748101665ea1192a274a17956c89a7212cd4222153047351225e5c38ad5a2301ccd",
+                    "b4966c8c0c3cd4d349a963ad2b2b2ed35ca7856a78f0c22c01811da8512d53cad08c480a93a403410843610c52cb7932",
+                    "a8391092443434adb1ecdf01d70330666dde01cb882620bd6625a0c78fb28f4aaacbf8d8ba5086731288854031a0036d",
+                    "2f5a733de42953b28d939bdb3c44d71044244365a9119f41c21217e6de5e3a5e96326d07f70b0f1403eca9ca4829e7e6",
+                    "43530f2a181841ee32b423f8b10a1ecf4465fd5f9de4549f45dac49c9df1b551212c0e329549a88413d792deaa497d0a",
+                    "aaa6abe6566854a94dd0f7967376bfe82fc6d9e78815a5cb373c99b2c1556148f130a2de1348bef118dde49c11e4d211",
+                    "663e8f82f0d33f856eedfbdf137e59908a9858b2c31ceed5d4e058f803d7bee34bfe568d915c9e0cf68330e480454748",
+                    "0f8b4f616584fc904e44df78213439fc9b64447d8a67e9eb97ebf134de66f017ab1fd0e1a49d7d3dda8e8e751403a14a",
+                    "d882d2e73c5a3cd4c6143fe10820451d3047013545cefe38e945c698025d7609a400ea9a0cfc4baed182dc43c18e2851",
+                    "c3ed4e4a2a0884add0502196cde4ae99229f702bb186e007d3e8d51422d926352396b2a49f345afb0b2b30a17b0be588",
+                    "132b626b668a421f7c45038aa378088df0048d42f1ae9f03c0fb4526cec849731e4e56910a572e019a9bf623cbf501dd",
+                    "8e75a174dddc3c81e3395b8b09ee065821ec059199415cc146dfd171cef1d6fb2fb66d3271caa52e9c4211c6b425533d",
+                    "3413154874a0d08d35c967dd4d1f7463510fce681052e7e936c40f0ccf8290dbd75b44d7d20dce7ddee54b3f18a8aab1",
+                    "9f3ffbbc61936d740033cf54641b9c3bbe06f6c617844e2e4089029dc566e90fd9d5bd2f1256cab8cd40dc216ced0250",
+                    "021002790279027910100410102003ae05fe140a0510102010021030058c20d20859799dae0202030307030203c00207",
+                    "02308601ca0107b8f90e106e1a01037a2e2d029f68e61a010302203005054401",
+                ),
+            ),
+            (23836, "8000bdade870dbbaa87c"),
+        ],
     );
     let first_header = SubBlockHeader {
         count: 1,
@@ -6898,19 +6963,57 @@ fn vertex_kernel_state4_entry_direction_zero_direct_path_is_guarded() {
         0,
     );
 
+    let entry = vertex_kernel_state4_entry_from_table(
+        &payload,
+        &mut state,
+        VertexKernelState4EntrySpec {
+            first_header,
+            first_table: &first_table,
+            remaining_subblocks: 42,
+            reverse_mode: u32::MAX,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(entry.bits, vec![1, 0, 0, 1, 1]);
     assert_eq!(
-        vertex_kernel_state4_entry_from_table(
-            &payload,
-            &mut state,
-            VertexKernelState4EntrySpec {
-                first_header,
-                first_table: &first_table,
-                remaining_subblocks: 42,
-                reverse_mode: u32::MAX,
-            },
-        ),
-        Err(VertexKernelStateError::UnobservedDirectionZeroDirectPath)
+        entry.code_window,
+        VertexKernelWindow {
+            flag: 0,
+            src_start: 17,
+            src_size: 1245,
+            next_stream_pos: 1262,
+        }
     );
+    assert_eq!(
+        entry.data_window,
+        VertexKernelWindow {
+            flag: 1,
+            src_start: 1263,
+            src_size: 80,
+            next_stream_pos: 1343,
+        }
+    );
+    assert_eq!(
+        (entry.reader, entry.stream_pos),
+        (
+            RansThreeLaneReader {
+                ptr: 23836,
+                acc: 0x7659_6a04_a98f_9516,
+                bitpos: 59,
+            },
+            1343,
+        )
+    );
+    assert_eq!(state.reader, entry.reader);
+    assert_eq!(state.stream_pos, entry.stream_pos);
+    assert_eq!(entry.aux_table.len(), 584);
+    assert_eq!(entry.aux_table.iter().filter(|&&v| v != 0).count(), 501);
+    assert_eq!(entry.aux_table[2], 0x0000_0800_0080_0000);
+    assert_eq!(entry.aux_table[15], 0x0000_1000_0040_0003);
+    assert_eq!(entry.aux_table[100], 0x0000_0800_00c0_0002);
+    assert_eq!(entry.aux_table[200], 0x0000_0800_0140_0002);
+    assert_eq!(entry.aux_table[583], 0x0000_0800_01c0_0004);
 }
 
 #[test]

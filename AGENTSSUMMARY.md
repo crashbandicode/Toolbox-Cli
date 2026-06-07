@@ -643,6 +643,46 @@ Standing backlog (no owner):
 
 ## Session log
 
+### 2026-06-06 - MeshCodec P1-HEAD-5a DirectionZero guard lift
+**Committed:** The `0x10f90d4` state-4 `UnobservedDirectionZeroDirectPath`
+guard was lifted for the observed branch-clear direct leaf. `VertexKernelState4Entry`
+now carries the compact aux table materialized from the first `0x10fa980`
+code/data windows, and the sweep/oracle writer harnesses pass that table through
+`VertexAttributeWriterTable` instead of an empty slice.
+
+Durable evidence: `local-assets/re/FINDINGS.md` UPDATE 77 records the
+post-lift corpus sweep. The previous `UnobservedDirectionZeroDirectPath` class
+of 2635 is gone. The ignored sweep still fails structurally, with **12,395**
+seen, **278** no mesh, **326** clean, **11,791** failures, **159** distinct
+classes, and kernel-state4-entry depth down from 6485 to **4374**. The largest
+residual classes are `UnobservedIndexSubmeshCount(2)` at 994,
+`UnobservedIndexLeafUnary(1)` at 862, `index decode truncated stream` at 743,
+`history-backed zstd tail decode error` at 664, and `aux_data` flag 0 at 524.
+
+Fixture-free coverage:
+`vertex_kernel_state4_entry_direction_zero_materializes_aux_table` embeds the
+Armor_009 first DirectionZero leaf's real zstd code window, raw data window,
+reverse seed, reader/stream result, and selected aux entries. It proves the
+guarded cut is gone and that the state4 entry returns the 584-entry aux table
+with 501 nonzero entries. The earlier fixture-free
+`index_split_aux_table_direction_zero_prefix` remains the compact discriminator
+for the edge-backed aux packing rule. The existing
+`vertex_kernel_state4_entry_data_flag0_zstd_window` fixture also forces a
+decision-bit-1 DirectionZero table and proves non-empty zstd data windows are
+still rejected as `aux_data` flag 0 instead of being guessed into raw aux data.
+
+Verification: `cargo test --lib vertex_kernel_state4_entry_direction_zero_materializes_aux_table`
+passed 1/1; `cargo test --lib mc::geometry` passed 178/178;
+`cargo test --test mc_vertex_decode_sweep` passed 2/2 non-ignored;
+`cargo test --test mc_vertex_decode_oracle -- --ignored --nocapture` passed 2/2;
+the ignored model sweep re-histogrammed and failed structurally with the counts
+above. Full gate:
+`All green: 327 lib unit (incl. 178 mc::geometry) + all integration; clippy --all-targets clean; --no-default-features builds.`
+
+Next: enumerate and port the new top kernel-state4-entry residual,
+`UnobservedIndexSubmeshCount(2)`, while keeping the 524 `aux_data` flag-0
+residual in view for the same DirectionZero population.
+
 ### 2026-06-06 - MeshCodec DirectionZero compact aux-table scratch producer
 **Committed:** The `0x10fa980 -> 0x110ca30` compact split-index scratch producer
 landed as `meshopt::decode_index_buffer_split_aux_table`. This is the missing
